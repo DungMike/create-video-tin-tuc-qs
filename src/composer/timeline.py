@@ -1,67 +1,124 @@
-import os
 import random
-from src.utils.logger import logger
+
 from src.config import Config
+from src.utils.ffmpeg_helper import FFmpegHelper
+from src.utils.logger import logger
+
 
 class TimelineComposer:
     def __init__(self, job_id: str, dirs: dict):
         self.job_id = job_id
-        self.temp_dir = dirs['temp']
+        self.temp_dir = dirs["temp"]
 
-    def create_timeline(self, vid_clips: list, img_clips: list, audio_duration: float) -> str:
-        """Arrange clips alternately to match audio duration and generate concat input file."""
-        random.shuffle(vid_clips)
-        random.shuffle(img_clips)
-        
-        timeline_clips = []
-        current_duration = 0.0
-        
-        def _get_clip_duration(clip_path):
-            import subprocess
-            cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", clip_path]
-            try:
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
-                return float(res.stdout.strip())
-            except:
-                return 0.0
+    def _effective_duration(self, items: list[dict]) -> float:
+        overlap_count = 0
+        for left, right in zip(items, items[1:]):
+            if left["kind"] == "image" and right["kind"] == "image":
+                overlap_count += 1
+        raw = sum(float(item["duration"]) for item in items)
+        return raw - (overlap_count * Config.IMAGE_TRANSITION_DURATION)
 
+    def _timeline_segment(self, clip: dict, timeline_index: int) -> dict:
+        segment = dict(clip)
+        source_id = str(clip.get("id") or clip.get("kind") or "segment")
+        segment["source_id"] = source_id
+        segment["id"] = f"{source_id}_timeline_{timeline_index}"
+        return segment
+
+    def _timeline_payload(self, segments: list[dict], raw_duration: float, audio_duration: float, mode: str) -> dict:
+        effective_duration = self._effective_duration(segments)
+        logger.info(
+            f"Generated {mode} timeline with {len(segments)} segments. "
+            f"Raw duration: {round(raw_duration, 3)}s | effective duration: {round(effective_duration, 3)}s "
+            f"(target: {round(audio_duration, 3)}s)"
+        )
+        return {
+            "segments": segments,
+            "total_duration": round(raw_duration, 3),
+            "effective_duration": round(effective_duration, 3),
+            "target_audio_duration": round(audio_duration, 3),
+            "mode": mode,
+        }
+
+    def _create_image_only_timeline(self, image_items: list[dict], audio_duration: float) -> dict:
+        segments = []
+        raw_duration = 0.0
+        image_index = 0
+
+        while self._effective_duration(segments) < audio_duration:
+            clip = image_items[image_index % len(image_items)]
+            segment = self._timeline_segment(clip, len(segments))
+            segments.append(segment)
+            raw_duration += float(segment["duration"])
+            image_index += 1
+
+        if image_index > len(image_items):
+            logger.info(
+                f"Image-only timeline reused {len(image_items)} source image clips to cover {round(audio_duration, 3)}s audio."
+            )
+
+        return self._timeline_payload(segments, raw_duration, audio_duration, "image_audio_only")
+
+    def create_timeline(self, vid_clips: list[str], img_clips: list[dict], audio_duration: float) -> dict:
+        """Arrange timeline items alternately to match audio duration."""
+        shuffled_video_paths = list(vid_clips)
+        shuffled_image_items = list(img_clips)
+        random.shuffle(shuffled_video_paths)
+        random.shuffle(shuffled_image_items)
+
+        video_items = [
+            {
+                "id": f"video_{index}",
+                "kind": "video",
+                "path": clip_path,
+                "duration": round(FFmpegHelper.probe_duration(clip_path), 3),
+            }
+            for index, clip_path in enumerate(shuffled_video_paths)
+        ]
+        video_items = [item for item in video_items if item["duration"] > 0]
+
+        image_items = [item for item in shuffled_image_items if item.get("duration", 0) > 0]
+
+        if not video_items and not image_items:
+            logger.error("Cannot create timeline without any valid video or image clips.")
+            return self._timeline_payload([], 0.0, audio_duration, "empty")
+
+        if not video_items and image_items:
+            return self._create_image_only_timeline(image_items, audio_duration)
+
+        segments = []
+        raw_duration = 0.0
         v_idx, i_idx = 0, 0
         use_video = True
-        
-        while current_duration < audio_duration:
+        reuse_cycles = 0
+
+        while self._effective_duration(segments) < audio_duration:
             clip = None
-            if use_video and v_idx < len(vid_clips):
-                clip = vid_clips[v_idx]
+
+            if use_video and v_idx < len(video_items):
+                clip = dict(video_items[v_idx])
                 v_idx += 1
-            elif not use_video and i_idx < len(img_clips):
-                clip = img_clips[i_idx]
+            elif not use_video and i_idx < len(image_items):
+                clip = dict(image_items[i_idx])
                 i_idx += 1
             else:
-                if v_idx < len(vid_clips):
-                    clip = vid_clips[v_idx]
+                if v_idx < len(video_items):
+                    clip = dict(video_items[v_idx])
                     v_idx += 1
-                elif i_idx < len(img_clips):
-                    clip = img_clips[i_idx]
+                elif i_idx < len(image_items):
+                    clip = dict(image_items[i_idx])
                     i_idx += 1
                 else:
-                    logger.warning("Ran out of unique clips! Re-using clips to fill timeline.")
-                    v_idx, i_idx = 0, 0 
+                    reuse_cycles += 1
+                    logger.info(f"Reusing source clips to fill timeline, cycle {reuse_cycles}.")
+                    v_idx, i_idx = 0, 0
                     continue
-            
-            if clip:
-                dur = _get_clip_duration(clip)
-                if dur > 0:
-                    timeline_clips.append(clip)
-                    current_duration += dur
-            
+
+            if clip and clip["duration"] > 0:
+                segment = self._timeline_segment(clip, len(segments))
+                segments.append(segment)
+                raw_duration += float(segment["duration"])
+
             use_video = not use_video
-            
-        logger.info(f"Generated timeline with {len(timeline_clips)} clips. Total duration: {current_duration}s (target: {audio_duration}s)")
-        
-        concat_file = os.path.join(self.temp_dir, "concat_input.txt")
-        with open(concat_file, "w", encoding="utf-8") as f:
-            for clip_path in timeline_clips:
-                clean_path = os.path.abspath(clip_path).replace("\\", "/")
-                f.write(f"file '{clean_path}'\n")
-                
-        return concat_file
+
+        return self._timeline_payload(segments, raw_duration, audio_duration, "mixed_media")

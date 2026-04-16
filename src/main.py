@@ -18,6 +18,7 @@ from src.processors.image_processor import ImageProcessor
 from src.processors.video_processor import VideoProcessor
 from src.composer.timeline import TimelineComposer
 from src.composer.renderer import Renderer
+from src.utils.effects_library import load_active_animation_presets, load_active_transition_presets
 
 def main():
     parser = argparse.ArgumentParser(description="Auto Video Generator")
@@ -54,7 +55,9 @@ def main():
     logger.info(f"Crawled {len(raw_images)} images and {len(raw_videos)} videos.")
 
     logger.info(">>> Phase 3: Processing Materials")
-    img_processor = ImageProcessor(job_id, dirs)
+    animation_presets = load_active_animation_presets()
+    transition_presets = load_active_transition_presets()
+    img_processor = ImageProcessor(job_id, dirs, animation_presets=animation_presets)
     vid_processor = VideoProcessor(job_id, dirs)
 
     img_clips = img_processor.process_images(raw_images)
@@ -68,11 +71,11 @@ def main():
 
     logger.info(">>> Phase 4: Timeline Assembly")
     timeline_composer = TimelineComposer(job_id, dirs)
-    concat_file = timeline_composer.create_timeline(vid_clips, img_clips, audio_duration)
+    timeline_data = timeline_composer.create_timeline(vid_clips, img_clips, audio_duration)
 
     logger.info(">>> Phase 5: Final Render")
-    renderer = Renderer(job_id, dirs)
-    output_video = renderer.render(concat_file, args.audio, audio_duration)
+    renderer = Renderer(job_id, dirs, transition_presets=transition_presets)
+    output_video = renderer.render(timeline_data, args.audio, audio_duration)
 
     if output_video:
         logger.info(f"Job completed successfully. Output: {output_video}")

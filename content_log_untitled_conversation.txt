@@ -1,1 +1,5 @@
-Để hiểu rõ dự án hiện tại, hãy để tôi xem cấu trúc thư mục trước.
+Để điều chỉnh cỡ chữ cho dòng chữ "Nguồn: Tổng hợp", bạn có thể sửa trực tiếp trong file .env của dự án nhé.
+Hãy mở file .env (hiện bạn đang mở nó trên trình soạn thảo), và tìm đến dòng số 33:
+envalternate_emailcontent_copySOURCE_TEXT_FONT_SIZE=22
+Bạn hãy tăng số 22 lên mức mà bạn mong muốn (ví dụ: 30 hoặc 36).
+Ngoài ra, nếu cỡ chữ lớn hơn mà bạn thấy chữ bị sát lề quá, bạn có thể chỉnh luôn khoảng cách lề

@@ -226,8 +226,26 @@ def cleanup_review_video_assets(dirs: dict, selected_clip_paths: list[str]):
 
 
 def cleanup_job_files(job_id: str):
-    """Remove temporary files for a job after render."""
+    """Remove temporary files and assets for a job after render."""
     try:
         cleanup_temp_files(job_id)
+
+        # Remove other intermediate directories for the job
+        dirs_to_clean = [
+            os.path.join(Config.STORAGE_DIR, "audio", job_id),
+            os.path.join(Config.STORAGE_DIR, "raw_images", job_id),
+            os.path.join(Config.STORAGE_DIR, "raw_videos", job_id),
+            os.path.join(Config.STORAGE_DIR, "clips", "img_clips", job_id),
+            os.path.join(Config.STORAGE_DIR, "clips", "vid_clips", job_id),
+        ]
+
+        for path in dirs_to_clean:
+            if os.path.exists(path):
+                try:
+                    shutil.rmtree(path)
+                    logger.info(f"Cleaned up job intermediate dir: {path}")
+                except Exception as exc:
+                    logger.warning(f"Could not clean up intermediate dir: {path} | {exc}")
+
     except Exception as exc:
         logger.error(f"Error cleaning up job {job_id}: {exc}")

@@ -1,9 +1,14 @@
 import { createBrowserRouter } from "react-router-dom";
 
+import { BatchPipelinePage } from "@/pages/BatchPipelinePage";
+import { DecorLibraryPage } from "@/pages/DecorLibraryPage";
+import { DocsToAudioPage } from "@/pages/DocsToAudioPage";
+import { EffectsLibraryPage } from "@/pages/EffectsLibraryPage";
 import { ResourcesPage } from "@/pages/ResourcesPage";
 import { ResultPage } from "@/pages/ResultPage";
 import { ReviewPage } from "@/pages/ReviewPage";
 import { UploadPage } from "@/pages/UploadPage";
+import { VoicesPage } from "@/pages/VoicesPage";
 
 export const router = createBrowserRouter([
   {
@@ -21,5 +26,25 @@ export const router = createBrowserRouter([
   {
     path: "/jobs/:jobId/result",
     element: <ResultPage />,
+  },
+  {
+    path: "/effects-library",
+    element: <EffectsLibraryPage />,
+  },
+  {
+    path: "/docs-to-audio",
+    element: <DocsToAudioPage />,
+  },
+  {
+    path: "/voices",
+    element: <VoicesPage />,
+  },
+  {
+    path: "/decor-library",
+    element: <DecorLibraryPage />,
+  },
+  {
+    path: "/batch-pipeline",
+    element: <BatchPipelinePage />,
   },
 ]);

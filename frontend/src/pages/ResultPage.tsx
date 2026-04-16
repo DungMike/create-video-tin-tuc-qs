@@ -1,12 +1,12 @@
-import { Link, useParams } from "react-router-dom";
 import { useEffect, useState } from "react";
+import { Link, useParams } from "react-router-dom";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
 import { EmptyCard } from "@/components/empty-card";
 import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
 import { Button } from "@/components/ui/button";
-import { getResultPage, ApiError } from "@/lib/api";
+import { ApiError, getResultPage } from "@/lib/api";
 import type { ResultPageResponse } from "@/types/api";
 
 export function ResultPage() {
@@ -28,7 +28,7 @@ export function ResultPage() {
       })
       .catch((error) => {
         if (!cancelled) {
-          setErrorMessage(error instanceof ApiError ? error.message : "Không thể tải kết quả render.");
+          setErrorMessage(error instanceof ApiError ? error.message : "Khong the tai ket qua render.");
         }
       })
       .finally(() => {
@@ -45,7 +45,7 @@ export function ResultPage() {
   if (isLoading) {
     return (
       <AppShell>
-        <LoadingCard message="Đang tải kết quả render..." />
+        <LoadingCard message="Dang tai ket qua render..." />
       </AppShell>
     );
   }
@@ -54,8 +54,8 @@ export function ResultPage() {
     return (
       <AppShell>
         <StatusAlert
-          title="Không thể mở kết quả render"
-          message={errorMessage || "Kết quả không khả dụng."}
+          title="Khong the mo ket qua render"
+          message={errorMessage || "Ket qua khong kha dung."}
           variant="destructive"
         />
       </AppShell>
@@ -65,13 +65,13 @@ export function ResultPage() {
   return (
     <AppShell>
       <HeroCard
-        eyebrow="Hoàn tất"
-        title="Video đã được render"
-        description="Hệ thống đã render từ clip mới, asset thư viện và image clip của job hiện tại. Các clip mới được gắn tag đã được lưu vào thư viện để dùng lại."
+        eyebrow="Hoan tat"
+        title="Video da duoc render"
+        description="He thong da render tu clip moi, asset thu vien va image clip cua job hien tai. Cac clip moi duoc gan tag da duoc luu vao thu vien de dung lai."
         stats={[
-          { label: "Clip mới dùng để render", value: data.job.selectedClipIds.length },
-          { label: "Asset thư viện đã chọn", value: data.job.selectedLibraryAssetIds.length },
-          { label: "Ảnh nguồn", value: data.job.imagePaths.length },
+          { label: "Clip moi dung de render", value: data.job.selectedClipIds.length },
+          { label: "Asset thu vien da chon", value: data.job.selectedLibraryAssetIds.length },
+          { label: "Anh nguon", value: data.job.imagePaths.length },
           { label: "Audio", value: `${data.job.audioDuration}s` },
         ]}
       />
@@ -88,16 +88,19 @@ export function ResultPage() {
           </div>
         </PageSection>
       ) : (
-        <EmptyCard title="Chưa có output video" description="Render chưa sinh ra file output hợp lệ." />
+        <EmptyCard title="Chua co output video" description="Render chua sinh ra file output hop le." />
       )}
 
       <PageSection className="border-none bg-transparent p-0 shadow-none">
         <div className="flex flex-wrap gap-3">
           <Button asChild size="lg">
-            <Link to="/">Tạo job mới</Link>
+            <Link to="/">Tao job moi</Link>
           </Button>
           <Button asChild variant="secondary" size="lg">
-            <Link to={`/jobs/${jobId}/resources`}>Xem lại thư viện tài nguyên</Link>
+            <Link to={`/jobs/${jobId}/resources`}>Xem lai thu vien tai nguyen</Link>
+          </Button>
+          <Button asChild variant="secondary" size="lg">
+            <Link to="/effects-library">Cau hinh hieu ung</Link>
           </Button>
         </div>
       </PageSection>

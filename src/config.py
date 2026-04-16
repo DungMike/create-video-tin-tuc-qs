@@ -14,6 +14,10 @@ class Config:
     IMG_CLIP_DURATION = int(os.getenv("IMG_CLIP_DURATION", "6"))
     REVIEW_CLIP_DURATION = int(os.getenv("REVIEW_CLIP_DURATION", "6"))
     REVIEW_PAGE_SIZE = int(os.getenv("REVIEW_PAGE_SIZE", "30"))
+    IMAGE_TRANSITION_DURATION = float(os.getenv("IMAGE_TRANSITION_DURATION", "0.75"))
+    EFFECT_PREVIEW_CLIP_DURATION = float(os.getenv("EFFECT_PREVIEW_CLIP_DURATION", "2.25"))
+    RENDER_CHUNK_SEGMENT_LIMIT = int(os.getenv("RENDER_CHUNK_SEGMENT_LIMIT", "40"))
+    IMAGE_ONLY_CHUNK_SEGMENT_LIMIT = int(os.getenv("IMAGE_ONLY_CHUNK_SEGMENT_LIMIT", "80"))
 
     # FFmpeg / Render
     TARGET_RESOLUTION = os.getenv("TARGET_RESOLUTION", "1920x1080")
@@ -21,6 +25,26 @@ class Config:
     USE_GPU_NVENC = os.getenv("USE_GPU_NVENC", "true").lower() == "true"
     FFMPEG_PRESET = os.getenv("FFMPEG_PRESET", "p4")
     VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "8M")
+    FFMPEG_COMMAND_TIMEOUT_SECONDS = int(os.getenv("FFMPEG_COMMAND_TIMEOUT_SECONDS", "0"))
+    FFMPEG_IMAGE_CLIP_TIMEOUT_SECONDS = int(os.getenv("FFMPEG_IMAGE_CLIP_TIMEOUT_SECONDS", "120"))
+    IMAGE_MOTION_CACHE_ENABLED = os.getenv("IMAGE_MOTION_CACHE_ENABLED", "true").lower() == "true"
+    IMAGE_MOTION_WORKERS = int(os.getenv("IMAGE_MOTION_WORKERS", "4"))
+    IMAGE_ONLY_FAST_CHUNK_CONCAT = os.getenv("IMAGE_ONLY_FAST_CHUNK_CONCAT", "true").lower() == "true"
+    IMAGE_ONLY_SKIP_XFADE = os.getenv("IMAGE_ONLY_SKIP_XFADE", "true").lower() == "true"
+    IMAGE_CLIP_FADE_DURATION = float(os.getenv("IMAGE_CLIP_FADE_DURATION", "0.5"))
+
+    # Overlay / Watermark
+    OVERLAY_VIDEO_POSITION = os.getenv("OVERLAY_VIDEO_POSITION", "top_right")
+    OVERLAY_VIDEO_SCALE = float(os.getenv("OVERLAY_VIDEO_SCALE", "0.25"))
+    OVERLAY_VIDEO_MARGIN = int(os.getenv("OVERLAY_VIDEO_MARGIN", "10"))
+    SOURCE_TEXT = os.getenv("SOURCE_TEXT", "")
+    SOURCE_TEXT_FONT_SIZE = int(os.getenv("SOURCE_TEXT_FONT_SIZE", "22"))
+    SOURCE_TEXT_FONT = os.getenv("SOURCE_TEXT_FONT", "C:/Windows/Fonts/arial.ttf")
+    SOURCE_TEXT_POSITION = os.getenv("SOURCE_TEXT_POSITION", "bottom_left")
+    SOURCE_TEXT_MARGIN = int(os.getenv("SOURCE_TEXT_MARGIN", "20"))
+
+    # Output
+    OUTPUT_USE_AUDIO_FILENAME = os.getenv("OUTPUT_USE_AUDIO_FILENAME", "true").lower() == "true"
 
     # Crawler
     YOUTUBE_DOWNLOAD_LIMIT_PER_KEYWORD = int(os.getenv("YOUTUBE_DOWNLOAD_LIMIT_PER_KEYWORD", "3"))
@@ -31,6 +55,8 @@ class Config:
     # Storage
     STORAGE_DIR = os.getenv("STORAGE_DIR", "./storage")
     OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./storage/output")
+    EFFECTS_LIBRARY_DIR = os.getenv("EFFECTS_LIBRARY_DIR", "./storage/effects_library")
+    DECOR_VIDEOS_DIR = os.getenv("DECOR_VIDEOS_DIR", "./storage/decor_videos")
 
     # Web UI
     WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
@@ -40,6 +66,18 @@ class Config:
     FRONTEND_DIST_DIR = os.getenv("FRONTEND_DIST_DIR", "./frontend/dist")
     WEB_SECRET_KEY = os.getenv("WEB_SECRET_KEY", "local-dev-secret")
     MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "4096"))
+
+    # TTS / Voice API
+    TTS_API_BASE_URL = os.getenv("TTS_API_BASE_URL", "https://thangtm.info")
+    TTS_API_KEY = os.getenv("TTS_API_KEY", "")
+    TTS_PLATFORM = os.getenv("TTS_PLATFORM", "minimax")
+    TTS_DEFAULT_VOICE_ID = os.getenv("TTS_DEFAULT_VOICE_ID", "")
+    TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "2000"))
+    TTS_MAX_CONCURRENCY = int(os.getenv("TTS_MAX_CONCURRENCY", "15"))
+    TTS_POLL_INTERVAL_SECONDS = float(os.getenv("TTS_POLL_INTERVAL_SECONDS", "2"))
+    TTS_TASK_TIMEOUT_SECONDS = int(os.getenv("TTS_TASK_TIMEOUT_SECONDS", "600"))
+    TTS_SPEED = float(os.getenv("TTS_SPEED", "1"))
+    TTS_VOLUME = float(os.getenv("TTS_VOLUME", "1"))
 
     # Upload types
     ALLOWED_AUDIO_EXTENSIONS = {"mp3", "wav", "m4a", "aac", "flac", "ogg"}

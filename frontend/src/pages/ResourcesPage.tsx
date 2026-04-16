@@ -8,7 +8,7 @@ import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { getResourcesPage, renderJob, ApiError } from "@/lib/api";
+import { ApiError, getResourcesPage, renderJob } from "@/lib/api";
 import {
   mergeSelectionStates,
   normalizeTags,
@@ -54,7 +54,7 @@ export function ResourcesPage() {
       })
       .catch((error) => {
         if (!cancelled) {
-          setErrorMessage(error instanceof ApiError ? error.message : "Không thể tải thư viện tài nguyên.");
+          setErrorMessage(error instanceof ApiError ? error.message : "Khong the tai thu vien tai nguyen.");
         }
       })
       .finally(() => {
@@ -100,7 +100,7 @@ export function ResourcesPage() {
       });
       startTransition(() => navigate(response.redirectUrl));
     } catch (error) {
-      setErrorMessage(error instanceof ApiError ? error.message : "Render thất bại.");
+      setErrorMessage(error instanceof ApiError ? error.message : "Render that bai.");
     } finally {
       setIsSubmitting(false);
     }
@@ -109,7 +109,7 @@ export function ResourcesPage() {
   if (isLoading) {
     return (
       <AppShell>
-        <LoadingCard message="Đang tải thư viện tài nguyên..." />
+        <LoadingCard message="Dang tai thu vien tai nguyen..." />
       </AppShell>
     );
   }
@@ -118,8 +118,8 @@ export function ResourcesPage() {
     return (
       <AppShell>
         <StatusAlert
-          title="Không thể mở thư viện tài nguyên"
-          message={errorMessage || "Dữ liệu tài nguyên không khả dụng."}
+          title="Khong the mo thu vien tai nguyen"
+          message={errorMessage || "Du lieu tai nguyen khong kha dung."}
           variant="destructive"
         />
       </AppShell>
@@ -130,22 +130,25 @@ export function ResourcesPage() {
     <AppShell>
       <HeroCard
         eyebrow={`Job ${data.job.jobId}`}
-        title="Chọn clip từ thư viện tài nguyên"
-        description="Lọc theo tag để lấy clip đã lưu từ các job trước, rồi trộn với clip mới của job hiện tại khi render."
+        title="Chon clip tu thu vien tai nguyen"
+        description="Loc theo tag de lay clip da luu tu cac job truoc, roi tron voi clip moi cua job hien tai khi render."
         stats={[
-          { label: "Tổng asset thư viện", value: data.totalAssetCount },
-          { label: "Đang hiển thị", value: data.assets.length },
-          { label: "Tag đang lọc", value: selectedTags.length },
-          { label: "Asset đã chọn", value: selectionState.selectedLibraryAssetIds.length },
+          { label: "Tong asset thu vien", value: data.totalAssetCount },
+          { label: "Dang hien thi", value: data.assets.length },
+          { label: "Tag dang loc", value: selectedTags.length },
+          { label: "Asset da chon", value: selectionState.selectedLibraryAssetIds.length },
         ]}
       />
 
-      {errorMessage ? <StatusAlert title="Có lỗi xảy ra" message={errorMessage} variant="destructive" /> : null}
+      {errorMessage ? <StatusAlert title="Co loi xay ra" message={errorMessage} variant="destructive" /> : null}
 
       <PageSection className="space-y-4">
         <div className="flex flex-wrap items-center gap-3">
           <Button asChild variant="secondary">
-            <Link to={`/jobs/${jobId}/review`}>Quay lại review clip mới</Link>
+            <Link to={`/jobs/${jobId}/review`}>Quay lai review clip moi</Link>
+          </Button>
+          <Button asChild variant="secondary">
+            <Link to="/effects-library">Mo thu vien hieu ung</Link>
           </Button>
           <Button variant="outline" onClick={() => setSearchParams(new URLSearchParams())}>
             Clear filter
@@ -168,7 +171,7 @@ export function ResourcesPage() {
               );
             })
           ) : (
-            <span className="text-sm text-muted-foreground">Thư viện chưa có tag nào.</span>
+            <span className="text-sm text-muted-foreground">Thu vien chua co tag nao.</span>
           )}
         </div>
       </PageSection>
@@ -188,18 +191,18 @@ export function ResourcesPage() {
         </section>
       ) : (
         <EmptyCard
-          title="Không có asset phù hợp"
-          description="Thử bỏ bớt tag filter hoặc quay lại review để gắn tag cho clip mới."
+          title="Khong co asset phu hop"
+          description="Thu bo bot tag filter hoac quay lai review de gan tag cho clip moi."
         />
       )}
 
       <PageSection className="border-none bg-transparent p-0 shadow-none">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="text-sm text-muted-foreground">
-            Asset đã chọn: <span className="font-semibold text-foreground">{selectionState.selectedLibraryAssetIds.length}</span>
+            Asset da chon: <span className="font-semibold text-foreground">{selectionState.selectedLibraryAssetIds.length}</span>
           </div>
           <Button size="lg" onClick={handleRender} disabled={isSubmitting}>
-            {isSubmitting ? "Đang render..." : "Render với selection hiện tại"}
+            {isSubmitting ? "Dang render..." : "Render voi selection hien tai"}
           </Button>
         </div>
       </PageSection>
