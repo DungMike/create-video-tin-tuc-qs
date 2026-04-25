@@ -868,16 +868,25 @@ class BatchPipelineRunner:
 
     def _run_single_url(self, index: int, item: dict):
         """Execute TTS -> job setup -> shared clip reuse -> timeline -> render."""
+        import time as _time
+
         output_name = item["outputName"]
         source_type = str(item.get("sourceType") or "doc_url")
         doc_url = item.get("docUrl") or ""
         source_audio_name = item.get("sourceAudioName") or ""
         source_audio_relative_path = item.get("sourceAudioRelativePath") or ""
         decor_video_id = item.get("decorVideoId", "")
+        item_start_time = _time.time()
+
+        def _elapsed():
+            return f"{(_time.time() - item_start_time) * 1000:.0f}ms"
 
         logger.info(
-            f"[BatchPipeline] Starting item {index}: {output_name} | "
-            f"{doc_url if source_type == 'doc_url' else source_audio_name}"
+            f"[BatchPipeline] ========== Item {index} START ==========\n"
+            f"  outputName={output_name}, sourceType={source_type}, inputMode={self.input_mode}\n"
+            f"  docUrl={doc_url!r}\n"
+            f"  voiceId={self.voice_id!r}, speed={self.speed}, volume={self.volume}\n"
+            f"  decorVideoId={decor_video_id!r}, batchId={self.batch_id}"
         )
 
         if source_type == "uploaded_audio":
@@ -902,19 +911,41 @@ class BatchPipelineRunner:
                 clear_failure=True,
             )
             audio_relative_path = source_audio_relative_path
-            logger.info(f"[BatchPipeline] Item {index}: Uploaded audio ready -> {audio_relative_path}")
+            logger.info(f"[BatchPipeline] Item {index}: Uploaded audio ready -> {audio_relative_path} [{_elapsed()}]")
         else:
             self._update_item_progress(index, "tts_audio", 5, "Dang tao audio tu Google Docs...")
-            audio_result = create_audio_from_google_doc(
-                doc_url=doc_url,
-                output_name=output_name,
-                voice_id=self.voice_id,
-                speed=self.speed,
-                volume=self.volume,
+            logger.info(
+                f"[BatchPipeline] Item {index}: Calling create_audio_from_google_doc. "
+                f"docUrl={doc_url!r}, outputName={output_name!r}, "
+                f"voiceId={self.voice_id!r}, speed={self.speed}, volume={self.volume}"
             )
+            tts_start = _time.time()
+            try:
+                audio_result = create_audio_from_google_doc(
+                    doc_url=doc_url,
+                    output_name=output_name,
+                    voice_id=self.voice_id,
+                    speed=self.speed,
+                    volume=self.volume,
+                )
+            except Exception as tts_exc:
+                tts_elapsed = f"{(_time.time() - tts_start) * 1000:.0f}ms"
+                logger.error(
+                    f"[BatchPipeline] Item {index}: create_audio_from_google_doc FAILED. "
+                    f"error_type={type(tts_exc).__name__}, error={tts_exc}, "
+                    f"tts_elapsed={tts_elapsed}, item_elapsed={_elapsed()}"
+                )
+                raise
+            tts_elapsed = f"{(_time.time() - tts_start) * 1000:.0f}ms"
             self._apply_audio_state(index, audio_result.get("audioState"), clear_failure=True)
             audio_relative_path = audio_result["audio"]["relativePath"]
-            logger.info(f"[BatchPipeline] Item {index}: Audio created -> {audio_relative_path}")
+            chunk_count = audio_result.get("chunkCount", "?")
+            audio_state = audio_result.get("audioState", {})
+            logger.info(
+                f"[BatchPipeline] Item {index}: Audio created -> {audio_relative_path}. "
+                f"chunks={chunk_count}, audioStatus={audio_state.get('audioStatus', 'N/A')}, "
+                f"tts_elapsed={tts_elapsed}, item_elapsed={_elapsed()}"
+            )
 
         self._update_item_progress(index, "job_setup", 25, "Dang tao job...")
         job_id = str(uuid.uuid4())[:8]
@@ -928,6 +959,10 @@ class BatchPipelineRunner:
         if not validate_audio(audio_path):
             raise RuntimeError(f"Audio generated for '{output_name}' is invalid.")
         audio_duration = get_audio_duration(audio_path)
+        logger.info(
+            f"[BatchPipeline] Item {index}: Job {job_id} setup done. "
+            f"audio_duration={audio_duration:.1f}s, item_elapsed={_elapsed()}"
+        )
 
         self._update_item_progress(
             index,
@@ -959,7 +994,10 @@ class BatchPipelineRunner:
             "image_render_plan": self._manifest_image_render_plan_for_item(image_clips),
         }
         save_job_manifest(job_id, manifest)
-        logger.info(f"[BatchPipeline] Item {index}: Job {job_id} created with {len(image_clips)} shared image clips")
+        logger.info(
+            f"[BatchPipeline] Item {index}: Job {job_id} created with "
+            f"{len(image_clips)} shared image clips, item_elapsed={_elapsed()}"
+        )
 
         self._update_item_progress(index, "timeline", 58, "Dang tao timeline render...")
         timeline_composer = TimelineComposer(job_id, dirs)
@@ -967,12 +1005,16 @@ class BatchPipelineRunner:
         segments = timeline_data.get("segments", [])
         if not segments:
             raise RuntimeError(f"Timeline generated 0 segments for '{output_name}'.")
-        logger.info(f"[BatchPipeline] Item {index}: Timeline has {len(segments)} segments")
+        logger.info(
+            f"[BatchPipeline] Item {index}: Timeline has {len(segments)} segments, item_elapsed={_elapsed()}"
+        )
 
         self._update_item_progress(index, "render_video", 62, f"Dang render video ({len(segments)} segments)...")
         transition_presets = load_active_transition_presets()
         renderer = Renderer(job_id, dirs, transition_presets=transition_presets)
         decor_path = get_decor_video_absolute_path(decor_video_id) if decor_video_id else None
+
+        render_start = _time.time()
 
         def _render_progress(event: dict):
             stage = event.get("stage", "render_video")
@@ -1000,7 +1042,12 @@ class BatchPipelineRunner:
             progress_callback=_render_progress,
             decor_video_path=decor_path,
         )
+        render_elapsed = f"{(_time.time() - render_start) * 1000:.0f}ms"
         if not output_path:
+            logger.error(
+                f"[BatchPipeline] Item {index}: Render returned None. "
+                f"render_elapsed={render_elapsed}, item_elapsed={_elapsed()}"
+            )
             raise RuntimeError(f"Render failed for '{output_name}'. Check logs/app.log.")
 
         desired_output = os.path.join(Config.OUTPUT_DIR, f"{output_name}.mp4")
@@ -1027,7 +1074,10 @@ class BatchPipelineRunner:
             failure_stage=None,
             error=None,
         )
-        logger.info(f"[BatchPipeline] Item {index} ({output_name}) completed -> {output_relative}")
+        logger.info(
+            f"[BatchPipeline] ========== Item {index} ({output_name}) COMPLETED ==========\n"
+            f"  output={output_relative}, render_elapsed={render_elapsed}, total_item_elapsed={_elapsed()}"
+        )
 
     def run_batch(self, target_indexes: list[int] | None = None):
         """Process selected items sequentially. Failed items are skipped."""

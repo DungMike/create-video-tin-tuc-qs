@@ -13,12 +13,40 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry as Urllib3Retry
 
 from src.config import Config
 from src.processors.audio_utils import validate_audio
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.file_manager import storage_absolute_path, storage_relative_path
 from src.utils.logger import logger
+
+
+def _build_http_session() -> requests.Session:
+    """Create a requests.Session with connection pooling and auto-retry on transport errors."""
+    session = requests.Session()
+    retry_strategy = Urllib3Retry(
+        total=2,
+        backoff_factor=0.5,
+        status_forcelist=[502, 503, 504],
+        allowed_methods=["GET", "POST"],
+    )
+    adapter = HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=10,
+        pool_maxsize=20,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+_http_session: requests.Session = _build_http_session()
+
+
+def _elapsed_ms(start: float) -> str:
+    return f"{(time.time() - start) * 1000:.0f}ms"
 
 
 class TTSAudioError(Exception):
@@ -157,30 +185,52 @@ def parse_google_doc_id(doc_url: str) -> str | None:
 def download_google_doc_text(doc_url: str) -> str:
     doc_id = parse_google_doc_id(doc_url)
     if not doc_id:
-        logger.error(f"[TTS] Invalid Google Docs URL: {doc_url}")
+        logger.error(f"[TTS][GoogleDoc] Invalid Google Docs URL: {doc_url}")
         raise TTSAudioError("Google Docs link is invalid.", "invalid_doc_url")
 
-    logger.info(f"[TTS] Parsed Google document id: {doc_id}")
+    logger.info(f"[TTS][GoogleDoc] Parsed Google document id: {doc_id} from URL: {doc_url}")
     export_urls = [
         f"https://docs.google.com/document/d/{doc_id}/export?format=txt",
         f"https://drive.google.com/uc?export=download&id={doc_id}",
     ]
     last_error = None
-    for export_url in export_urls:
+    for url_index, export_url in enumerate(export_urls):
+        t0 = time.time()
         try:
-            logger.info(f"[TTS] Downloading Google Docs text from: {export_url}")
-            response = requests.get(export_url, timeout=60)
+            logger.info(f"[TTS][GoogleDoc] Attempt {url_index + 1}/{len(export_urls)}: GET {export_url}")
+            response = _http_session.get(export_url, timeout=60)
+            elapsed = _elapsed_ms(t0)
+            logger.info(
+                f"[TTS][GoogleDoc] Response received. status={response.status_code}, "
+                f"content_type={response.headers.get('content-type', 'N/A')}, "
+                f"content_length={len(response.content)}, elapsed={elapsed}"
+            )
             response.raise_for_status()
             text = response.text.strip()
+            # Strip Unicode BOM that Google Docs export often prepends
+            if text.startswith("\ufeff"):
+                text = text[1:]
+                logger.info("[TTS][GoogleDoc] Stripped Unicode BOM from exported text.")
             if text and "<html" not in text[:300].lower():
-                logger.info(f"[TTS] Google Docs text downloaded successfully. Characters: {len(text)}")
+                logger.info(
+                    f"[TTS][GoogleDoc] Text downloaded successfully. chars={len(text)}, "
+                    f"first_100_chars={text[:100]!r}, elapsed={elapsed}"
+                )
                 return text
             logger.warning(
-                f"[TTS] Export URL returned non-text or empty content. Status={response.status_code}, chars={len(text)}"
+                f"[TTS][GoogleDoc] Export returned non-text or empty content. "
+                f"status={response.status_code}, url={response.url}, "
+                f"headers={dict(response.headers)}, chars={len(text)}, "
+                f"starts_with={text[:500]!r}, elapsed={elapsed}"
             )
         except Exception as exc:
+            elapsed = _elapsed_ms(t0)
             last_error = exc
-            logger.error(f"[TTS] Failed to download text from {export_url}: {exc}")
+            resp_text = getattr(exc.response, 'text', '') if hasattr(exc, 'response') and exc.response else ''
+            logger.error(
+                f"[TTS][GoogleDoc] Failed to download text. url={export_url}, "
+                f"error_type={type(exc).__name__}, error={exc}, response_snippet={resp_text[:500]}, elapsed={elapsed}"
+            )
 
     raise TTSAudioError(
         "Cannot export Google Docs text. Make sure the document is public or exportable.",
@@ -603,27 +653,51 @@ def _create_tts_task(text: str, voice_id: str, speed: float, volume: float) -> s
         "Seed": int(time.time() * 1000) % 2147483647,
     }
     url = _api_url("/api/minimax/createtask2")
-    logger.info(f"[TTS] Creating TTS task. voiceId={voice_id}, chars={len(text)}, url={url}")
+    thread_name = threading.current_thread().name
+    logger.info(
+        f"[TTS][CreateTask] START. voiceId={voice_id}, chars={len(text)}, text_preview={text[:100]!r}, "
+        f"speed={speed}, volume={volume}, thread={thread_name}, url={url}"
+    )
 
     max_retries = 5
+    overall_t0 = time.time()
     for attempt in range(max_retries):
+        t0 = time.time()
         try:
-            response = requests.post(url, headers=_tts_headers(), json=payload, timeout=60)
+            logger.debug(
+                f"[TTS][CreateTask] HTTP POST attempt {attempt + 1}/{max_retries}. "
+                f"payload_size={len(json.dumps(payload))} bytes, thread={thread_name}"
+            )
+            response = _http_session.post(url, headers=_tts_headers(), json=payload, timeout=60)
+            elapsed = _elapsed_ms(t0)
+            logger.info(
+                f"[TTS][CreateTask] HTTP response. attempt={attempt + 1}, status={response.status_code}, "
+                f"content_length={len(response.content)}, elapsed={elapsed}, thread={thread_name}"
+            )
             response.raise_for_status()
             data = response.json()
             break
         except Exception as exc:
+            elapsed = _elapsed_ms(t0)
             if attempt < max_retries - 1:
+                wait_time = 3 * (attempt + 1)
                 logger.warning(
-                    f"[TTS][HTTP retry] Create TTS task request failed (Attempt {attempt + 1}/{max_retries}). "
-                    f"Retrying in {3 * (attempt + 1)}s... Error: {exc}"
+                    f"[TTS][CreateTask] HTTP attempt {attempt + 1}/{max_retries} FAILED. "
+                    f"error_type={type(exc).__name__}, error={exc}, elapsed={elapsed}, "
+                    f"retry_in={wait_time}s, thread={thread_name}"
                 )
-                time.sleep(3 * (attempt + 1))
+                time.sleep(wait_time)
                 continue
-            response_text = getattr(locals().get("response", None), "text", "")
+            response_text = ""
+            try:
+                response_text = response.text[:2000] if response else ""
+            except Exception:
+                pass
+            total_elapsed = _elapsed_ms(overall_t0)
             logger.error(
-                f"[TTS] Create TTS task failed after {max_retries} HTTP attempts. "
-                f"error={exc}, response={response_text[:1000]}"
+                f"[TTS][CreateTask] FAILED after {max_retries} attempts. "
+                f"error_type={type(exc).__name__}, error={exc}, "
+                f"total_elapsed={total_elapsed}, response={response_text[:1000]}, thread={thread_name}"
             )
             raise TTSAudioError(
                 "Create TTS task failed.",
@@ -631,40 +705,74 @@ def _create_tts_task(text: str, voice_id: str, speed: float, volume: float) -> s
                 {"error": str(exc), "response": response_text[:2000]},
             ) from exc
     task_id = data.get("taskId")
+    total_elapsed = _elapsed_ms(overall_t0)
     if not task_id:
-        logger.error(f"[TTS] Create TTS task response missing taskId. response={data}")
+        logger.error(
+            f"[TTS][CreateTask] Response missing taskId. response={data}, "
+            f"total_elapsed={total_elapsed}, thread={thread_name}"
+        )
         raise TTSAudioError("TTS task response missing taskId.", "tts_task_failed", {"response": data})
-    logger.info(f"[TTS] TTS task created successfully. taskId={task_id}")
+    logger.info(
+        f"[TTS][CreateTask] SUCCESS. taskId={task_id}, total_elapsed={total_elapsed}, thread={thread_name}"
+    )
     return task_id
 
 
-def _poll_tts_task(task_id: str) -> str:
-    deadline = time.time() + Config.TTS_TASK_TIMEOUT_SECONDS
+def _poll_tts_task(task_id: str, timeout_seconds: int | None = None) -> str:
+    """Poll a TTS task until it completes or times out.
+
+    Args:
+        task_id: The task ID returned by _create_tts_task.
+        timeout_seconds: Hard deadline for this single task (default:
+            TTS_SINGLE_TASK_TIMEOUT_SECONDS from config, typically 60 s).
+            If the task is still "running" after this deadline, a
+            tts_task_timeout TTSAudioError is raised so the caller can
+            create a brand-new task and retry.
+    """
+    if timeout_seconds is None:
+        timeout_seconds = Config.TTS_SINGLE_TASK_TIMEOUT_SECONDS
+    deadline = time.time() + timeout_seconds
     poll_count = 0
     consecutive_failures = 0
     max_failures = 5
-    logger.info(f"[TTS] Polling TTS task. taskId={task_id}")
+    thread_name = threading.current_thread().name
+    poll_start = time.time()
+    logger.info(
+        f"[TTS][Poll] START. taskId={task_id}, timeout={timeout_seconds}s, "
+        f"poll_interval={Config.TTS_POLL_INTERVAL_SECONDS}s, thread={thread_name}"
+    )
     while time.time() < deadline:
         poll_count += 1
         url = _api_url(f"/api/minimax/{task_id}")
+        t0 = time.time()
         try:
-            response = requests.get(url, headers={"T-API-KEY": Config.TTS_API_KEY}, timeout=60)
+            response = _http_session.get(url, headers={"T-API-KEY": Config.TTS_API_KEY}, timeout=30)
+            elapsed = _elapsed_ms(t0)
             response.raise_for_status()
             data = response.json()
             consecutive_failures = 0
         except Exception as exc:
+            elapsed = _elapsed_ms(t0)
             consecutive_failures += 1
             if consecutive_failures < max_failures:
+                wait_time = 3 * consecutive_failures
                 logger.warning(
-                    f"[TTS][HTTP retry] Poll TTS task failed (Failure {consecutive_failures}/{max_failures}). "
-                    f"Continuing poll in {3 * consecutive_failures}s... Error: {exc}"
+                    f"[TTS][Poll] HTTP failure {consecutive_failures}/{max_failures}. "
+                    f"taskId={task_id}, poll={poll_count}, error_type={type(exc).__name__}, "
+                    f"error={exc}, elapsed={elapsed}, retry_in={wait_time}s, thread={thread_name}"
                 )
-                time.sleep(3 * consecutive_failures)
+                time.sleep(wait_time)
                 continue
-            response_text = getattr(locals().get("response", None), "text", "")
+            response_text = ""
+            try:
+                response_text = response.text[:2000] if response else ""
+            except Exception:
+                pass
+            total_poll_elapsed = _elapsed_ms(poll_start)
             logger.error(
-                f"[TTS] Poll TTS task failed after {max_failures} consecutive HTTP failures. "
-                f"taskId={task_id}, error={exc}, response={response_text[:1000]}"
+                f"[TTS][Poll] FAILED after {max_failures} consecutive HTTP failures. "
+                f"taskId={task_id}, polls={poll_count}, total_poll_elapsed={total_poll_elapsed}, "
+                f"error_type={type(exc).__name__}, error={exc}, response={response_text[:1000]}, thread={thread_name}"
             )
             raise TTSAudioError(
                 "Poll TTS task failed.",
@@ -672,42 +780,91 @@ def _poll_tts_task(task_id: str) -> str:
                 {"taskId": task_id, "error": str(exc), "response": response_text[:2000]},
             ) from exc
         status = str(data.get("status", "")).lower()
-        logger.info(f"[TTS] Poll result. taskId={task_id}, poll={poll_count}, status={status}")
+        total_poll_elapsed = _elapsed_ms(poll_start)
+        if poll_count <= 3 or poll_count % 5 == 0 or status in ("completed", "fail"):
+            logger.info(
+                f"[TTS][Poll] taskId={task_id}, poll={poll_count}, status={status}, "
+                f"elapsed={elapsed}, total_poll_elapsed={total_poll_elapsed}, thread={thread_name}"
+            )
         if status == "completed":
             audio_url = data.get("audioUrl")
             if not audio_url:
-                logger.error(f"[TTS] Completed task missing audioUrl. taskId={task_id}, response={data}")
+                logger.error(
+                    f"[TTS][Poll] Completed task missing audioUrl. taskId={task_id}, "
+                    f"response={data}, thread={thread_name}"
+                )
                 raise TTSAudioError("Completed TTS task missing audioUrl.", "tts_task_failed", {"taskId": task_id})
-            logger.info(f"[TTS] Task completed. taskId={task_id}, audioUrl={audio_url}")
+            logger.info(
+                f"[TTS][Poll] Task completed. taskId={task_id}, polls={poll_count}, "
+                f"total_poll_elapsed={total_poll_elapsed}, audioUrl={audio_url[:120]}, thread={thread_name}"
+            )
             return audio_url
         if status == "fail":
-            logger.error(f"[TTS] Task failed. taskId={task_id}, response={data}")
+            logger.error(
+                f"[TTS][Poll] Task FAILED on server side. taskId={task_id}, polls={poll_count}, "
+                f"total_poll_elapsed={total_poll_elapsed}, response={data}, thread={thread_name}"
+            )
             raise TTSAudioError("TTS task failed.", "tts_task_failed", {"taskId": task_id, "response": data})
-        time.sleep(Config.TTS_POLL_INTERVAL_SECONDS)
-    logger.error(f"[TTS] Task timed out. taskId={task_id}, timeout={Config.TTS_TASK_TIMEOUT_SECONDS}s")
-    raise TTSAudioError("TTS task timed out.", "tts_task_timeout", {"taskId": task_id})
+        # Sleep only up to the remaining deadline to avoid overshooting
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(Config.TTS_POLL_INTERVAL_SECONDS, remaining))
+    total_poll_elapsed = _elapsed_ms(poll_start)
+    logger.warning(
+        f"[TTS][Poll] TIMEOUT after {timeout_seconds}s. taskId={task_id}, polls={poll_count}, "
+        f"total_poll_elapsed={total_poll_elapsed}, thread={thread_name}. "
+        f"Will retry with a new task if attempts remain."
+    )
+    raise TTSAudioError(
+        f"TTS task timed out after {timeout_seconds}s (still running).",
+        "tts_task_timeout",
+        {"taskId": task_id, "polls": poll_count, "timeoutSeconds": timeout_seconds},
+    )
+
+
 
 
 def _download_audio(audio_url: str, output_path: str):
-    logger.info(f"[TTS] Downloading chunk audio. url={audio_url}, output={output_path}")
+    thread_name = threading.current_thread().name
+    logger.info(
+        f"[TTS][Download] START. url={audio_url[:120]}, output={output_path}, thread={thread_name}"
+    )
     max_retries = 5
+    overall_t0 = time.time()
     for attempt in range(max_retries):
+        t0 = time.time()
         try:
-            response = requests.get(audio_url, timeout=120)
+            response = _http_session.get(audio_url, timeout=120)
+            elapsed = _elapsed_ms(t0)
+            logger.info(
+                f"[TTS][Download] HTTP response. attempt={attempt + 1}, status={response.status_code}, "
+                f"content_length={len(response.content)}, content_type={response.headers.get('content-type', 'N/A')}, "
+                f"elapsed={elapsed}, thread={thread_name}"
+            )
             response.raise_for_status()
             break
         except Exception as exc:
+            elapsed = _elapsed_ms(t0)
             if attempt < max_retries - 1:
+                wait_time = 3 * (attempt + 1)
                 logger.warning(
-                    f"[TTS][HTTP retry] Download chunk audio failed (Attempt {attempt + 1}/{max_retries}). "
-                    f"Retrying in {3 * (attempt + 1)}s... Error: {exc}"
+                    f"[TTS][Download] Attempt {attempt + 1}/{max_retries} FAILED. "
+                    f"error_type={type(exc).__name__}, error={exc}, elapsed={elapsed}, "
+                    f"retry_in={wait_time}s, thread={thread_name}"
                 )
-                time.sleep(3 * (attempt + 1))
+                time.sleep(wait_time)
                 continue
-            response_text = getattr(locals().get("response", None), "text", "")
+            response_text = ""
+            try:
+                response_text = response.text[:2000] if response else ""
+            except Exception:
+                pass
+            total_elapsed = _elapsed_ms(overall_t0)
             logger.error(
-                f"[TTS] Download chunk audio failed after {max_retries} HTTP attempts. "
-                f"error={exc}, response={response_text[:1000]}"
+                f"[TTS][Download] FAILED after {max_retries} attempts. "
+                f"error_type={type(exc).__name__}, error={exc}, "
+                f"total_elapsed={total_elapsed}, response={response_text[:1000]}, thread={thread_name}"
             )
             raise TTSAudioError(
                 "Download chunk audio failed.",
@@ -716,7 +873,11 @@ def _download_audio(audio_url: str, output_path: str):
             ) from exc
     with open(output_path, "wb") as file_obj:
         file_obj.write(response.content)
-    logger.info(f"[TTS] Chunk audio downloaded. output={output_path}, bytes={len(response.content)}")
+    total_elapsed = _elapsed_ms(overall_t0)
+    logger.info(
+        f"[TTS][Download] SUCCESS. output={output_path}, bytes={len(response.content)}, "
+        f"total_elapsed={total_elapsed}, thread={thread_name}"
+    )
 
 
 def _synthesize_chunk_with_retry(
@@ -730,6 +891,7 @@ def _synthesize_chunk_with_retry(
     manifest_lock: threading.Lock,
 ) -> str:
     output_path = _chunk_output_path(output_dir, index)
+    thread_name = threading.current_thread().name
     if _is_valid_audio_path(output_path):
         _update_chunk_record(
             manifest,
@@ -740,8 +902,10 @@ def _synthesize_chunk_with_retry(
             lastErrorCode=None,
             lastErrorMessage=None,
         )
-        logger.info(f"[TTS] Chunk {index:04d} reused from cache. output={output_path}")
+        logger.info(f"[TTS][Chunk] {index:04d} reused from cache. output={output_path}, thread={thread_name}")
         return output_path
+
+    chunk_start_time = time.time()
 
     while True:
         current_record = manifest["chunks"][index - 1]
@@ -765,13 +929,19 @@ def _synthesize_chunk_with_retry(
             failedAt=None,
         )
         logger.info(
-            f"[TTS] Chunk {index:04d} started. attempt={current_attempt}/{CHUNK_MAX_ATTEMPTS}, chars={len(text)}"
+            f"[TTS][Chunk] {index:04d} attempt START. attempt={current_attempt}/{CHUNK_MAX_ATTEMPTS}, "
+            f"chars={len(text)}, chunk_elapsed={_elapsed_ms(chunk_start_time)}, thread={thread_name}"
         )
+        attempt_t0 = time.time()
         try:
             task_id = _create_tts_task(text, voice_id, speed, volume)
             _update_chunk_record(manifest, manifest_lock, index, lastTaskId=task_id)
-            logger.info(f"[TTS] Chunk {index:04d} task created. taskId={task_id}")
-            audio_url = _poll_tts_task(task_id)
+            logger.info(
+                f"[TTS][Chunk] {index:04d} task created. taskId={task_id}, "
+                f"attempt_elapsed={_elapsed_ms(attempt_t0)}, thread={thread_name}"
+            )
+            # Use per-task timeout (60s). On timeout a new task will be created on next attempt.
+            audio_url = _poll_tts_task(task_id, timeout_seconds=Config.TTS_SINGLE_TASK_TIMEOUT_SECONDS)
 
             if os.path.isfile(output_path) and not _is_valid_audio_path(output_path):
                 os.remove(output_path)
@@ -795,14 +965,27 @@ def _synthesize_chunk_with_retry(
                 completedAt=_utc_now(),
                 failedAt=None,
             )
-            logger.info(f"[TTS] Chunk {index:04d} completed. output={output_path}")
+            logger.info(
+                f"[TTS][Chunk] {index:04d} COMPLETED. output={output_path}, "
+                f"attempt_elapsed={_elapsed_ms(attempt_t0)}, total_chunk_elapsed={_elapsed_ms(chunk_start_time)}, "
+                f"thread={thread_name}"
+            )
             return output_path
         except TTSAudioError as exc:
             error_code = exc.code
             error_message = str(exc)
+            logger.warning(
+                f"[TTS][Chunk] {index:04d} TTSAudioError in attempt {current_attempt}. "
+                f"code={exc.code}, error={exc}, attempt_elapsed={_elapsed_ms(attempt_t0)}, thread={thread_name}"
+            )
         except Exception as exc:
             error_code = "tts_chunk_failed"
             error_message = str(exc)
+            logger.warning(
+                f"[TTS][Chunk] {index:04d} unexpected error in attempt {current_attempt}. "
+                f"error_type={type(exc).__name__}, error={exc}, "
+                f"attempt_elapsed={_elapsed_ms(attempt_t0)}, thread={thread_name}"
+            )
 
         if os.path.isfile(output_path) and not _is_valid_audio_path(output_path):
             try:
@@ -907,21 +1090,30 @@ def create_audio_from_google_doc(
     *,
     reset_failed_chunk_attempts: bool = True,
 ) -> dict:
+    func_start = time.time()
     selected_voice_id = _resolve_voice_id(voice_id)
     effective_speed = _effective_speed(speed)
     effective_volume = _effective_volume(volume)
     logger.info(
-        f"[TTS] Docs-to-audio started. outputName={output_name or '<auto>'}, "
-        f"voiceId={selected_voice_id or '<missing>'}, speed={effective_speed}, volume={effective_volume}"
+        f"[TTS] ===== Docs-to-audio START =====\n"
+        f"  docUrl={doc_url!r}\n"
+        f"  outputName={output_name or '<auto>'}, voiceId={selected_voice_id or '<missing>'}, "
+        f"speed={effective_speed}, volume={effective_volume}"
     )
     _require_tts_config(selected_voice_id)
 
     doc_id = parse_google_doc_id(doc_url)
+    doc_download_start = time.time()
     text = download_google_doc_text(doc_url)
+    doc_download_elapsed = _elapsed_ms(doc_download_start)
     if not text.strip():
         logger.error("[TTS] Google Docs text is empty.")
         raise TTSAudioError("Google Docs text is empty.", "empty_doc_text")
     normalized_text = _normalize_text(text)
+    logger.info(
+        f"[TTS] Doc text downloaded. chars={len(text)}, normalized_chars={len(normalized_text)}, "
+        f"doc_download_elapsed={doc_download_elapsed}"
+    )
 
     audio_name = _safe_name(output_name or "")
     audio_id = audio_name
@@ -1013,74 +1205,95 @@ def create_audio_from_google_doc(
         )
 
     chunk_results: dict[int, str] = {}
-    concurrency = max(1, min(Config.TTS_MAX_CONCURRENCY, 15, len(processable_indexes) or len(chunks)))
+    # Batch size = TTS_MAX_CONCURRENCY (default 5).
+    # Each batch runs in parallel; the NEXT batch starts only after the current
+    # batch fully completes (all chunks done or failed). This prevents tasks
+    # from piling up and being stuck indefinitely.
+    batch_size = max(1, min(Config.TTS_MAX_CONCURRENCY, 15))
     manifest_lock = threading.Lock()
+    first_error: TTSAudioError | None = None
+
     if processable_indexes:
+        total_batches = (len(processable_indexes) + batch_size - 1) // batch_size
         logger.info(
             f"[TTS] Starting TTS chunk processing. totalChunks={len(chunks)}, "
-            f"pendingChunks={len(processable_indexes)}, concurrency={concurrency}"
+            f"pendingChunks={len(processable_indexes)}, batchSize={batch_size}, "
+            f"totalBatches={total_batches}, perTaskTimeout={Config.TTS_SINGLE_TASK_TIMEOUT_SECONDS}s"
         )
 
-    first_error: TTSAudioError | None = None
-    cancelled_pending = False
-    if processable_indexes:
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = {
-                executor.submit(
-                    _synthesize_chunk_with_retry,
-                    index,
-                    chunks[index - 1],
-                    selected_voice_id,
-                    effective_speed,
-                    effective_volume,
-                    chunk_dir,
-                    manifest,
-                    manifest_lock,
-                ): index
-                for index in processable_indexes
-            }
-            for future in as_completed(futures):
-                index = futures[future]
-                try:
-                    chunk_results[index] = future.result()
-                    logger.info(
-                        f"[TTS] Chunk future success. chunk={index:04d}, "
-                        f"completed={len(chunk_results)}/{len(processable_indexes)}"
-                    )
-                except CancelledError:
-                    logger.info(f"[TTS] Chunk future cancelled. chunk={index:04d}")
-                except TTSAudioError as exc:
-                    logger.exception(f"[TTS] Chunk future failed. chunk={index:04d}, error={exc}")
-                    if first_error is None:
-                        first_error = exc
-                    if not cancelled_pending:
-                        cancelled_pending = True
-                        for pending_future, pending_index in futures.items():
-                            if pending_future is future or pending_future.done():
-                                continue
-                            if pending_future.cancel():
-                                logger.info(
-                                    f"[TTS] Cancelled pending chunk future after terminal failure. "
-                                    f"chunk={pending_index:04d}"
-                                )
-                except Exception as exc:
-                    logger.exception(f"[TTS] Chunk future failed. chunk={index:04d}, error={exc}")
-                    if first_error is None:
-                        first_error = TTSAudioError(
-                            "TTS request failed.",
-                            "tts_task_failed",
-                            {"error": str(exc)},
+        for batch_num, batch_start in enumerate(range(0, len(processable_indexes), batch_size), start=1):
+            if first_error is not None:
+                remaining_batches = total_batches - batch_num + 1
+                logger.warning(
+                    f"[TTS] Skipping remaining {remaining_batches} batch(es) due to terminal chunk failure. "
+                    f"error_code={first_error.code}"
+                )
+                break
+
+            batch_indexes = processable_indexes[batch_start: batch_start + batch_size]
+            batch_t0 = time.time()
+            logger.info(
+                f"[TTS] Batch {batch_num}/{total_batches} START. "
+                f"chunks={[f'{i:04d}' for i in batch_indexes]}, workers={len(batch_indexes)}"
+            )
+
+            with ThreadPoolExecutor(max_workers=len(batch_indexes)) as executor:
+                futures = {
+                    executor.submit(
+                        _synthesize_chunk_with_retry,
+                        index,
+                        chunks[index - 1],
+                        selected_voice_id,
+                        effective_speed,
+                        effective_volume,
+                        chunk_dir,
+                        manifest,
+                        manifest_lock,
+                    ): index
+                    for index in batch_indexes
+                }
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        chunk_results[index] = future.result()
+                        batch_done = sum(1 for i in batch_indexes if i in chunk_results)
+                        logger.info(
+                            f"[TTS] Chunk {index:04d} SUCCESS. "
+                            f"batch={batch_num}/{total_batches}, "
+                            f"batchProgress={batch_done}/{len(batch_indexes)}"
                         )
-                    if not cancelled_pending:
-                        cancelled_pending = True
-                        for pending_future, pending_index in futures.items():
-                            if pending_future is future or pending_future.done():
-                                continue
-                            if pending_future.cancel():
-                                logger.info(
-                                    f"[TTS] Cancelled pending chunk future after terminal failure. "
-                                    f"chunk={pending_index:04d}"
-                                )
+                    except CancelledError:
+                        logger.info(f"[TTS] Chunk {index:04d} cancelled. batch={batch_num}")
+                    except TTSAudioError as exc:
+                        logger.error(
+                            f"[TTS] Chunk {index:04d} FAILED (terminal). "
+                            f"batch={batch_num}/{total_batches}, code={exc.code}, error={exc}"
+                        )
+                        if first_error is None:
+                            first_error = exc
+                    except Exception as exc:
+                        logger.error(
+                            f"[TTS] Chunk {index:04d} FAILED (unexpected). "
+                            f"batch={batch_num}/{total_batches}, "
+                            f"error_type={type(exc).__name__}, error={exc}"
+                        )
+                        if first_error is None:
+                            first_error = TTSAudioError(
+                                "TTS request failed.",
+                                "tts_task_failed",
+                                {"error": str(exc)},
+                            )
+                # NOTE: Do NOT break out of as_completed early — always wait for
+                # all chunks in this batch to finish before moving to next batch.
+
+            batch_elapsed = f"{(time.time() - batch_t0) * 1000:.0f}ms"
+            batch_succeeded = sum(1 for i in batch_indexes if i in chunk_results)
+            logger.info(
+                f"[TTS] Batch {batch_num}/{total_batches} DONE. "
+                f"succeeded={batch_succeeded}/{len(batch_indexes)}, "
+                f"elapsed={batch_elapsed}, "
+                f"hasError={'YES – stopping' if first_error else 'no'}"
+            )
 
     if first_error is not None:
         manifest["lastErrorCode"] = first_error.code
@@ -1128,9 +1341,11 @@ def create_audio_from_google_doc(
     _manifest_audio_state(manifest)
     _save_chunk_manifest(manifest)
     audio_item = _build_audio_item_from_path(output_path)
+    total_elapsed = _elapsed_ms(func_start)
     logger.info(
-        f"[TTS] Docs-to-audio completed successfully. output={output_path}, "
-        f"relativePath={storage_relative_path(output_path)}, chunks={len(chunks)}"
+        f"[TTS] ===== Docs-to-audio COMPLETED =====\n"
+        f"  output={output_path}, relativePath={storage_relative_path(output_path)}, "
+        f"chunks={len(chunks)}, total_elapsed={total_elapsed}"
     )
     return {
         "audio": audio_item,

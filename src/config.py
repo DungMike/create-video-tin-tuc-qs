@@ -74,9 +74,12 @@ class Config:
     TTS_PLATFORM = os.getenv("TTS_PLATFORM", "minimax")
     TTS_DEFAULT_VOICE_ID = os.getenv("TTS_DEFAULT_VOICE_ID", "")
     TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "2000"))
-    TTS_MAX_CONCURRENCY = int(os.getenv("TTS_MAX_CONCURRENCY", "15"))
+    TTS_MAX_CONCURRENCY = int(os.getenv("TTS_MAX_CONCURRENCY", "5"))
     TTS_POLL_INTERVAL_SECONDS = float(os.getenv("TTS_POLL_INTERVAL_SECONDS", "2"))
     TTS_TASK_TIMEOUT_SECONDS = int(os.getenv("TTS_TASK_TIMEOUT_SECONDS", "600"))
+    # Per-single-task poll timeout (seconds). If a task stays "running" longer
+    # than this, the chunk retries with a fresh API call. Max retries = CHUNK_MAX_RETRY_CYCLES.
+    TTS_SINGLE_TASK_TIMEOUT_SECONDS = int(os.getenv("TTS_SINGLE_TASK_TIMEOUT_SECONDS", "60"))
     TTS_SPEED = float(os.getenv("TTS_SPEED", "1"))
     TTS_VOLUME = float(os.getenv("TTS_VOLUME", "1"))
 
