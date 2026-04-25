@@ -2,6 +2,7 @@ import { startTransition, useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
+import { TopNav } from "@/components/top-nav";
 import { EmptyCard } from "@/components/empty-card";
 import { LoadingCard } from "@/components/loading-card";
 import { PaginationBar } from "@/components/pagination-bar";
@@ -181,6 +182,7 @@ export function ReviewPage() {
 
   return (
     <AppShell>
+      <TopNav />
       <HeroCard
         eyebrow={`Job ${data.job.jobId}`}
         title={isImageOnly ? "Render tu anh va audio" : "Review clip va gan tag tai nguyen"}

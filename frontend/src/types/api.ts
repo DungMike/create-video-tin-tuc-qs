@@ -235,22 +235,45 @@ export interface DecorVideoUploadResponse {
 
 // --- Batch Pipeline ---
 
+export type BatchInputMode = "docs" | "audio_upload";
+export type BatchSourceType = "doc_url" | "uploaded_audio";
+
 export interface BatchPipelineItem {
-  docUrl: string;
+  sourceType: BatchSourceType;
   outputName: string;
   decorVideoId?: string;
+  docUrl?: string | null;
+  audioFileIndex?: number | null;
+  sourceAudioName?: string | null;
+  sourceAudioRelativePath?: string | null;
 }
 
 export interface BatchPipelineResponse {
   batchId: string;
   totalUrls: number;
+  inputMode: BatchInputMode;
   message: string;
+}
+
+export interface BatchRetryResponse {
+  batchId: string;
+  failedUrls: number;
+  message: string;
+}
+
+export interface BatchChunkSummary {
+  completed: number;
+  failed: number;
+  total: number;
 }
 
 export interface BatchItemProgress {
   index: number;
+  sourceType: BatchSourceType;
   outputName: string;
-  docUrl: string;
+  docUrl: string | null;
+  sourceAudioName: string | null;
+  sourceAudioRelativePath: string | null;
   decorVideoId: string;
   decorVideoName: string;
   status: "pending" | "running" | "completed" | "failed";
@@ -260,13 +283,25 @@ export interface BatchItemProgress {
   outputVideo: string | null;
   jobId: string | null;
   error: string | null;
+  audioRelativePath: string | null;
+  audioStatus: "none" | "partial" | "ready";
+  chunkSummary: BatchChunkSummary;
+  retryable: boolean;
+  failureCode: string | null;
+  failureStage: string | null;
+  lastRetryAt: string | null;
 }
 
 export interface BatchProgressResponse {
   batchId: string;
+  inputMode: BatchInputMode;
   status: "pending" | "running" | "completed" | "failed";
   totalUrls: number;
   completedUrls: number;
+  failedUrls: number;
+  canRetryFailed: boolean;
+  retryFailedLabel: string;
+  expiresAt: string;
   startedAt: string;
   updatedAt: string;
   items: BatchItemProgress[];

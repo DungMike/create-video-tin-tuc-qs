@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import uuid
 from datetime import datetime
 
@@ -38,7 +39,7 @@ from src.utils.file_manager import (
 )
 from src.utils.job_progress import init_job_progress, load_job_progress, update_job_progress
 from src.utils.logger import logger
-from src.utils.batch_pipeline import BatchPipelineRunner, load_batch_progress
+from src.utils.batch_pipeline import BatchPipelineRunner, cleanup_expired_batch_retry_artifacts, load_batch_progress
 from src.utils.decor_videos import (
     add_decor_video,
     delete_decor_video,
@@ -81,6 +82,11 @@ def _parse_links(raw_text: str) -> list[str]:
         seen.add(value)
         links.append(value)
     return links
+
+
+def _batch_input_mode(raw_value: str | None) -> str:
+    normalized = str(raw_value or "docs").strip().lower()
+    return normalized if normalized in {"docs", "audio_upload"} else ""
 
 
 def _save_uploaded_file(file_storage, target_dir: str, prefix: str = "") -> str:
@@ -790,6 +796,10 @@ def decor_videos_delete(decor_id: str):
 @app.route("/api/batch-pipeline", methods=["POST"])
 def start_batch_pipeline():
     import threading
+    cleanup_expired_batch_retry_artifacts()
+    input_mode = _batch_input_mode(request.form.get("inputMode"))
+    if not input_mode:
+        return _json_error("Input mode khong hop le.", code="bad_request")
 
     raw_items = request.form.get("items", "")
     try:
@@ -798,29 +808,72 @@ def start_batch_pipeline():
         return _json_error("Truong 'items' JSON khong hop le.", code="invalid_json")
 
     if not isinstance(items, list) or not items:
-        return _json_error("Can it nhat 1 URL trong danh sach items.", code="empty_items")
+        return _json_error("Can it nhat 1 item trong batch.", code="empty_items")
 
     # Validate each item
     output_names_seen: set[str] = set()
+    audio_files = [file_obj for file_obj in request.files.getlist("audioFiles") if file_obj and file_obj.filename]
+    if input_mode == "audio_upload" and not audio_files:
+        return _json_error("Can upload it nhat 1 file audio.", code="audio_required")
+    if input_mode == "audio_upload" and len(audio_files) != len(items):
+        return _json_error(
+            "So file audio phai khop so item trong batch.",
+            code="batch_audio_count_mismatch",
+            details={"audioFiles": len(audio_files), "items": len(items)},
+        )
+
+    invalid_audio_files = [
+        file_obj.filename for file_obj in audio_files if not _allowed_file(file_obj.filename, Config.ALLOWED_AUDIO_EXTENSIONS)
+    ]
+    if invalid_audio_files:
+        return _json_error(
+            "Co file audio khong dung dinh dang.",
+            code="invalid_audio_type",
+            details={"invalidAudioFiles": invalid_audio_files},
+        )
+
     for idx, item in enumerate(items):
         if not isinstance(item, dict):
             return _json_error(f"Item {idx} khong hop le.", code="invalid_item")
-        doc_url = (item.get("docUrl") or "").strip()
         output_name = (item.get("outputName") or "").strip()
-        if not doc_url:
-            return _json_error(f"Item {idx}: docUrl la bat buoc.", code="missing_doc_url")
         if not output_name:
             return _json_error(f"Item {idx}: outputName la bat buoc.", code="missing_output_name")
         if output_name in output_names_seen:
             return _json_error(
                 f"Ten output '{output_name}' bi trung lap. Moi ten output phai la duy nhat.",
                 code="duplicate_output_name",
-            )
+        )
         output_names_seen.add(output_name)
-        # Normalize
-        item["docUrl"] = doc_url
         item["outputName"] = output_name
         item["decorVideoId"] = (item.get("decorVideoId") or "").strip()
+        if input_mode == "docs":
+            doc_url = (item.get("docUrl") or "").strip()
+            if not doc_url:
+                return _json_error(f"Item {idx}: docUrl la bat buoc.", code="missing_doc_url")
+            item["sourceType"] = "doc_url"
+            item["docUrl"] = doc_url
+            item["sourceAudioName"] = None
+            item["sourceAudioRelativePath"] = None
+            item["audioFileIndex"] = None
+        else:
+            source_type = str(item.get("sourceType") or "uploaded_audio")
+            if source_type != "uploaded_audio":
+                return _json_error(f"Item {idx}: sourceType khong hop le cho audio upload.", code="invalid_item")
+            try:
+                audio_file_index = int(item.get("audioFileIndex") if item.get("audioFileIndex") is not None else idx)
+            except (TypeError, ValueError):
+                return _json_error(f"Item {idx}: audioFileIndex khong hop le.", code="invalid_item")
+            if audio_file_index != idx:
+                return _json_error(
+                    f"Item {idx}: audioFileIndex phai trung thu tu file audio upload.",
+                    code="batch_audio_index_mismatch",
+                )
+            source_audio_name = (item.get("sourceAudioName") or audio_files[idx].filename or "").strip()
+            item["sourceType"] = "uploaded_audio"
+            item["docUrl"] = None
+            item["sourceAudioName"] = source_audio_name or (audio_files[idx].filename or f"audio_{idx + 1}")
+            item["sourceAudioRelativePath"] = None
+            item["audioFileIndex"] = audio_file_index
 
     # Validate images
     image_files = [f for f in request.files.getlist("images") if f and f.filename]
@@ -838,16 +891,25 @@ def start_batch_pipeline():
         )
 
     voice_id = (request.form.get("voiceId") or "").strip()
-    try:
-        speed = float(request.form.get("speed") or 1)
-        volume = float(request.form.get("volume") or 1)
-    except (ValueError, TypeError):
-        return _json_error("Speed hoac volume khong hop le.", code="bad_request")
+    speed = 1.0
+    volume = 1.0
+    if input_mode == "docs":
+        try:
+            speed = float(request.form.get("speed") or 1)
+            volume = float(request.form.get("volume") or 1)
+        except (ValueError, TypeError):
+            return _json_error("Speed hoac volume khong hop le.", code="bad_request")
+    else:
+        voice_id = ""
 
     # Create batch dir and save shared images
     batch_id = f"batch_{uuid.uuid4().hex[:8]}"
-    batch_images_dir = os.path.join(Config.STORAGE_DIR, "batch", batch_id, "shared_images")
+    batch_root_dir = os.path.join(Config.STORAGE_DIR, "batch", batch_id)
+    batch_images_dir = os.path.join(batch_root_dir, "shared_images")
+    batch_uploaded_audio_dir = os.path.join(batch_root_dir, "uploaded_audio")
     os.makedirs(batch_images_dir, exist_ok=True)
+    if input_mode == "audio_upload":
+        os.makedirs(batch_uploaded_audio_dir, exist_ok=True)
 
     shared_image_paths = []
     for idx, img_file in enumerate(image_files):
@@ -856,6 +918,31 @@ def start_batch_pipeline():
         img_file.save(filepath)
         shared_image_paths.append(filepath)
 
+    invalid_saved_audio_files: list[str] = []
+    try:
+        if input_mode == "audio_upload":
+            for idx, audio_file in enumerate(audio_files):
+                original_name = audio_file.filename or f"audio_{idx + 1}"
+                safe_name = secure_filename(original_name) or f"audio_{idx + 1}.mp3"
+                filepath = os.path.join(batch_uploaded_audio_dir, f"{idx:04d}_{safe_name}")
+                audio_file.save(filepath)
+                if not validate_audio(filepath):
+                    invalid_saved_audio_files.append(original_name)
+                    continue
+                items[idx]["sourceAudioName"] = items[idx].get("sourceAudioName") or original_name
+                items[idx]["sourceAudioRelativePath"] = storage_relative_path(filepath)
+
+        if invalid_saved_audio_files:
+            shutil.rmtree(batch_root_dir, ignore_errors=True)
+            return _json_error(
+                "Co file audio khong hop le hoac khong doc duoc.",
+                code="invalid_audio",
+                details={"invalidAudioFiles": invalid_saved_audio_files},
+            )
+    except Exception:
+        shutil.rmtree(batch_root_dir, ignore_errors=True)
+        raise
+
     runner = BatchPipelineRunner(
         batch_id=batch_id,
         items=items,
@@ -863,13 +950,48 @@ def start_batch_pipeline():
         voice_id=voice_id,
         speed=speed,
         volume=volume,
+        input_mode=input_mode,
     )
 
     thread = threading.Thread(target=runner.run_batch, daemon=True)
     thread.start()
     logger.info(f"Batch pipeline started: {batch_id} with {len(items)} items")
 
-    return jsonify({"batchId": batch_id, "totalUrls": len(items), "message": "Batch pipeline started"}), 201
+    return jsonify(
+        {
+            "batchId": batch_id,
+            "totalUrls": len(items),
+            "inputMode": input_mode,
+            "message": "Batch pipeline started",
+        }
+    ), 201
+
+
+@app.route("/api/batch-pipeline/<batch_id>/retry-failed", methods=["POST"])
+def retry_failed_batch_pipeline(batch_id: str):
+    import threading
+
+    cleanup_expired_batch_retry_artifacts()
+    progress = load_batch_progress(batch_id)
+    if not progress:
+        return _json_error("Batch pipeline khong tim thay.", status_code=404, code="not_found")
+
+    try:
+        runner = BatchPipelineRunner.from_saved_batch(batch_id)
+        target_indexes = runner.retry_failed_items()
+    except RuntimeError as exc:
+        return _json_error(str(exc), status_code=409, code="batch_retry_not_allowed")
+
+    thread = threading.Thread(target=runner.run_batch, kwargs={"target_indexes": target_indexes}, daemon=True)
+    thread.start()
+    logger.info(f"[BatchPipeline] Retry all failed started for {batch_id}: {len(target_indexes)} items")
+    return jsonify(
+        {
+            "batchId": batch_id,
+            "failedUrls": len(target_indexes),
+            "message": "Retry all failed started",
+        }
+    )
 
 
 @app.route("/api/batch-pipeline/<batch_id>/progress", methods=["GET"])

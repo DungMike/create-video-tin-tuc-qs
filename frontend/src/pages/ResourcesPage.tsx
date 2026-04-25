@@ -2,6 +2,7 @@ import { startTransition, useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
+import { TopNav } from "@/components/top-nav";
 import { EmptyCard } from "@/components/empty-card";
 import { LibraryAssetCard } from "@/components/library-asset-card";
 import { LoadingCard } from "@/components/loading-card";
@@ -128,6 +129,7 @@ export function ResourcesPage() {
 
   return (
     <AppShell>
+      <TopNav />
       <HeroCard
         eyebrow={`Job ${data.job.jobId}`}
         title="Chon clip tu thu vien tai nguyen"

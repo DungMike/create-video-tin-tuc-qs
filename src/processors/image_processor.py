@@ -94,6 +94,7 @@ class ImageProcessor:
                 Config.FFMPEG_PRESET,
                 Config.VIDEO_BITRATE,
                 str(fade_dur),
+                "v2_jitter_fix", # Invalidate old shaky cache
             ]
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()

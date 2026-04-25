@@ -1,12 +1,15 @@
 import base64
+import hashlib
 import json
 import os
 import re
 import shutil
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -26,6 +29,9 @@ class TTSAudioError(Exception):
 
 
 SENTENCE_PATTERN = re.compile(r".+?(?:\.\.\.|[.!?]+)(?=\s|$)|.+$", re.S)
+CHUNK_MANIFEST_VERSION = 1
+CHUNK_MAX_RETRY_CYCLES = 5
+CHUNK_MAX_ATTEMPTS = CHUNK_MAX_RETRY_CYCLES + 1
 
 
 def _utc_now() -> str:
@@ -44,6 +50,10 @@ def generated_audio_dir() -> str:
 
 def generated_chunks_dir(audio_id: str) -> str:
     return _storage_dir("audio", "generated", "chunks", audio_id)
+
+
+def generated_chunk_manifest_path(audio_id: str) -> str:
+    return os.path.join(generated_chunks_dir(audio_id), "manifest.json")
 
 
 def text_sources_dir() -> str:
@@ -71,6 +81,14 @@ def _safe_name(raw_name: str) -> str:
     return name or next_default_audio_name()
 
 
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def _hash_text(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
 def next_default_audio_name() -> str:
     prefix = datetime.now().strftime("%d-%m")
     pattern = re.compile(rf"^{re.escape(prefix)}-audio-(\d+)\.mp3$", re.I)
@@ -80,6 +98,39 @@ def next_default_audio_name() -> str:
         if match:
             max_index = max(max_index, int(match.group(1)))
     return f"{prefix}-audio-{max_index + 1}"
+
+
+def _effective_speed(speed: float | None) -> float:
+    return speed if speed is not None else Config.TTS_SPEED
+
+
+def _effective_volume(volume: float | None) -> float:
+    return volume if volume is not None else Config.TTS_VOLUME
+
+
+def _generated_audio_output_path(audio_id: str) -> str:
+    return os.path.join(generated_audio_dir(), f"{audio_id}.mp3")
+
+
+def _chunk_output_path(output_dir: str, index: int) -> str:
+    return os.path.join(output_dir, f"{index:04d}.mp3")
+
+
+def _build_audio_item_from_path(path: str) -> dict | None:
+    if not os.path.isfile(path):
+        return None
+    duration = FFmpegHelper.probe_duration(path)
+    return {
+        "id": Path(path).stem,
+        "name": Path(path).stem,
+        "relativePath": storage_relative_path(path),
+        "duration": round(duration, 3),
+        "createdAt": datetime.fromtimestamp(os.path.getmtime(path)).isoformat(timespec="seconds"),
+    }
+
+
+def _is_valid_audio_path(path: str) -> bool:
+    return bool(path) and os.path.isfile(path) and validate_audio(path)
 
 
 def parse_google_doc_id(doc_url: str) -> str | None:
@@ -140,7 +191,7 @@ def download_google_doc_text(doc_url: str) -> str:
 
 def split_text_into_chunks(text: str, max_chars: int | None = None) -> list[str]:
     limit = max_chars or Config.TTS_MAX_CHARS
-    normalized = re.sub(r"\s+", " ", (text or "").strip())
+    normalized = _normalize_text(text)
     if not normalized:
         logger.warning("[TTS] Text is empty after normalization; no chunks created.")
         return []
@@ -227,6 +278,304 @@ def _resolve_voice_id(voice_id: str | None) -> str:
     return ""
 
 
+def _load_chunk_manifest(audio_id: str) -> dict[str, Any] | None:
+    manifest_path = generated_chunk_manifest_path(audio_id)
+    if not os.path.isfile(manifest_path):
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as file_obj:
+            data = json.load(file_obj)
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(f"[TTS] Could not load chunk manifest for {audio_id}: {exc}")
+        return None
+
+
+def _save_chunk_manifest(manifest: dict[str, Any]):
+    manifest["updatedAt"] = _utc_now()
+    manifest_path = generated_chunk_manifest_path(str(manifest["audioId"]))
+    with open(manifest_path, "w", encoding="utf-8") as file_obj:
+        json.dump(manifest, file_obj, ensure_ascii=False, indent=2)
+
+
+def _default_chunk_record(index: int, text: str, output_dir: str) -> dict[str, Any]:
+    return {
+        "index": index,
+        "textHash": _hash_text(text),
+        "chars": len(text),
+        "status": "pending",
+        "attemptsUsed": 0,
+        "maxRetries": CHUNK_MAX_RETRY_CYCLES,
+        "lastTaskId": None,
+        "lastErrorCode": None,
+        "lastErrorMessage": None,
+        "outputRelativePath": storage_relative_path(_chunk_output_path(output_dir, index)),
+        "createdAt": _utc_now(),
+        "updatedAt": _utc_now(),
+        "completedAt": None,
+        "failedAt": None,
+    }
+
+
+def _build_chunk_manifest(
+    audio_id: str,
+    doc_url: str,
+    doc_id: str | None,
+    text_path: str,
+    normalized_text: str,
+    voice_id: str,
+    speed: float,
+    volume: float,
+    chunks: list[str],
+) -> dict[str, Any]:
+    chunk_dir = generated_chunks_dir(audio_id)
+    output_path = _generated_audio_output_path(audio_id)
+    return {
+        "version": CHUNK_MANIFEST_VERSION,
+        "audioId": audio_id,
+        "docUrl": doc_url,
+        "docId": doc_id,
+        "textRelativePath": storage_relative_path(text_path),
+        "textHash": _hash_text(normalized_text),
+        "voiceId": voice_id,
+        "speed": speed,
+        "volume": volume,
+        "chunkCount": len(chunks),
+        "maxRetries": CHUNK_MAX_RETRY_CYCLES,
+        "maxAttempts": CHUNK_MAX_ATTEMPTS,
+        "audioStatus": "none",
+        "finalAudioRelativePath": storage_relative_path(output_path),
+        "createdAt": _utc_now(),
+        "updatedAt": _utc_now(),
+        "lastErrorCode": None,
+        "lastErrorMessage": None,
+        "chunks": [_default_chunk_record(index, chunk, chunk_dir) for index, chunk in enumerate(chunks, start=1)],
+    }
+
+
+def _manifest_matches_inputs(
+    manifest: dict[str, Any],
+    doc_id: str | None,
+    normalized_text: str,
+    voice_id: str,
+    speed: float,
+    volume: float,
+    chunk_count: int,
+) -> bool:
+    return (
+        int(manifest.get("version") or 0) == CHUNK_MANIFEST_VERSION
+        and str(manifest.get("docId") or "") == str(doc_id or "")
+        and str(manifest.get("textHash") or "") == _hash_text(normalized_text)
+        and str(manifest.get("voiceId") or "") == voice_id
+        and float(manifest.get("speed") or 0) == float(speed)
+        and float(manifest.get("volume") or 0) == float(volume)
+        and int(manifest.get("chunkCount") or 0) == int(chunk_count)
+    )
+
+
+def _clear_audio_cache(audio_id: str):
+    chunk_dir = generated_chunks_dir(audio_id)
+    for old_chunk in Path(chunk_dir).glob("*.mp3"):
+        try:
+            logger.info(f"[TTS] Removing stale chunk file: {old_chunk}")
+            old_chunk.unlink()
+        except OSError as exc:
+            logger.warning(f"[TTS] Could not remove stale chunk file {old_chunk}: {exc}")
+
+    output_path = _generated_audio_output_path(audio_id)
+    concat_path = os.path.join(generated_audio_dir(), f"{audio_id}_concat.txt")
+    for stale_path in (output_path, concat_path):
+        if os.path.isfile(stale_path):
+            try:
+                logger.info(f"[TTS] Removing stale audio artifact: {stale_path}")
+                os.remove(stale_path)
+            except OSError as exc:
+                logger.warning(f"[TTS] Could not remove stale audio artifact {stale_path}: {exc}")
+
+
+def _chunk_record_output_path(record: dict[str, Any]) -> str:
+    return storage_absolute_path(str(record.get("outputRelativePath") or ""))
+
+
+def _chunk_record_has_valid_audio(record: dict[str, Any]) -> bool:
+    return _is_valid_audio_path(_chunk_record_output_path(record))
+
+
+def _chunk_summary_from_manifest(manifest: dict[str, Any]) -> dict[str, int]:
+    completed = sum(1 for record in manifest.get("chunks", []) if str(record.get("status")) == "completed")
+    failed = sum(1 for record in manifest.get("chunks", []) if str(record.get("status")) == "failed")
+    total = int(manifest.get("chunkCount") or len(manifest.get("chunks", [])))
+    return {"completed": completed, "failed": failed, "total": total}
+
+
+def _manifest_audio_state(
+    manifest: dict[str, Any],
+    *,
+    failure_code: str | None = None,
+    failure_stage: str | None = None,
+) -> dict[str, Any]:
+    summary = _chunk_summary_from_manifest(manifest)
+    final_audio_relative_path = str(manifest.get("finalAudioRelativePath") or "")
+    final_audio_path = storage_absolute_path(final_audio_relative_path) if final_audio_relative_path else ""
+    final_audio_ready = _is_valid_audio_path(final_audio_path)
+
+    if final_audio_ready:
+        audio_status = "ready"
+    elif summary["completed"] > 0 or summary["failed"] > 0:
+        audio_status = "partial"
+    else:
+        audio_status = "none"
+
+    manifest["audioStatus"] = audio_status
+    return {
+        "audioRelativePath": final_audio_relative_path if final_audio_ready else None,
+        "audioStatus": audio_status,
+        "chunkSummary": summary,
+        "failureCode": failure_code,
+        "failureStage": failure_stage,
+    }
+
+
+def _update_chunk_record(
+    manifest: dict[str, Any],
+    manifest_lock: threading.Lock,
+    index: int,
+    **updates: Any,
+) -> dict[str, Any]:
+    with manifest_lock:
+        record = manifest["chunks"][index - 1]
+        record.update(updates)
+        record["updatedAt"] = _utc_now()
+        if "lastErrorCode" in updates:
+            manifest["lastErrorCode"] = updates["lastErrorCode"]
+        if "lastErrorMessage" in updates:
+            manifest["lastErrorMessage"] = updates["lastErrorMessage"]
+        _manifest_audio_state(manifest)
+        _save_chunk_manifest(manifest)
+        return dict(record)
+
+
+def _sync_chunk_manifest_records(manifest: dict[str, Any], chunks: list[str]) -> bool:
+    audio_id = str(manifest["audioId"])
+    chunk_dir = generated_chunks_dir(audio_id)
+    existing_records = {
+        int(record.get("index") or 0): dict(record)
+        for record in manifest.get("chunks", [])
+        if isinstance(record, dict) and int(record.get("index") or 0) > 0
+    }
+    new_records: list[dict[str, Any]] = []
+    changed = False
+
+    for index, chunk in enumerate(chunks, start=1):
+        expected_hash = _hash_text(chunk)
+        expected_chars = len(chunk)
+        current = existing_records.get(index)
+        if not current or str(current.get("textHash") or "") != expected_hash or int(current.get("chars") or 0) != expected_chars:
+            current = _default_chunk_record(index, chunk, chunk_dir)
+            changed = True
+        else:
+            current["index"] = index
+            current["textHash"] = expected_hash
+            current["chars"] = expected_chars
+            current["maxRetries"] = CHUNK_MAX_RETRY_CYCLES
+            current["outputRelativePath"] = storage_relative_path(_chunk_output_path(chunk_dir, index))
+            current.setdefault("attemptsUsed", 0)
+            current.setdefault("createdAt", _utc_now())
+            current.setdefault("completedAt", None)
+            current.setdefault("failedAt", None)
+            current.setdefault("lastTaskId", None)
+            current.setdefault("lastErrorCode", None)
+            current.setdefault("lastErrorMessage", None)
+
+            if _chunk_record_has_valid_audio(current):
+                if str(current.get("status") or "") != "completed":
+                    current["status"] = "completed"
+                    current["completedAt"] = current.get("completedAt") or _utc_now()
+                    current["lastErrorCode"] = None
+                    current["lastErrorMessage"] = None
+                    changed = True
+            else:
+                current_status = str(current.get("status") or "pending")
+                if current_status in {"completed", "running"}:
+                    current["status"] = "pending"
+                    current["attemptsUsed"] = 0
+                    current["completedAt"] = None
+                    current["lastErrorCode"] = "invalid_cached_audio"
+                    current["lastErrorMessage"] = "Cached chunk audio is missing or invalid."
+                    changed = True
+                elif current_status not in {"pending", "failed"}:
+                    current["status"] = "pending"
+                    changed = True
+        new_records.append(current)
+
+    if len(new_records) != len(manifest.get("chunks", [])):
+        changed = True
+
+    manifest["chunks"] = new_records
+    manifest["chunkCount"] = len(new_records)
+    _manifest_audio_state(manifest)
+    return changed
+
+
+def _reset_retryable_chunk_attempts(manifest: dict[str, Any]):
+    changed = False
+    for record in manifest.get("chunks", []):
+        if str(record.get("status") or "") == "completed" and _chunk_record_has_valid_audio(record):
+            continue
+        if int(record.get("attemptsUsed") or 0) != 0:
+            record["attemptsUsed"] = 0
+            changed = True
+        if str(record.get("status") or "") != "pending":
+            record["status"] = "pending"
+            changed = True
+        if record.get("lastErrorCode") is not None:
+            record["lastErrorCode"] = None
+            changed = True
+        if record.get("lastErrorMessage") is not None:
+            record["lastErrorMessage"] = None
+            changed = True
+        if record.get("lastTaskId") is not None:
+            record["lastTaskId"] = None
+            changed = True
+        record["failedAt"] = None
+        record["updatedAt"] = _utc_now()
+    if changed:
+        manifest["lastErrorCode"] = None
+        manifest["lastErrorMessage"] = None
+        _manifest_audio_state(manifest)
+    return changed
+
+
+def _classify_manifest_chunks(manifest: dict[str, Any]) -> tuple[list[int], list[int]]:
+    processable: list[int] = []
+    exhausted: list[int] = []
+    for record in manifest.get("chunks", []):
+        index = int(record.get("index") or 0)
+        if index <= 0:
+            continue
+        if str(record.get("status") or "") == "completed" and _chunk_record_has_valid_audio(record):
+            continue
+        attempts_used = int(record.get("attemptsUsed") or 0)
+        if attempts_used >= CHUNK_MAX_ATTEMPTS:
+            exhausted.append(index)
+        else:
+            processable.append(index)
+    return processable, exhausted
+
+
+def _ordered_completed_chunk_paths(manifest: dict[str, Any]) -> list[str]:
+    chunk_paths: list[str] = []
+    for record in sorted(manifest.get("chunks", []), key=lambda item: int(item.get("index") or 0)):
+        if str(record.get("status") or "") != "completed" or not _chunk_record_has_valid_audio(record):
+            raise TTSAudioError(
+                f"Chunk {int(record.get('index') or 0):04d} is not ready for concat.",
+                "audio_concat_failed",
+                {"audioState": _manifest_audio_state(manifest, failure_code="audio_concat_failed", failure_stage="tts_audio")},
+            )
+        chunk_paths.append(_chunk_record_output_path(record))
+    return chunk_paths
+
+
 def _tts_headers() -> dict[str, str]:
     return {"T-API-KEY": Config.TTS_API_KEY, "Content-Type": "application/json"}
 
@@ -255,18 +604,32 @@ def _create_tts_task(text: str, voice_id: str, speed: float, volume: float) -> s
     }
     url = _api_url("/api/minimax/createtask2")
     logger.info(f"[TTS] Creating TTS task. voiceId={voice_id}, chars={len(text)}, url={url}")
-    try:
-        response = requests.post(url, headers=_tts_headers(), json=payload, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-    except Exception as exc:
-        response_text = getattr(locals().get("response", None), "text", "")
-        logger.error(f"[TTS] Create TTS task failed. error={exc}, response={response_text[:1000]}")
-        raise TTSAudioError(
-            "Create TTS task failed.",
-            "tts_task_failed",
-            {"error": str(exc), "response": response_text[:2000]},
-        ) from exc
+
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=_tts_headers(), json=payload, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            break
+        except Exception as exc:
+            if attempt < max_retries - 1:
+                logger.warning(
+                    f"[TTS][HTTP retry] Create TTS task request failed (Attempt {attempt + 1}/{max_retries}). "
+                    f"Retrying in {3 * (attempt + 1)}s... Error: {exc}"
+                )
+                time.sleep(3 * (attempt + 1))
+                continue
+            response_text = getattr(locals().get("response", None), "text", "")
+            logger.error(
+                f"[TTS] Create TTS task failed after {max_retries} HTTP attempts. "
+                f"error={exc}, response={response_text[:1000]}"
+            )
+            raise TTSAudioError(
+                "Create TTS task failed.",
+                "tts_create_task_failed",
+                {"error": str(exc), "response": response_text[:2000]},
+            ) from exc
     task_id = data.get("taskId")
     if not task_id:
         logger.error(f"[TTS] Create TTS task response missing taskId. response={data}")
@@ -278,6 +641,8 @@ def _create_tts_task(text: str, voice_id: str, speed: float, volume: float) -> s
 def _poll_tts_task(task_id: str) -> str:
     deadline = time.time() + Config.TTS_TASK_TIMEOUT_SECONDS
     poll_count = 0
+    consecutive_failures = 0
+    max_failures = 5
     logger.info(f"[TTS] Polling TTS task. taskId={task_id}")
     while time.time() < deadline:
         poll_count += 1
@@ -286,10 +651,26 @@ def _poll_tts_task(task_id: str) -> str:
             response = requests.get(url, headers={"T-API-KEY": Config.TTS_API_KEY}, timeout=60)
             response.raise_for_status()
             data = response.json()
+            consecutive_failures = 0
         except Exception as exc:
+            consecutive_failures += 1
+            if consecutive_failures < max_failures:
+                logger.warning(
+                    f"[TTS][HTTP retry] Poll TTS task failed (Failure {consecutive_failures}/{max_failures}). "
+                    f"Continuing poll in {3 * consecutive_failures}s... Error: {exc}"
+                )
+                time.sleep(3 * consecutive_failures)
+                continue
             response_text = getattr(locals().get("response", None), "text", "")
-            logger.error(f"[TTS] Poll TTS task failed. taskId={task_id}, error={exc}, response={response_text[:1000]}")
-            raise
+            logger.error(
+                f"[TTS] Poll TTS task failed after {max_failures} consecutive HTTP failures. "
+                f"taskId={task_id}, error={exc}, response={response_text[:1000]}"
+            )
+            raise TTSAudioError(
+                "Poll TTS task failed.",
+                "tts_poll_failed",
+                {"taskId": task_id, "error": str(exc), "response": response_text[:2000]},
+            ) from exc
         status = str(data.get("status", "")).lower()
         logger.info(f"[TTS] Poll result. taskId={task_id}, poll={poll_count}, status={status}")
         if status == "completed":
@@ -309,31 +690,164 @@ def _poll_tts_task(task_id: str) -> str:
 
 def _download_audio(audio_url: str, output_path: str):
     logger.info(f"[TTS] Downloading chunk audio. url={audio_url}, output={output_path}")
-    try:
-        response = requests.get(audio_url, timeout=120)
-        response.raise_for_status()
-    except Exception as exc:
-        response_text = getattr(locals().get("response", None), "text", "")
-        logger.error(f"[TTS] Download chunk audio failed. error={exc}, response={response_text[:1000]}")
-        raise
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(audio_url, timeout=120)
+            response.raise_for_status()
+            break
+        except Exception as exc:
+            if attempt < max_retries - 1:
+                logger.warning(
+                    f"[TTS][HTTP retry] Download chunk audio failed (Attempt {attempt + 1}/{max_retries}). "
+                    f"Retrying in {3 * (attempt + 1)}s... Error: {exc}"
+                )
+                time.sleep(3 * (attempt + 1))
+                continue
+            response_text = getattr(locals().get("response", None), "text", "")
+            logger.error(
+                f"[TTS] Download chunk audio failed after {max_retries} HTTP attempts. "
+                f"error={exc}, response={response_text[:1000]}"
+            )
+            raise TTSAudioError(
+                "Download chunk audio failed.",
+                "tts_download_failed",
+                {"error": str(exc), "response": response_text[:2000], "audioUrl": audio_url},
+            ) from exc
     with open(output_path, "wb") as file_obj:
         file_obj.write(response.content)
     logger.info(f"[TTS] Chunk audio downloaded. output={output_path}, bytes={len(response.content)}")
 
 
-def _synthesize_chunk(index: int, text: str, voice_id: str, speed: float, volume: float, output_dir: str) -> str:
-    logger.info(f"[TTS] Chunk {index:04d} started. chars={len(text)}")
-    try:
-        task_id = _create_tts_task(text, voice_id, speed, volume)
-        logger.info(f"[TTS] Chunk {index:04d} task created. taskId={task_id}")
-        audio_url = _poll_tts_task(task_id)
-        output_path = os.path.join(output_dir, f"{index:04d}.mp3")
-        _download_audio(audio_url, output_path)
-        logger.info(f"[TTS] Chunk {index:04d} completed. output={output_path}")
+def _synthesize_chunk_with_retry(
+    index: int,
+    text: str,
+    voice_id: str,
+    speed: float,
+    volume: float,
+    output_dir: str,
+    manifest: dict[str, Any],
+    manifest_lock: threading.Lock,
+) -> str:
+    output_path = _chunk_output_path(output_dir, index)
+    if _is_valid_audio_path(output_path):
+        _update_chunk_record(
+            manifest,
+            manifest_lock,
+            index,
+            status="completed",
+            completedAt=_utc_now(),
+            lastErrorCode=None,
+            lastErrorMessage=None,
+        )
+        logger.info(f"[TTS] Chunk {index:04d} reused from cache. output={output_path}")
         return output_path
-    except Exception as exc:
-        logger.exception(f"[TTS] Chunk {index:04d} failed. chars={len(text)}, error={exc}")
-        raise
+
+    while True:
+        current_record = manifest["chunks"][index - 1]
+        attempts_used = int(current_record.get("attemptsUsed") or 0)
+        if attempts_used >= CHUNK_MAX_ATTEMPTS:
+            raise TTSAudioError(
+                f"Chunk {index:04d} exhausted retry budget.",
+                "tts_chunk_exhausted",
+                {"audioState": _manifest_audio_state(manifest, failure_code="tts_chunk_exhausted", failure_stage="tts_audio")},
+            )
+
+        current_attempt = attempts_used + 1
+        task_id: str | None = None
+        _update_chunk_record(
+            manifest,
+            manifest_lock,
+            index,
+            status="running",
+            lastErrorCode=None,
+            lastErrorMessage=None,
+            failedAt=None,
+        )
+        logger.info(
+            f"[TTS] Chunk {index:04d} started. attempt={current_attempt}/{CHUNK_MAX_ATTEMPTS}, chars={len(text)}"
+        )
+        try:
+            task_id = _create_tts_task(text, voice_id, speed, volume)
+            _update_chunk_record(manifest, manifest_lock, index, lastTaskId=task_id)
+            logger.info(f"[TTS] Chunk {index:04d} task created. taskId={task_id}")
+            audio_url = _poll_tts_task(task_id)
+
+            if os.path.isfile(output_path) and not _is_valid_audio_path(output_path):
+                os.remove(output_path)
+            _download_audio(audio_url, output_path)
+            if not _is_valid_audio_path(output_path):
+                raise TTSAudioError(
+                    "Downloaded chunk audio is invalid.",
+                    "tts_invalid_chunk_audio",
+                    {"chunkIndex": index, "taskId": task_id},
+                )
+
+            _update_chunk_record(
+                manifest,
+                manifest_lock,
+                index,
+                status="completed",
+                attemptsUsed=current_attempt,
+                lastTaskId=task_id,
+                lastErrorCode=None,
+                lastErrorMessage=None,
+                completedAt=_utc_now(),
+                failedAt=None,
+            )
+            logger.info(f"[TTS] Chunk {index:04d} completed. output={output_path}")
+            return output_path
+        except TTSAudioError as exc:
+            error_code = exc.code
+            error_message = str(exc)
+        except Exception as exc:
+            error_code = "tts_chunk_failed"
+            error_message = str(exc)
+
+        if os.path.isfile(output_path) and not _is_valid_audio_path(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+
+        terminal_failure = current_attempt >= CHUNK_MAX_ATTEMPTS
+        _update_chunk_record(
+            manifest,
+            manifest_lock,
+            index,
+            status="failed" if terminal_failure else "pending",
+            attemptsUsed=current_attempt,
+            lastTaskId=task_id,
+            lastErrorCode=error_code,
+            lastErrorMessage=error_message,
+            failedAt=_utc_now() if terminal_failure else None,
+        )
+
+        if terminal_failure:
+            logger.error(
+                f"[TTS][Chunk retry] Chunk {index:04d} exhausted retry budget after "
+                f"{current_attempt}/{CHUNK_MAX_ATTEMPTS} attempts. code={error_code}, error={error_message}"
+            )
+            raise TTSAudioError(
+                error_message,
+                error_code,
+                {
+                    "chunkIndex": index,
+                    "taskId": task_id,
+                    "audioState": _manifest_audio_state(
+                        manifest,
+                        failure_code=error_code,
+                        failure_stage="tts_audio",
+                    ),
+                },
+            )
+
+        retry_delay = min(15, current_attempt * 2)
+        logger.warning(
+            f"[TTS][Chunk retry] Chunk {index:04d} attempt {current_attempt}/{CHUNK_MAX_ATTEMPTS} failed. "
+            f"Retrying chunk in {retry_delay}s. code={error_code}, error={error_message}"
+        )
+        time.sleep(retry_delay)
 
 
 def _concat_audio_chunks(chunk_paths: list[str], output_path: str) -> bool:
@@ -390,19 +904,24 @@ def create_audio_from_google_doc(
     voice_id: str | None = None,
     speed: float | None = None,
     volume: float | None = None,
+    *,
+    reset_failed_chunk_attempts: bool = True,
 ) -> dict:
     selected_voice_id = _resolve_voice_id(voice_id)
+    effective_speed = _effective_speed(speed)
+    effective_volume = _effective_volume(volume)
     logger.info(
         f"[TTS] Docs-to-audio started. outputName={output_name or '<auto>'}, "
-        f"voiceId={selected_voice_id or '<missing>'}, speed={speed if speed is not None else Config.TTS_SPEED}, "
-        f"volume={volume if volume is not None else Config.TTS_VOLUME}"
+        f"voiceId={selected_voice_id or '<missing>'}, speed={effective_speed}, volume={effective_volume}"
     )
     _require_tts_config(selected_voice_id)
 
+    doc_id = parse_google_doc_id(doc_url)
     text = download_google_doc_text(doc_url)
     if not text.strip():
         logger.error("[TTS] Google Docs text is empty.")
         raise TTSAudioError("Google Docs text is empty.", "empty_doc_text")
+    normalized_text = _normalize_text(text)
 
     audio_name = _safe_name(output_name or "")
     audio_id = audio_name
@@ -419,26 +938,106 @@ def create_audio_from_google_doc(
 
     chunk_dir = generated_chunks_dir(audio_id)
     logger.info(f"[TTS] Preparing chunk output directory. path={chunk_dir}")
-    for old_chunk in Path(chunk_dir).glob("*.mp3"):
-        logger.info(f"[TTS] Removing stale chunk file: {old_chunk}")
-        old_chunk.unlink()
+    manifest = _load_chunk_manifest(audio_id)
+    manifest_changed = False
+
+    if manifest and _manifest_matches_inputs(
+        manifest,
+        doc_id,
+        normalized_text,
+        selected_voice_id,
+        effective_speed,
+        effective_volume,
+        len(chunks),
+    ):
+        manifest_changed = _sync_chunk_manifest_records(manifest, chunks)
+        manifest["docUrl"] = doc_url
+        manifest["docId"] = doc_id
+        manifest["textRelativePath"] = storage_relative_path(text_path)
+        manifest["textHash"] = _hash_text(normalized_text)
+        manifest["voiceId"] = selected_voice_id
+        manifest["speed"] = effective_speed
+        manifest["volume"] = effective_volume
+        manifest["chunkCount"] = len(chunks)
+        manifest["maxRetries"] = CHUNK_MAX_RETRY_CYCLES
+        manifest["maxAttempts"] = CHUNK_MAX_ATTEMPTS
+        manifest["finalAudioRelativePath"] = storage_relative_path(_generated_audio_output_path(audio_id))
+
+        cached_audio_state = _manifest_audio_state(manifest)
+        if cached_audio_state["audioStatus"] == "ready" and cached_audio_state["audioRelativePath"]:
+            if manifest_changed:
+                _save_chunk_manifest(manifest)
+            cached_audio_path = storage_absolute_path(cached_audio_state["audioRelativePath"])
+            audio_item = _build_audio_item_from_path(cached_audio_path)
+            logger.info(
+                f"[TTS] Reusing existing final audio without new TTS requests. "
+                f"output={cached_audio_path}, chunks={len(chunks)}"
+            )
+            return {
+                "audio": audio_item,
+                "chunkCount": len(chunks),
+                "textRelativePath": storage_relative_path(text_path),
+                "audioState": cached_audio_state,
+            }
+
+        if reset_failed_chunk_attempts:
+            manifest_changed = _reset_retryable_chunk_attempts(manifest) or manifest_changed
+    else:
+        if manifest:
+            logger.info(f"[TTS] Manifest fingerprint changed for {audio_id}. Resetting cached chunks/audio.")
+            _clear_audio_cache(audio_id)
+        manifest = _build_chunk_manifest(
+            audio_id,
+            doc_url,
+            doc_id,
+            text_path,
+            normalized_text,
+            selected_voice_id,
+            effective_speed,
+            effective_volume,
+            chunks,
+        )
+        manifest_changed = True
+
+    if manifest_changed:
+        _save_chunk_manifest(manifest)
+
+    processable_indexes, exhausted_indexes = _classify_manifest_chunks(manifest)
+    if exhausted_indexes and not reset_failed_chunk_attempts:
+        failure_code = str(manifest.get("lastErrorCode") or "tts_chunk_exhausted")
+        failure_message = str(manifest.get("lastErrorMessage") or "One or more TTS chunks exhausted retry budget.")
+        raise TTSAudioError(
+            failure_message,
+            failure_code,
+            {"audioState": _manifest_audio_state(manifest, failure_code=failure_code, failure_stage="tts_audio")},
+        )
 
     chunk_results: dict[int, str] = {}
-    concurrency = max(1, min(Config.TTS_MAX_CONCURRENCY, 15, len(chunks)))
-    logger.info(f"[TTS] Starting TTS chunk processing. totalChunks={len(chunks)}, concurrency={concurrency}")
-    try:
+    concurrency = max(1, min(Config.TTS_MAX_CONCURRENCY, 15, len(processable_indexes) or len(chunks)))
+    manifest_lock = threading.Lock()
+    if processable_indexes:
+        logger.info(
+            f"[TTS] Starting TTS chunk processing. totalChunks={len(chunks)}, "
+            f"pendingChunks={len(processable_indexes)}, concurrency={concurrency}"
+        )
+
+    first_error: TTSAudioError | None = None
+    cancelled_pending = False
+    if processable_indexes:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = {
                 executor.submit(
-                    _synthesize_chunk,
+                    _synthesize_chunk_with_retry,
                     index,
-                    chunk,
+                    chunks[index - 1],
                     selected_voice_id,
-                    speed if speed is not None else Config.TTS_SPEED,
-                    volume if volume is not None else Config.TTS_VOLUME,
+                    effective_speed,
+                    effective_volume,
                     chunk_dir,
+                    manifest,
+                    manifest_lock,
                 ): index
-                for index, chunk in enumerate(chunks, start=1)
+                for index in processable_indexes
             }
             for future in as_completed(futures):
                 index = futures[future]
@@ -446,28 +1045,89 @@ def create_audio_from_google_doc(
                     chunk_results[index] = future.result()
                     logger.info(
                         f"[TTS] Chunk future success. chunk={index:04d}, "
-                        f"completed={len(chunk_results)}/{len(chunks)}"
+                        f"completed={len(chunk_results)}/{len(processable_indexes)}"
                     )
+                except CancelledError:
+                    logger.info(f"[TTS] Chunk future cancelled. chunk={index:04d}")
+                except TTSAudioError as exc:
+                    logger.exception(f"[TTS] Chunk future failed. chunk={index:04d}, error={exc}")
+                    if first_error is None:
+                        first_error = exc
+                    if not cancelled_pending:
+                        cancelled_pending = True
+                        for pending_future, pending_index in futures.items():
+                            if pending_future is future or pending_future.done():
+                                continue
+                            if pending_future.cancel():
+                                logger.info(
+                                    f"[TTS] Cancelled pending chunk future after terminal failure. "
+                                    f"chunk={pending_index:04d}"
+                                )
                 except Exception as exc:
                     logger.exception(f"[TTS] Chunk future failed. chunk={index:04d}, error={exc}")
-                    raise
-    except TTSAudioError:
-        logger.error("[TTS] Docs-to-audio stopped because a TTS chunk failed with TTSAudioError.")
-        raise
-    except Exception as exc:
-        logger.exception(f"[TTS] Docs-to-audio stopped because a TTS request failed: {exc}")
-        raise TTSAudioError("TTS request failed.", "tts_task_failed", {"error": str(exc)}) from exc
+                    if first_error is None:
+                        first_error = TTSAudioError(
+                            "TTS request failed.",
+                            "tts_task_failed",
+                            {"error": str(exc)},
+                        )
+                    if not cancelled_pending:
+                        cancelled_pending = True
+                        for pending_future, pending_index in futures.items():
+                            if pending_future is future or pending_future.done():
+                                continue
+                            if pending_future.cancel():
+                                logger.info(
+                                    f"[TTS] Cancelled pending chunk future after terminal failure. "
+                                    f"chunk={pending_index:04d}"
+                                )
 
-    ordered_chunks = [chunk_results[index] for index in sorted(chunk_results)]
-    output_path = os.path.join(generated_audio_dir(), f"{audio_id}.mp3")
+    if first_error is not None:
+        manifest["lastErrorCode"] = first_error.code
+        manifest["lastErrorMessage"] = str(first_error)
+        _save_chunk_manifest(manifest)
+        logger.error("[TTS] Docs-to-audio stopped because a TTS chunk failed with TTSAudioError.")
+        raise TTSAudioError(
+            str(first_error),
+            first_error.code,
+            {
+                **(first_error.details or {}),
+                "audioState": _manifest_audio_state(
+                    manifest,
+                    failure_code=first_error.code,
+                    failure_stage="tts_audio",
+                ),
+            },
+        )
+
+    ordered_chunks = _ordered_completed_chunk_paths(manifest)
+    output_path = _generated_audio_output_path(audio_id)
     logger.info(f"[TTS] All chunks completed. orderedChunks={len(ordered_chunks)}, finalOutput={output_path}")
     if not _concat_audio_chunks(ordered_chunks, output_path):
-        raise TTSAudioError("Cannot concat TTS audio chunks.", "audio_concat_failed")
+        manifest["lastErrorCode"] = "audio_concat_failed"
+        manifest["lastErrorMessage"] = "Cannot concat TTS audio chunks."
+        _save_chunk_manifest(manifest)
+        raise TTSAudioError(
+            "Cannot concat TTS audio chunks.",
+            "audio_concat_failed",
+            {"audioState": _manifest_audio_state(manifest, failure_code="audio_concat_failed", failure_stage="tts_audio")},
+        )
     if not validate_audio(output_path):
         logger.error(f"[TTS] Final generated audio failed validation. output={output_path}")
-        raise TTSAudioError("Generated audio is invalid.", "audio_concat_failed")
+        manifest["lastErrorCode"] = "audio_concat_failed"
+        manifest["lastErrorMessage"] = "Generated audio is invalid."
+        _save_chunk_manifest(manifest)
+        raise TTSAudioError(
+            "Generated audio is invalid.",
+            "audio_concat_failed",
+            {"audioState": _manifest_audio_state(manifest, failure_code="audio_concat_failed", failure_stage="tts_audio")},
+        )
 
-    audio_item = next((item for item in list_generated_audio() if item["relativePath"] == storage_relative_path(output_path)), None)
+    manifest["lastErrorCode"] = None
+    manifest["lastErrorMessage"] = None
+    _manifest_audio_state(manifest)
+    _save_chunk_manifest(manifest)
+    audio_item = _build_audio_item_from_path(output_path)
     logger.info(
         f"[TTS] Docs-to-audio completed successfully. output={output_path}, "
         f"relativePath={storage_relative_path(output_path)}, chunks={len(chunks)}"
@@ -476,6 +1136,7 @@ def create_audio_from_google_doc(
         "audio": audio_item,
         "chunkCount": len(chunks),
         "textRelativePath": storage_relative_path(text_path),
+        "audioState": _manifest_audio_state(manifest),
     }
 
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
+import { TopNav } from "@/components/top-nav";
 import { EmptyCard } from "@/components/empty-card";
 import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
@@ -64,6 +65,7 @@ export function ResultPage() {
 
   return (
     <AppShell>
+      <TopNav />
       <HeroCard
         eyebrow="Hoan tat"
         title="Video da duoc render"

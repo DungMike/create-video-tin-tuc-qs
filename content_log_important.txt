@@ -1,15 +1,4 @@
-Tôi đã tối ưu hóa luồng dọn dẹp (cleanup) sau khi tiến trình render Video hoàn thành.  Hệ thống sẽ thực hiện dẹp dọn toàn bộ các tài nguyên không dùng tới.
-Cụ thể, tôi đã chỉnh sửa trong src/utils/file_manager.py cho hàm cleanup_job_files() và run_batch() trong batch_pipeline.py. Bây giờ chức năng này sẽ tự động xóa bỏ toàn bộ các directories dưới đây khi job / batch hoàn thành:
-
-Tệp Audio phân tách (storage/audio/<job_id>)
-Tệp Raw Img/Vid (storage/raw_images/<job_id> và storage/raw_videos/<job_id>)
-Tệp Video/Image đã crop thành Clip để dựng storage/clips/...
-Image chia sẻ (Shared images) của toàn bộ các URLs trong Batch (xóa khi Batch done).
-Các file temporal của hệ thống.
-
-Đầu ra của hệ thống sẽ chỉ giữ lại:
-
-storage/jobs/<job_id>/manifest.json (Để load Lịch sử UI Review sau này mà KHÔNG làm nặng máy).
-Video MP4 cuối cùng trong thư mục đầu ra storage/output/.
-
-Điều này giúp tiết kiệm tối đa dung lượng bộ nhớ Disk sau mỗi quá trình tạo Video tự động ♻️.
+Tôi đã thực hiện buộc dừng (kill) các process Python Backend (python -m src.web_app) đang chạy ngầm trong hệ thống. Hệ thống đã huỷ gọn gàng các process này!
+Bây giờ bạn có thể mở Terminal mới ở thư mục project và chạy lại lệnh start server nhé:
+bashterminalalternate_emailcontent_copypython -m src.web_app
+Sau khi khởi động lại, các config mới (Giới hạn tối đa 5 call đồng thời, tổng timeout chờ task là 20 phút và cơ chế Auto Retry tự động khi gặp lỗi 502/Timeout) sẽ lập tức có hiệu lực! Nếu quá trình batch pipeline mượt mà trở lại, bạn cho tôi một dấu hiệu xác nhận nhé!

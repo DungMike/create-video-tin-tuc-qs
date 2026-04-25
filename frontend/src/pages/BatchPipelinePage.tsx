@@ -1,27 +1,38 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
+import { TopNav } from "@/components/top-nav";
 import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { ApiError, getBatchProgress, getDecorVideos, getVoices, startBatchPipeline } from "@/lib/api";
-import type { BatchItemProgress, BatchProgressResponse, DecorVideo, VoiceRecord } from "@/types/api";
+import { ApiError, getBatchProgress, getDecorVideos, getVoices, retryFailedBatch, startBatchPipeline } from "@/lib/api";
+import type { BatchInputMode, BatchItemProgress, BatchProgressResponse, DecorVideo, VoiceRecord } from "@/types/api";
 
-interface UrlEntry {
+interface DocEntry {
   docUrl: string;
   outputName: string;
   decorVideoId: string;
 }
 
-const EMPTY_ENTRY: UrlEntry = { docUrl: "", outputName: "", decorVideoId: "" };
+interface AudioEntry {
+  outputName: string;
+  decorVideoId: string;
+  sourceAudioName: string;
+  audioFileIndex: number;
+}
+
+const EMPTY_DOC_ENTRY: DocEntry = { docUrl: "", outputName: "", decorVideoId: "" };
+
+function outputNameFromFileName(filename: string): string {
+  return filename.replace(/\.[^/.]+$/, "").trim() || "audio-item";
+}
 
 function stageLabel(stage: string): string {
   const labels: Record<string, string> = {
     pending: "Cho xu ly",
+    audio_source: "Audio nguon",
     tts_audio: "Tao audio (TTS)",
     job_setup: "Tao job",
     image_processing: "Xu ly anh",
@@ -45,6 +56,7 @@ function statusIcon(status: string): string {
 }
 
 export function BatchPipelinePage() {
+  const [inputMode, setInputMode] = useState<BatchInputMode>("docs");
   const [voices, setVoices] = useState<VoiceRecord[]>([]);
   const [defaultVoiceId, setDefaultVoiceId] = useState("");
   const [decorVideos, setDecorVideos] = useState<DecorVideo[]>([]);
@@ -52,11 +64,14 @@ export function BatchPipelinePage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const [urlEntries, setUrlEntries] = useState<UrlEntry[]>([{ ...EMPTY_ENTRY }]);
+  const [docEntries, setDocEntries] = useState<DocEntry[]>([{ ...EMPTY_DOC_ENTRY }]);
+  const [audioEntries, setAudioEntries] = useState<AudioEntry[]>([]);
+  const [audioFiles, setAudioFiles] = useState<File[]>([]);
+  const [audioInputKey, setAudioInputKey] = useState(0);
   const [batchId, setBatchId] = useState<string | null>(null);
   const [batchProgress, setBatchProgress] = useState<BatchProgressResponse | null>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
 
-  // Load voices + decor on mount
   useEffect(() => {
     let cancelled = false;
     setIsLoading(true);
@@ -78,7 +93,6 @@ export function BatchPipelinePage() {
     };
   }, []);
 
-  // Poll batch progress
   useEffect(() => {
     if (!batchId) return;
     let cancelled = false;
@@ -89,6 +103,7 @@ export function BatchPipelinePage() {
             setBatchProgress(data);
             if (data.status === "completed" || data.status === "failed") {
               setIsSubmitting(false);
+              setIsRetrying(false);
             }
           }
         })
@@ -102,63 +117,174 @@ export function BatchPipelinePage() {
     };
   }, [batchId]);
 
-  const updateEntry = (index: number, field: keyof UrlEntry, value: string) => {
-    setUrlEntries((prev) => prev.map((e, i) => (i === index ? { ...e, [field]: value } : e)));
+  const updateDocEntry = (index: number, field: keyof DocEntry, value: string) => {
+    setDocEntries((prev) => prev.map((entry, entryIndex) => (entryIndex === index ? { ...entry, [field]: value } : entry)));
   };
 
-  const addEntry = () => setUrlEntries((prev) => [...prev, { ...EMPTY_ENTRY }]);
+  const updateAudioEntry = (index: number, field: "outputName" | "decorVideoId", value: string) => {
+    setAudioEntries((prev) =>
+      prev.map((entry, entryIndex) => (entryIndex === index ? { ...entry, [field]: value } : entry))
+    );
+  };
 
-  const removeEntry = (index: number) => {
-    setUrlEntries((prev) => {
+  const addDocEntry = () => setDocEntries((prev) => [...prev, { ...EMPTY_DOC_ENTRY }]);
+
+  const removeDocEntry = (index: number) => {
+    setDocEntries((prev) => {
       if (prev.length <= 1) return prev;
-      return prev.filter((_, i) => i !== index);
+      return prev.filter((_, entryIndex) => entryIndex !== index);
     });
+  };
+
+  const handleAudioFilesChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const nextFiles = Array.from(event.currentTarget.files ?? []);
+    setAudioFiles(nextFiles);
+    setAudioEntries((prev) => {
+      const previousByName = new Map(prev.map((entry) => [entry.sourceAudioName, entry]));
+      return nextFiles.map((file, index) => {
+        const previous = previousByName.get(file.name);
+        return {
+          outputName: previous?.outputName || outputNameFromFileName(file.name),
+          decorVideoId: previous?.decorVideoId || "",
+          sourceAudioName: file.name,
+          audioFileIndex: index,
+        };
+      });
+    });
+  };
+
+  const handleInputModeChange = (nextMode: BatchInputMode) => {
+    setInputMode(nextMode);
+    setErrorMessage(null);
+    if (nextMode === "docs") {
+      setAudioEntries([]);
+      setAudioFiles([]);
+      setAudioInputKey((prev) => prev + 1);
+      if (docEntries.length === 0) {
+        setDocEntries([{ ...EMPTY_DOC_ENTRY }]);
+      }
+    }
   };
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setErrorMessage(null);
 
-    // Client-side validation
-    const outputNames = urlEntries.map((e) => e.outputName.trim());
-    for (let i = 0; i < urlEntries.length; i++) {
-      if (!urlEntries[i].docUrl.trim()) {
-        setErrorMessage(`URL #${i + 1}: Google Docs URL la bat buoc.`);
+    const activeEntries = inputMode === "docs" ? docEntries : audioEntries;
+    const outputNames = activeEntries.map((entry) => entry.outputName.trim());
+
+    if (inputMode === "docs") {
+      for (let index = 0; index < docEntries.length; index += 1) {
+        if (!docEntries[index].docUrl.trim()) {
+          setErrorMessage(`Doc #${index + 1}: Google Docs URL la bat buoc.`);
+          return;
+        }
+        if (!outputNames[index]) {
+          setErrorMessage(`Doc #${index + 1}: Ten output la bat buoc.`);
+          return;
+        }
+      }
+    } else {
+      if (!audioFiles.length) {
+        setErrorMessage("Can chon it nhat 1 file audio.");
         return;
       }
-      if (!outputNames[i]) {
-        setErrorMessage(`URL #${i + 1}: Ten output la bat buoc.`);
+      if (audioEntries.length !== audioFiles.length) {
+        setErrorMessage("So item audio khong khop voi so file audio da chon.");
         return;
+      }
+      for (let index = 0; index < audioEntries.length; index += 1) {
+        if (!outputNames[index]) {
+          setErrorMessage(`Audio #${index + 1}: Ten output la bat buoc.`);
+          return;
+        }
       }
     }
-    const dupes = outputNames.filter((n, i) => outputNames.indexOf(n) !== i);
-    if (dupes.length > 0) {
-      setErrorMessage(`Ten output bi trung lap: ${dupes.join(", ")}`);
+
+    const duplicateNames = outputNames.filter((name, index) => name && outputNames.indexOf(name) !== index);
+    if (duplicateNames.length > 0) {
+      setErrorMessage(`Ten output bi trung lap: ${duplicateNames.join(", ")}`);
       return;
     }
 
     const formData = new FormData(event.currentTarget);
+    formData.set("inputMode", inputMode);
+    if (inputMode === "docs") {
+      formData.delete("audioFiles");
+    } else {
+      formData.delete("voiceId");
+      formData.delete("speed");
+      formData.delete("volume");
+    }
 
-    // Build items JSON
-    const items = urlEntries.map((e) => ({
-      docUrl: e.docUrl.trim(),
-      outputName: e.outputName.trim(),
-      decorVideoId: e.decorVideoId || "",
-    }));
+    const items =
+      inputMode === "docs"
+        ? docEntries.map((entry) => ({
+            sourceType: "doc_url" as const,
+            docUrl: entry.docUrl.trim(),
+            outputName: entry.outputName.trim(),
+            decorVideoId: entry.decorVideoId || "",
+          }))
+        : audioEntries.map((entry) => ({
+            sourceType: "uploaded_audio" as const,
+            outputName: entry.outputName.trim(),
+            decorVideoId: entry.decorVideoId || "",
+            audioFileIndex: entry.audioFileIndex,
+            sourceAudioName: entry.sourceAudioName,
+          }));
+
     formData.set("items", JSON.stringify(items));
-
-    // Remove individual entry fields from formData (they're in items JSON now)
-    // The images and shared settings are already captured via the form's name attrs
 
     setIsSubmitting(true);
     setBatchProgress(null);
 
     try {
-      const res = await startBatchPipeline(formData);
-      setBatchId(res.batchId);
+      const response = await startBatchPipeline(formData);
+      setBatchId(response.batchId);
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the khoi tao batch pipeline.");
       setIsSubmitting(false);
+    }
+  };
+
+  const handleRetryFailed = async () => {
+    if (!batchId || !batchProgress?.canRetryFailed) return;
+    const confirmed = window.confirm(
+      `Retry all failed cho ${batchProgress.failedUrls} item?\n\nHe thong se reuse audio/chunk da co khi hop le de tiet kiem credit TTS.`
+    );
+    if (!confirmed) return;
+
+    setErrorMessage(null);
+    setIsRetrying(true);
+    try {
+      await retryFailedBatch(batchId);
+      setBatchProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "running",
+              canRetryFailed: false,
+              items: prev.items.map((item) =>
+                item.status === "failed"
+                  ? {
+                      ...item,
+                      status: "pending",
+                      stage: "pending",
+                      percent: 0,
+                      message: "Cho retry...",
+                      error: null,
+                      retryable: false,
+                      failureCode: null,
+                      failureStage: null,
+                    }
+                  : item
+              ),
+            }
+          : prev
+      );
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the retry cac item failed.");
+      setIsRetrying(false);
     }
   };
 
@@ -170,22 +296,25 @@ export function BatchPipelinePage() {
     );
   }
 
-  const completedItems = batchProgress?.items.filter((it) => it.status === "completed") ?? [];
+  const completedItems = batchProgress?.items.filter((item) => item.status === "completed") ?? [];
   const overallPercent =
     batchProgress && batchProgress.totalUrls > 0
-      ? Math.round(batchProgress.items.reduce((sum, it) => sum + it.percent, 0) / batchProgress.totalUrls)
+      ? Math.round(batchProgress.items.reduce((sum, item) => sum + item.percent, 0) / batchProgress.totalUrls)
       : 0;
   const batchDone = batchProgress?.status === "completed" || batchProgress?.status === "failed";
+  const currentMode = batchProgress?.inputMode ?? inputMode;
+  const listLabel = currentMode === "audio_upload" ? "Danh sach Audio" : "Danh sach Docs";
+  const countLabel = currentMode === "audio_upload" ? "audio files" : "docs";
 
   return (
     <AppShell>
       <TopNav />
       <HeroCard
         eyebrow="Batch Pipeline"
-        title="Tu dong tao video tu nhieu Google Docs"
-        description="Nhap nhieu Google Docs URL, anh nguon chung va PiP overlay. He thong se tuan tu tao audio, xu ly anh, va render video hoan chinh cho tung URL."
+        title="Tu dong tao video tu Google Docs hoac nhieu file audio"
+        description="Chon mot mode cho toan batch. He thong se tai audio tu Google Docs hoac dung file audio upload, sau do xu ly anh va render video cho tung item."
         stats={[
-          { label: "Mode", value: "Image + Audio" },
+          { label: "Mode", value: currentMode === "audio_upload" ? "Audio Upload" : "Google Docs" },
           { label: "Voices", value: voices.length },
           { label: "Decor Videos", value: decorVideos.length },
           { label: "Xu ly", value: "Tuan tu" },
@@ -194,136 +323,219 @@ export function BatchPipelinePage() {
 
       {errorMessage ? <StatusAlert title="Co loi xay ra" message={errorMessage} variant="destructive" /> : null}
 
-      {/* ---- INPUT FORM ---- */}
       {!batchId ? (
         <PageSection>
           <form className="grid gap-6" onSubmit={handleSubmit}>
-            {/* Shared settings */}
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="grid gap-2">
-                <Label htmlFor="images">Anh nguon (shared cho tat ca URLs)</Label>
-                <Input id="images" name="images" type="file" accept=".jpg,.jpeg,.png,.webp" multiple required />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="voiceId">Voice</Label>
-                <select
-                  id="voiceId"
-                  name="voiceId"
-                  defaultValue={defaultVoiceId}
-                  className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+            <div className="grid gap-2">
+              <Label>Input mode</Label>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant={inputMode === "docs" ? "default" : "outline"}
+                  onClick={() => handleInputModeChange("docs")}
                 >
-                  <option value={defaultVoiceId}>
-                    {defaultVoiceId ? `Default voice (${defaultVoiceId})` : "TTS_DEFAULT_VOICE_ID"}
-                  </option>
-                  {voices.map((v) => (
-                    <option key={v.voiceId} value={v.voiceId}>
-                      {v.voiceName} - {v.voiceId}
-                    </option>
-                  ))}
-                </select>
+                  Google Docs
+                </Button>
+                <Button
+                  type="button"
+                  variant={inputMode === "audio_upload" ? "default" : "outline"}
+                  onClick={() => handleInputModeChange("audio_upload")}
+                >
+                  Upload Audio
+                </Button>
               </div>
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">
               <div className="grid gap-2">
-                <Label htmlFor="speed">Speed</Label>
-                <Input id="speed" name="speed" type="number" step="0.1" min="0.5" max="1.5" defaultValue="1" />
+                <Label htmlFor="images">Anh nguon (shared cho tat ca items)</Label>
+                <Input id="images" name="images" type="file" accept=".jpg,.jpeg,.png,.webp" multiple required />
               </div>
-              <div className="grid gap-2">
-                <Label htmlFor="volume">Volume</Label>
-                <Input id="volume" name="volume" type="number" step="0.1" min="0" defaultValue="1" />
-              </div>
+              {inputMode === "docs" ? (
+                <div className="grid gap-2">
+                  <Label htmlFor="voiceId">Voice</Label>
+                  <select
+                    id="voiceId"
+                    name="voiceId"
+                    defaultValue={defaultVoiceId}
+                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                  >
+                    <option value={defaultVoiceId}>
+                      {defaultVoiceId ? `Default voice (${defaultVoiceId})` : "TTS_DEFAULT_VOICE_ID"}
+                    </option>
+                    {voices.map((voice) => (
+                      <option key={voice.voiceId} value={voice.voiceId}>
+                        {voice.voiceName} - {voice.voiceId}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div className="grid gap-2">
+                  <Label htmlFor="audioFiles">File audio (multiple)</Label>
+                  <Input
+                    key={audioInputKey}
+                    id="audioFiles"
+                    name="audioFiles"
+                    type="file"
+                    accept=".mp3,.wav,.m4a,.aac,.flac,.ogg"
+                    multiple
+                    required={inputMode === "audio_upload"}
+                    onChange={handleAudioFilesChange}
+                  />
+                </div>
+              )}
             </div>
+
+            {inputMode === "docs" ? (
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="grid gap-2">
+                  <Label htmlFor="speed">Speed</Label>
+                  <Input id="speed" name="speed" type="number" step="0.1" min="0.5" max="1.5" defaultValue="1" />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="volume">Volume</Label>
+                  <Input id="volume" name="volume" type="number" step="0.1" min="0" defaultValue="1" />
+                </div>
+              </div>
+            ) : null}
 
             <Separator />
 
-            {/* Per-URL entries */}
             <div className="grid gap-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-base font-semibold text-foreground">
-                  Danh sach URLs ({urlEntries.length})
+                  {listLabel} ({inputMode === "docs" ? docEntries.length : audioEntries.length})
                 </h3>
-                <Button type="button" variant="outline" size="sm" onClick={addEntry}>
-                  + Them URL
-                </Button>
+                {inputMode === "docs" ? (
+                  <Button type="button" variant="outline" size="sm" onClick={addDocEntry}>
+                    + Them Doc
+                  </Button>
+                ) : null}
               </div>
 
-              {urlEntries.map((entry, idx) => (
-                <div
-                  key={idx}
-                  className="relative grid gap-3 rounded-xl border border-border/70 bg-card/50 p-4"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-semibold text-muted-foreground">URL #{idx + 1}</span>
-                    {urlEntries.length > 1 ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs text-destructive hover:text-destructive"
-                        onClick={() => removeEntry(idx)}
-                      >
-                        Xoa
-                      </Button>
-                    ) : null}
-                  </div>
-
-                  <div className="grid gap-3 md:grid-cols-3">
-                    <div className="grid gap-1.5 md:col-span-2">
-                      <Label className="text-xs">Google Docs URL</Label>
-                      <Input
-                        placeholder="https://docs.google.com/document/d/..."
-                        value={entry.docUrl}
-                        onChange={(e) => updateEntry(idx, "docUrl", e.target.value)}
-                        required
-                      />
-                    </div>
-                    <div className="grid gap-1.5">
-                      <Label className="text-xs">Ten output (bat buoc, duy nhat)</Label>
-                      <Input
-                        placeholder="VD: tin-tuc-iran-1"
-                        value={entry.outputName}
-                        onChange={(e) => updateEntry(idx, "outputName", e.target.value)}
-                        required
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid gap-1.5">
-                    <Label className="text-xs">PiP Overlay</Label>
-                    <select
-                      value={entry.decorVideoId}
-                      onChange={(e) => updateEntry(idx, "decorVideoId", e.target.value)}
-                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+              {inputMode === "docs"
+                ? docEntries.map((entry, index) => (
+                    <div
+                      key={`doc-${index}`}
+                      className="relative grid gap-3 rounded-xl border border-border/70 bg-card/50 p-4"
                     >
-                      <option value="">Auto (random tu thu vien)</option>
-                      {decorVideos.map((dv) => (
-                        <option key={dv.id} value={dv.id}>
-                          {dv.name} ({dv.durationSeconds}s)
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-              ))}
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-muted-foreground">Doc #{index + 1}</span>
+                        {docEntries.length > 1 ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs text-destructive hover:text-destructive"
+                            onClick={() => removeDocEntry(index)}
+                          >
+                            Xoa
+                          </Button>
+                        ) : null}
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-3">
+                        <div className="grid gap-1.5 md:col-span-2">
+                          <Label className="text-xs">Google Docs URL</Label>
+                          <Input
+                            placeholder="https://docs.google.com/document/d/..."
+                            value={entry.docUrl}
+                            onChange={(event) => updateDocEntry(index, "docUrl", event.target.value)}
+                            required
+                          />
+                        </div>
+                        <div className="grid gap-1.5">
+                          <Label className="text-xs">Ten output (bat buoc, duy nhat)</Label>
+                          <Input
+                            placeholder="VD: tin-tuc-iran-1"
+                            value={entry.outputName}
+                            onChange={(event) => updateDocEntry(index, "outputName", event.target.value)}
+                            required
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-1.5">
+                        <Label className="text-xs">PiP Overlay</Label>
+                        <select
+                          value={entry.decorVideoId}
+                          onChange={(event) => updateDocEntry(index, "decorVideoId", event.target.value)}
+                          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                        >
+                          <option value="">Auto (random tu thu vien)</option>
+                          {decorVideos.map((decorVideo) => (
+                            <option key={decorVideo.id} value={decorVideo.id}>
+                              {decorVideo.name} ({decorVideo.durationSeconds}s)
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  ))
+                : audioEntries.map((entry, index) => (
+                    <div
+                      key={`audio-${entry.sourceAudioName}-${index}`}
+                      className="relative grid gap-3 rounded-xl border border-border/70 bg-card/50 p-4"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-muted-foreground">Audio #{index + 1}</span>
+                        <span className="text-xs text-muted-foreground">{entry.sourceAudioName}</span>
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-3">
+                        <div className="grid gap-1.5 md:col-span-2">
+                          <Label className="text-xs">File audio nguon</Label>
+                          <Input value={entry.sourceAudioName} readOnly />
+                        </div>
+                        <div className="grid gap-1.5">
+                          <Label className="text-xs">Ten output (bat buoc, duy nhat)</Label>
+                          <Input
+                            placeholder="VD: kenh-7-17-4"
+                            value={entry.outputName}
+                            onChange={(event) => updateAudioEntry(index, "outputName", event.target.value)}
+                            required
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-1.5">
+                        <Label className="text-xs">PiP Overlay</Label>
+                        <select
+                          value={entry.decorVideoId}
+                          onChange={(event) => updateAudioEntry(index, "decorVideoId", event.target.value)}
+                          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                        >
+                          <option value="">Auto (random tu thu vien)</option>
+                          {decorVideos.map((decorVideo) => (
+                            <option key={decorVideo.id} value={decorVideo.id}>
+                              {decorVideo.name} ({decorVideo.durationSeconds}s)
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  ))}
             </div>
 
             <Separator />
 
             <div className="flex flex-wrap items-center justify-between gap-4">
               <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-                He thong se xu ly tuan tu tung URL. Moi URL: TTS Audio → Xu ly anh (shuffle) → Render video + PiP
-                overlay. URL loi se bi skip.
+                {inputMode === "audio_upload"
+                  ? "He thong se dung file audio upload lam nguon, bo qua Docs/TTS, sau do xu ly anh va render video cho tung audio."
+                  : "He thong se xu ly tuan tu tung Google Docs. Moi item: TTS Audio -> Xu ly anh (shuffle) -> Render video + PiP overlay."}
               </p>
               <Button type="submit" size="lg" disabled={isSubmitting}>
-                {isSubmitting ? "Dang xu ly..." : `Bat dau Batch Pipeline (${urlEntries.length} URLs)`}
+                {isSubmitting
+                  ? "Dang xu ly..."
+                  : `Bat dau Batch Pipeline (${inputMode === "docs" ? docEntries.length : audioEntries.length} ${countLabel})`}
               </Button>
             </div>
           </form>
         </PageSection>
       ) : null}
 
-      {/* ---- PROGRESS ---- */}
       {batchProgress ? (
         <PageSection>
           <div className="grid gap-5">
@@ -340,7 +552,6 @@ export function BatchPipelinePage() {
               <div className="text-2xl font-semibold text-foreground">{overallPercent}%</div>
             </div>
 
-            {/* Overall progress bar */}
             <div className="h-3 w-full overflow-hidden rounded-full bg-muted">
               <div
                 className="h-full rounded-full bg-primary transition-all duration-500"
@@ -348,21 +559,30 @@ export function BatchPipelinePage() {
               />
             </div>
 
-            {/* Per-item progress */}
             <div className="grid gap-3">
-              {batchProgress.items.map((item: BatchItemProgress) => (
+              {batchProgress.items.map((item) => (
                 <ItemProgressCard key={item.index} item={item} />
               ))}
             </div>
 
             {batchDone ? (
               <div className="flex gap-3">
+                {batchProgress.canRetryFailed ? (
+                  <Button onClick={handleRetryFailed} disabled={isRetrying}>
+                    {isRetrying ? "Dang khoi dong retry..." : batchProgress.retryFailedLabel}
+                  </Button>
+                ) : null}
                 <Button
                   variant="outline"
                   onClick={() => {
                     setBatchId(null);
                     setBatchProgress(null);
-                    setUrlEntries([{ ...EMPTY_ENTRY }]);
+                    setInputMode("docs");
+                    setDocEntries([{ ...EMPTY_DOC_ENTRY }]);
+                    setAudioEntries([]);
+                    setAudioFiles([]);
+                    setAudioInputKey((prev) => prev + 1);
+                    setIsRetrying(false);
                   }}
                 >
                   Tao batch moi
@@ -373,7 +593,6 @@ export function BatchPipelinePage() {
         </PageSection>
       ) : null}
 
-      {/* ---- RESULTS ---- */}
       {completedItems.length > 0 ? (
         <PageSection>
           <h3 className="mb-4 text-base font-semibold text-foreground">
@@ -389,6 +608,9 @@ export function BatchPipelinePage() {
                   <span className="font-semibold text-foreground">{item.outputName}.mp4</span>
                   {item.decorVideoName ? (
                     <span className="ml-2 text-xs text-muted-foreground">PiP: {item.decorVideoName}</span>
+                  ) : null}
+                  {item.sourceType === "uploaded_audio" && item.sourceAudioName ? (
+                    <span className="ml-2 text-xs text-muted-foreground">Nguon: {item.sourceAudioName}</span>
                   ) : null}
                 </div>
                 <div className="flex gap-2">
@@ -424,18 +646,31 @@ function ItemProgressCard({ item }: { item: BatchItemProgress }) {
       : item.status === "failed"
         ? "bg-destructive"
         : "bg-primary";
+  const audioCacheMessage =
+    item.audioStatus === "ready" && item.audioRelativePath
+      ? item.sourceType === "uploaded_audio"
+        ? "Audio source ready. Retry se bo qua TTS."
+        : "Final audio ready. Retry se bo qua TTS."
+      : item.audioStatus === "partial"
+        ? `Audio cache: ${item.chunkSummary.completed}/${item.chunkSummary.total} chunks`
+        : item.status === "failed" && item.chunkSummary.total > 0
+          ? `Audio cache: ${item.chunkSummary.completed}/${item.chunkSummary.total} chunks`
+          : null;
 
   return (
     <div className="rounded-lg border border-border/70 bg-background/70 p-3">
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
           <span className="text-base">{statusIcon(item.status)}</span>
           <span className="truncate font-semibold text-sm text-foreground">{item.outputName}</span>
           {item.decorVideoName ? (
-            <span className="hidden sm:inline text-xs text-muted-foreground">PiP: {item.decorVideoName}</span>
+            <span className="hidden text-xs text-muted-foreground sm:inline">PiP: {item.decorVideoName}</span>
+          ) : null}
+          {item.sourceType === "uploaded_audio" && item.sourceAudioName ? (
+            <span className="hidden text-xs text-muted-foreground sm:inline">Nguon: {item.sourceAudioName}</span>
           ) : null}
         </div>
-        <span className="text-sm font-semibold text-foreground whitespace-nowrap">{pct}%</span>
+        <span className="whitespace-nowrap text-sm font-semibold text-foreground">{pct}%</span>
       </div>
 
       <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-muted">
@@ -450,39 +685,13 @@ function ItemProgressCard({ item }: { item: BatchItemProgress }) {
         <span className="whitespace-nowrap">{stageLabel(item.stage)}</span>
       </div>
 
+      {audioCacheMessage ? (
+        <div className="mt-2 rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground">{audioCacheMessage}</div>
+      ) : null}
+
       {item.error ? (
         <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{item.error}</div>
       ) : null}
     </div>
-  );
-}
-
-function TopNav() {
-  return (
-    <nav className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-border/70 bg-card/90 px-4 py-3 shadow-lg backdrop-blur md:px-6">
-      <Link to="/" className="text-sm font-semibold tracking-tight text-foreground">
-        Auto Video Review Studio
-      </Link>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button asChild variant="ghost">
-          <Link to="/">Upload</Link>
-        </Button>
-        <Button asChild variant="ghost">
-          <Link to="/docs-to-audio">Docs to Audio</Link>
-        </Button>
-        <Button asChild variant="secondary">
-          <Link to="/batch-pipeline">Batch Pipeline</Link>
-        </Button>
-        <Button asChild variant="ghost">
-          <Link to="/voices">Voices</Link>
-        </Button>
-        <Button asChild variant="ghost">
-          <Link to="/decor-library">Decor Library</Link>
-        </Button>
-        <Button asChild variant="ghost">
-          <Link to="/effects-library">Effects Library</Link>
-        </Button>
-      </div>
-    </nav>
   );
 }

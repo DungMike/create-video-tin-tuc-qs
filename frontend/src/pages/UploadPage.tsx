@@ -1,7 +1,8 @@
 import { startTransition, useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
+import { TopNav } from "@/components/top-nav";
 import { StatusAlert } from "@/components/status-alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -54,32 +55,7 @@ export function UploadPage() {
 
   return (
     <AppShell>
-      <nav className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-border/70 bg-card/90 px-4 py-3 shadow-lg backdrop-blur md:px-6">
-        <Link to="/" className="text-sm font-semibold tracking-tight text-foreground">
-          Auto Video Review Studio
-        </Link>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button asChild variant="ghost">
-            <Link to="/">Upload</Link>
-          </Button>
-          <Button asChild variant="ghost">
-            <Link to="/docs-to-audio">Docs to Audio</Link>
-          </Button>
-          <Button asChild variant="ghost">
-            <Link to="/voices">Voices</Link>
-          </Button>
-          <Button asChild variant="ghost">
-            <Link to="/decor-library">Decor Library</Link>
-          </Button>
-          <Button asChild variant="secondary">
-            <Link to="/effects-library">Effects Library</Link>
-          </Button>
-          {/* batch-pipeline */}
-          <Button asChild variant="secondary">
-            <Link to="/batch-pipeline">Batch Pipeline</Link>
-          </Button>
-        </div>
-      </nav>
+      <TopNav />
 
       <HeroCard
         eyebrow="Workflow moi"

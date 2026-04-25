@@ -81,6 +81,8 @@ Video đi qua 4 giai đoạn chính để từ nguyên liệu thô thành sản 
 
 ## 4. Các Tính Năng Mở Rộng Đặc Trọng Tâm
 
+* **Xử lý Hàng Loạt (Batch Pipeline - Auto Production)**: Luồng hoàn thiện hoàn toàn tự động từ 1 input (hàng loạt Google Docs URLs + Ảnh chung + Voice). Hệ thống tự đọc văn bản -> tạo Audio -> trộn ảnh liên tục tự động (chống lặp ảnh) -> áp dụng PiP random (nếu k set tĩnh) -> render ra MP4 cuối cùng hoàn toàn kín.
+* **Hệ thống Dọn Dẹp Tự Động (Auto Cleanup Worker)**: Tối ưu bộ nhớ bằng cách xóa đi 100% các intermediate file (Audios tạm, Raw images/videos, chunks) sau khi một quá trình render Job/Batch hoàn tất thành công. Chỉ giữ lại manifest và Video final.
 * **Trình sinh Audio từ Văn bản (Docs-to-Audio)**: Lấy text từ Google Docs, gọi API (VD: Minimax) sinh file MP3 chất lượng cao ghép vào workflow tự động.
 * **Thư viện Decor Video (PiP Overlays)**: Người dùng upload video (MC, Logo động) tại `/decor-library`. Video này tự động thu nhỏ 25% (scale config), đặt ở góc màn, lặp vô hạn (stream_loop -1) và bị tắt tiếng (-an) để không đè lên Voice chính.
 * **Watermark Text Cứng**: Chữ "Nguồn: Tổng hợp" (chỉnh trong cấu hình) được đóng đinh vào góc cấp độ pixel, có viền đen để phản quang rõ trên mọi nền sáng tối.
@@ -97,7 +99,7 @@ CRAWL VIDEO - AUDIO - QS/
 │   ├── src/
 │   │   ├── components/   # React Components (UI, Layout)
 │   │   ├── lib/          # API services client, Utils (fetchers, cn)
-│   │   ├── pages/        # Router Views (Upload, Review, DecorLibrary, v.v)
+│   │   ├── pages/        # Router Views (Upload, Review, DecorLibrary, BatchPipeline, v.v)
 │   │   ├── types/        # Giao tiếp kiểu chữ TypeScript (Interfaces)
 │   ├── vite.config.ts    # Config Vite (proxy api sang port 5000)
 ├── logs/                 # Chứa app.log theo dõi quá trình chạy

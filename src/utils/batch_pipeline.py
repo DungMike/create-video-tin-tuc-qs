@@ -1,11 +1,14 @@
-"""Batch Pipeline — orchestrate sequential TTS → Image → Render for multiple Google Docs URLs."""
+"""Batch Pipeline orchestrates TTS and batch render with a shared image clip pool."""
 
+import hashlib
 import json
 import os
+from pathlib import Path
 import random
 import shutil
 import uuid
 from datetime import datetime
+from typing import Any
 
 from src.composer.renderer import Renderer
 from src.composer.timeline import TimelineComposer
@@ -14,17 +17,22 @@ from src.processors.audio_utils import get_audio_duration, validate_audio
 from src.processors.image_processor import ImageProcessor
 from src.utils.decor_videos import get_decor_video, get_decor_video_absolute_path, list_decor_videos
 from src.utils.effects_library import load_active_animation_presets, load_active_transition_presets
+from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.file_manager import (
     cleanup_job_files,
     save_job_manifest,
     setup_directories,
+    storage_absolute_path,
     storage_relative_path,
 )
 from src.utils.logger import logger
 from src.utils.tts_audio import (
+    TTSAudioError,
     copy_generated_audio_to_job,
     create_audio_from_google_doc,
 )
+
+_UNSET = object()
 
 
 def _utc_now() -> str:
@@ -41,26 +49,160 @@ def _progress_path(batch_id: str) -> str:
     return os.path.join(_batch_dir(batch_id), "progress.json")
 
 
-def load_batch_progress(batch_id: str) -> dict | None:
-    path = _progress_path(batch_id)
+def _state_path(batch_id: str) -> str:
+    return os.path.join(_batch_dir(batch_id), "state.json")
+
+
+def _shared_images_dir(batch_id: str) -> str:
+    return os.path.join(_batch_dir(batch_id), "shared_images")
+
+
+def _shared_clips_dir(batch_id: str) -> str:
+    return os.path.join(_batch_dir(batch_id), "shared_clips")
+
+
+def _batch_temp_dir(batch_id: str) -> str:
+    return os.path.join(_batch_dir(batch_id), "temp")
+
+
+def _shared_image_manifest_path(batch_id: str) -> str:
+    return os.path.join(_batch_dir(batch_id), "shared_image_clips.json")
+
+
+def _uploaded_audio_dir(batch_id: str) -> str:
+    return os.path.join(_batch_dir(batch_id), "uploaded_audio")
+
+
+def _stable_seed(*parts) -> int:
+    payload = "|".join(str(part) for part in parts)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return int(digest[:16], 16)
+
+
+def _save_json(path: str, data: dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file_obj:
+        json.dump(data, file_obj, ensure_ascii=False, indent=2)
+
+
+def _load_json(path: str) -> dict | None:
     if not os.path.isfile(path):
         return None
     try:
-        with open(path, "r", encoding="utf-8") as fobj:
-            return json.load(fobj)
+        with open(path, "r", encoding="utf-8") as file_obj:
+            data = json.load(file_obj)
+        return data if isinstance(data, dict) else None
     except (json.JSONDecodeError, OSError):
         return None
 
 
+def _expires_at_iso() -> str:
+    return datetime.utcfromtimestamp(
+        datetime.utcnow().timestamp() + max(0, Config.BATCH_RETRY_RETENTION_SECONDS)
+    ).isoformat(timespec="seconds") + "Z"
+
+
+def _parse_utc_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _is_batch_expired(expires_at: str | None) -> bool:
+    parsed = _parse_utc_iso(expires_at)
+    if not parsed:
+        return False
+    return datetime.utcnow().timestamp() >= parsed.timestamp()
+
+
+def _refresh_retry_flags(progress: dict):
+    progress.setdefault("inputMode", "docs")
+    failed_urls = sum(1 for item in progress.get("items", []) if item.get("status") == "failed")
+    expired = _is_batch_expired(progress.get("expiresAt"))
+    retry_artifacts_available = bool(progress.get("retryArtifactsAvailable", True))
+    can_retry_failed = (
+        progress.get("status") != "running" and failed_urls > 0 and not expired and retry_artifacts_available
+    )
+
+    progress["failedUrls"] = failed_urls
+    progress["canRetryFailed"] = can_retry_failed
+    progress["retryFailedLabel"] = f"Retry all failed ({failed_urls} items)" if failed_urls else "Retry all failed"
+    for item in progress.get("items", []):
+        item.setdefault("sourceType", "doc_url")
+        item.setdefault("docUrl", None)
+        item.setdefault("sourceAudioName", None)
+        item.setdefault("sourceAudioRelativePath", None)
+        item.setdefault("audioRelativePath", None)
+        item.setdefault("audioStatus", "none")
+        item.setdefault("chunkSummary", {"completed": 0, "failed": 0, "total": 0})
+        item.setdefault("retryable", False)
+        item.setdefault("failureCode", None)
+        item.setdefault("failureStage", None)
+        item.setdefault("lastRetryAt", None)
+        item["retryable"] = bool(can_retry_failed and item.get("status") == "failed")
+    return progress
+
+
+def load_batch_progress(batch_id: str) -> dict | None:
+    progress = _load_json(_progress_path(batch_id))
+    if not progress:
+        return None
+    return _refresh_retry_flags(progress)
+
+
+def load_batch_state(batch_id: str) -> dict | None:
+    return _load_json(_state_path(batch_id))
+
+
 def _save_progress(batch_id: str, data: dict):
-    path = _progress_path(batch_id)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fobj:
-        json.dump(data, fobj, ensure_ascii=False, indent=2)
+    _refresh_retry_flags(data)
+    _save_json(_progress_path(batch_id), data)
+
+
+def _save_state(batch_id: str, data: dict):
+    data["updatedAt"] = _utc_now()
+    _save_json(_state_path(batch_id), data)
+
+
+def cleanup_expired_batch_retry_artifacts():
+    batch_root = os.path.join(Config.STORAGE_DIR, "batch")
+    if not os.path.isdir(batch_root):
+        return
+
+    for entry in os.scandir(batch_root):
+        if not entry.is_dir():
+            continue
+        batch_id = entry.name
+        progress = _load_json(_progress_path(batch_id))
+        if not progress or progress.get("status") == "running" or not _is_batch_expired(progress.get("expiresAt")):
+            continue
+        if not progress.get("retryArtifactsAvailable", True):
+            continue
+
+        for path in (
+            _shared_images_dir(batch_id),
+            _shared_clips_dir(batch_id),
+            _batch_temp_dir(batch_id),
+            _uploaded_audio_dir(batch_id),
+            _shared_image_manifest_path(batch_id),
+        ):
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            elif os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+        progress["retryArtifactsAvailable"] = False
+        _save_progress(batch_id, progress)
 
 
 class BatchPipelineRunner:
-    """Runs the full Image+Audio pipeline sequentially for a list of Google Docs URLs."""
+    """Runs the full image+audio batch pipeline with shared motion clips."""
 
     def __init__(
         self,
@@ -70,6 +212,10 @@ class BatchPipelineRunner:
         voice_id: str,
         speed: float,
         volume: float,
+        input_mode: str = "docs",
+        *,
+        progress: dict | None = None,
+        state: dict | None = None,
     ):
         self.batch_id = batch_id
         self.items = list(items)
@@ -77,74 +223,201 @@ class BatchPipelineRunner:
         self.voice_id = voice_id
         self.speed = speed
         self.volume = volume
-
-        # Build initial progress state
-        self.progress: dict = {
+        self.input_mode = input_mode if input_mode in {"docs", "audio_upload"} else "docs"
+        self.animation_presets = load_active_animation_presets()
+        self.shared_image_render_plan: dict | None = None
+        self.shared_image_pool: dict | None = None
+        self._verified_shared_clip_ids: set[str] = set()
+        self._shared_clip_fingerprints: dict[str, tuple[int, int]] = {}
+        self.state = state or {
             "batchId": batch_id,
-            "status": "pending",
-            "totalUrls": len(items),
-            "completedUrls": 0,
-            "startedAt": _utc_now(),
+            "createdAt": _utc_now(),
             "updatedAt": _utc_now(),
-            "items": [],
+            "expiresAt": _expires_at_iso(),
+            "inputMode": self.input_mode,
+            "voiceId": voice_id,
+            "speed": speed,
+            "volume": volume,
+            "items": self.items,
+            "sharedImagePaths": [storage_relative_path(path) for path in self.shared_image_paths],
         }
-        for index, item in enumerate(items):
-            decor_name = ""
-            if item.get("decorVideoId"):
-                decor_record = get_decor_video(item["decorVideoId"])
-                decor_name = decor_record["name"] if decor_record else ""
-            self.progress["items"].append(
-                {
-                    "index": index,
-                    "outputName": item["outputName"],
-                    "docUrl": item["docUrl"],
-                    "decorVideoId": item.get("decorVideoId", ""),
-                    "decorVideoName": decor_name,
+        self.state["inputMode"] = self.input_mode
+
+        if progress is None:
+            self.progress = {
+                "batchId": batch_id,
+                "inputMode": self.input_mode,
+                "status": "pending",
+                "totalUrls": len(items),
+                "completedUrls": 0,
+                "failedUrls": 0,
+                "startedAt": _utc_now(),
+                "updatedAt": _utc_now(),
+                "expiresAt": self.state["expiresAt"],
+                "retryArtifactsAvailable": True,
+                "canRetryFailed": False,
+                "retryFailedLabel": "Retry all failed",
+                "sharedImagePool": {
                     "status": "pending",
-                    "stage": "pending",
-                    "percent": 0,
-                    "message": "Cho xu ly...",
-                    "outputVideo": None,
-                    "jobId": None,
+                    "totalClips": len(shared_image_paths),
+                    "completedClips": 0,
+                    "cacheHits": 0,
+                    "cacheMisses": 0,
+                    "manifestPath": storage_relative_path(_shared_image_manifest_path(batch_id)),
+                    "message": "Cho tao shared image clip pool...",
                     "error": None,
-                }
+                },
+                "items": [],
+            }
+            for index, item in enumerate(items):
+                decor_name = ""
+                if item.get("decorVideoId"):
+                    decor_record = get_decor_video(item["decorVideoId"])
+                    decor_name = decor_record["name"] if decor_record else ""
+                self.progress["items"].append(
+                    {
+                        "index": index,
+                        "sourceType": item.get("sourceType") or "doc_url",
+                        "outputName": item["outputName"],
+                        "docUrl": item.get("docUrl"),
+                        "sourceAudioName": item.get("sourceAudioName"),
+                        "sourceAudioRelativePath": item.get("sourceAudioRelativePath"),
+                        "decorVideoId": item.get("decorVideoId", ""),
+                        "decorVideoName": decor_name,
+                        "status": "pending",
+                        "stage": "pending",
+                        "percent": 0,
+                        "message": "Cho xu ly...",
+                        "outputVideo": None,
+                        "jobId": None,
+                        "error": None,
+                        "audioRelativePath": None,
+                        "audioStatus": "none",
+                        "chunkSummary": {"completed": 0, "failed": 0, "total": 0},
+                        "retryable": False,
+                        "failureCode": None,
+                        "failureStage": None,
+                        "lastRetryAt": None,
+                    }
+                )
+            self._assign_decor_videos()
+            self._save_state()
+            self._save()
+        else:
+            self.progress = progress
+            self.input_mode = str(self.state.get("inputMode") or self.progress.get("inputMode") or self.input_mode)
+            self.state["inputMode"] = self.input_mode
+            self.progress.setdefault("inputMode", self.input_mode)
+            self.progress.setdefault("expiresAt", self.state.get("expiresAt") or _expires_at_iso())
+            self.progress.setdefault("retryArtifactsAvailable", True)
+            self.progress.setdefault("failedUrls", 0)
+            self.progress.setdefault("canRetryFailed", False)
+            self.progress.setdefault("retryFailedLabel", "Retry all failed")
+            self.progress.setdefault(
+                "sharedImagePool",
+                {
+                    "status": "pending",
+                    "totalClips": len(shared_image_paths),
+                    "completedClips": 0,
+                    "cacheHits": 0,
+                    "cacheMisses": 0,
+                    "manifestPath": storage_relative_path(_shared_image_manifest_path(batch_id)),
+                    "message": "Cho tao shared image clip pool...",
+                    "error": None,
+                },
             )
-        self._assign_decor_videos()
-        self._save()
+            _refresh_retry_flags(self.progress)
+
+    @classmethod
+    def from_saved_batch(cls, batch_id: str) -> "BatchPipelineRunner":
+        progress = load_batch_progress(batch_id)
+        state = load_batch_state(batch_id)
+        if not progress:
+            raise RuntimeError("Batch pipeline khong tim thay.")
+        if not state:
+            raise RuntimeError("Batch nay duoc tao truoc khi tinh nang retry duoc them vao, khong the retry tu dong.")
+
+        shared_image_relative_paths = state.get("sharedImagePaths") or []
+        shared_image_paths = [storage_absolute_path(path) for path in shared_image_relative_paths]
+        return cls(
+            batch_id=batch_id,
+            items=list(state.get("items") or []),
+            shared_image_paths=shared_image_paths,
+            voice_id=str(state.get("voiceId") or ""),
+            speed=float(state.get("speed") or 1),
+            volume=float(state.get("volume") or 1),
+            input_mode=str(state.get("inputMode") or progress.get("inputMode") or "docs"),
+            progress=progress,
+            state=state,
+        )
 
     def _save(self):
         self.progress["updatedAt"] = _utc_now()
+        self.progress["inputMode"] = self.input_mode
+        self.progress["expiresAt"] = self.state.get("expiresAt") or self.progress.get("expiresAt") or _expires_at_iso()
         _save_progress(self.batch_id, self.progress)
 
-    def _assign_decor_videos(self):
-        """Auto-assign PiP overlays for items that don't have one.
+    def _save_state(self):
+        self.state["updatedAt"] = _utc_now()
+        self.state["inputMode"] = self.input_mode
+        self.state["expiresAt"] = self.state.get("expiresAt") or _expires_at_iso()
+        _save_state(self.batch_id, self.state)
 
-        Uses round-robin random selection without repeats. When the pool
-        is exhausted (more URLs than decor videos), it resets and continues.
-        """
+    def _extend_retry_retention(self):
+        new_expiry = _expires_at_iso()
+        self.state["expiresAt"] = new_expiry
+        self.progress["expiresAt"] = new_expiry
+        self._save_state()
+
+    def _shared_paths(self) -> dict[str, str]:
+        root_dir = _batch_dir(self.batch_id)
+        return {
+            "root": root_dir,
+            "shared_images": _shared_images_dir(self.batch_id),
+            "shared_clips": _shared_clips_dir(self.batch_id),
+            "uploaded_audio": _uploaded_audio_dir(self.batch_id),
+            "temp": _batch_temp_dir(self.batch_id),
+            "manifest": _shared_image_manifest_path(self.batch_id),
+        }
+
+    def _is_valid_uploaded_audio_relative_path(self, relative_path: str) -> bool:
+        normalized = os.path.normpath(relative_path or "").replace("\\", "/")
+        if not normalized.startswith(f"batch/{self.batch_id}/uploaded_audio/"):
+            return False
+        absolute_path = storage_absolute_path(normalized)
+        uploaded_root = os.path.abspath(_uploaded_audio_dir(self.batch_id))
+        return os.path.isfile(absolute_path) and os.path.abspath(absolute_path).startswith(uploaded_root)
+
+    def _copy_uploaded_audio_to_job(self, relative_path: str, job_audio_dir: str) -> str:
+        if not self._is_valid_uploaded_audio_relative_path(relative_path):
+            raise RuntimeError("Uploaded audio source is invalid or missing.")
+        source_path = storage_absolute_path(relative_path)
+        target_name = f"audio_{Path(source_path).name}"
+        target_path = os.path.join(job_audio_dir, target_name)
+        shutil.copy2(source_path, target_path)
+        return target_path
+
+    def _assign_decor_videos(self):
+        """Auto-assign PiP overlays for items that do not already have one."""
         all_decor = list_decor_videos()
         if not all_decor:
             logger.info("[BatchPipeline] No decor videos in library. Skipping PiP auto-assign.")
             return
 
-        # Collect IDs that are already explicitly chosen
         used_ids: set[str] = set()
         for item in self.items:
             if item.get("decorVideoId"):
                 used_ids.add(item["decorVideoId"])
 
-        all_ids = [dv["id"] for dv in all_decor]
-        decor_lookup = {dv["id"]: dv for dv in all_decor}
-
-        # Build a pool of available IDs (not yet used)
-        available_pool = [did for did in all_ids if did not in used_ids]
+        all_ids = [decor_video["id"] for decor_video in all_decor]
+        decor_lookup = {decor_video["id"]: decor_video for decor_video in all_decor}
+        available_pool = [decor_id for decor_id in all_ids if decor_id not in used_ids]
         random.shuffle(available_pool)
 
         for index, item in enumerate(self.items):
             if item.get("decorVideoId"):
                 continue
 
-            # Refill pool if exhausted
             if not available_pool:
                 available_pool = list(all_ids)
                 random.shuffle(available_pool)
@@ -153,7 +426,6 @@ class BatchPipelineRunner:
             item["decorVideoId"] = chosen_id
             used_ids.add(chosen_id)
 
-            # Update progress item with the auto-assigned info
             decor_record = decor_lookup.get(chosen_id)
             self.progress["items"][index]["decorVideoId"] = chosen_id
             self.progress["items"][index]["decorVideoName"] = (
@@ -172,90 +444,508 @@ class BatchPipelineRunner:
         message: str,
         *,
         status: str = "running",
-        output_video: str | None = None,
-        job_id: str | None = None,
-        error: str | None = None,
+        output_video: str | None | object = _UNSET,
+        job_id: str | None | object = _UNSET,
+        error: str | None | object = _UNSET,
+        audio_relative_path: str | None | object = _UNSET,
+        audio_status: str | None | object = _UNSET,
+        chunk_summary: dict | None | object = _UNSET,
+        retryable: bool | object = _UNSET,
+        failure_code: str | None | object = _UNSET,
+        failure_stage: str | None | object = _UNSET,
+        last_retry_at: str | None | object = _UNSET,
     ):
         item = self.progress["items"][index]
         item["status"] = status
         item["stage"] = stage
         item["percent"] = round(min(100, max(0, percent)), 1)
         item["message"] = message
-        if output_video is not None:
+        if output_video is not _UNSET:
             item["outputVideo"] = output_video
-        if job_id is not None:
+        if job_id is not _UNSET:
             item["jobId"] = job_id
-        if error is not None:
+        if error is not _UNSET:
             item["error"] = error
+        if audio_relative_path is not _UNSET:
+            item["audioRelativePath"] = audio_relative_path
+        if audio_status is not _UNSET:
+            item["audioStatus"] = audio_status
+        if chunk_summary is not _UNSET:
+            item["chunkSummary"] = chunk_summary
+        if retryable is not _UNSET:
+            item["retryable"] = bool(retryable)
+        if failure_code is not _UNSET:
+            item["failureCode"] = failure_code
+        if failure_stage is not _UNSET:
+            item["failureStage"] = failure_stage
+        if last_retry_at is not _UNSET:
+            item["lastRetryAt"] = last_retry_at
 
-        # Recalculate overall completed count
         self.progress["completedUrls"] = sum(
-            1 for it in self.progress["items"] if it["status"] in ("completed", "failed")
+            1 for existing_item in self.progress["items"] if existing_item["status"] in ("completed", "failed")
         )
         self._save()
 
-    def _shuffle_images_for_index(self, index: int) -> list[str]:
-        """Return a shuffled copy of shared images using a deterministic seed per index."""
-        paths = list(self.shared_image_paths)
-        rng = random.Random(hash((self.batch_id, index)))
-        rng.shuffle(paths)
-        return paths
+    def _update_shared_image_pool_progress(
+        self,
+        status: str,
+        message: str,
+        *,
+        completed_clips: int | None = None,
+        total_clips: int | None = None,
+        cache_hits: int | None = None,
+        cache_misses: int | None = None,
+        error: str | None = None,
+    ):
+        shared_pool = self.progress["sharedImagePool"]
+        shared_pool["status"] = status
+        shared_pool["message"] = message
+        if completed_clips is not None:
+            shared_pool["completedClips"] = max(0, int(completed_clips))
+        if total_clips is not None:
+            shared_pool["totalClips"] = max(0, int(total_clips))
+        if cache_hits is not None:
+            shared_pool["cacheHits"] = max(0, int(cache_hits))
+        if cache_misses is not None:
+            shared_pool["cacheMisses"] = max(0, int(cache_misses))
+        if error is not None:
+            shared_pool["error"] = error
+        self._save()
 
-    def _copy_images_to_job(self, shuffled_paths: list[str], target_dir: str) -> list[str]:
-        """Copy shared images into a job's raw_images directory."""
-        os.makedirs(target_dir, exist_ok=True)
-        copied = []
-        for idx, src_path in enumerate(shuffled_paths):
-            ext = os.path.splitext(src_path)[1] or ".jpg"
-            dst = os.path.join(target_dir, f"batch_img_{idx:04d}{ext}")
-            shutil.copy2(src_path, dst)
-            copied.append(dst)
-        return copied
+    def _apply_audio_state(self, index: int, audio_state: dict | None, *, clear_failure: bool = False):
+        if not isinstance(audio_state, dict):
+            return
+        self._update_item_progress(
+            index,
+            self.progress["items"][index]["stage"],
+            self.progress["items"][index]["percent"],
+            self.progress["items"][index]["message"],
+            status=self.progress["items"][index]["status"],
+            audio_relative_path=audio_state.get("audioRelativePath"),
+            audio_status=audio_state.get("audioStatus") or "none",
+            chunk_summary=audio_state.get("chunkSummary") or {"completed": 0, "failed": 0, "total": 0},
+            failure_code=None if clear_failure else audio_state.get("failureCode", _UNSET),
+            failure_stage=None if clear_failure else audio_state.get("failureStage", _UNSET),
+        )
+
+    def retry_failed_items(self) -> list[int]:
+        failed_indexes = [index for index, item in enumerate(self.progress["items"]) if item["status"] == "failed"]
+        if not failed_indexes:
+            raise RuntimeError("Khong co item failed de retry.")
+        if self.progress.get("status") == "running":
+            raise RuntimeError("Batch dang chay, khong the retry luc nay.")
+        if _is_batch_expired(self.progress.get("expiresAt")):
+            raise RuntimeError("Batch retry da het han.")
+        if not self.progress.get("retryArtifactsAvailable", True):
+            raise RuntimeError("Batch retry artifacts khong con san sang.")
+
+        missing_shared_images = [path for path in self.shared_image_paths if not os.path.isfile(path)]
+        if missing_shared_images:
+            raise RuntimeError("Shared image artifacts da bi thieu, khong the retry batch nay.")
+
+        missing_uploaded_audio = []
+        for index in failed_indexes:
+            item = self.items[index]
+            if str(item.get("sourceType") or "doc_url") != "uploaded_audio":
+                continue
+            relative_path = str(item.get("sourceAudioRelativePath") or "")
+            if not self._is_valid_uploaded_audio_relative_path(relative_path):
+                missing_uploaded_audio.append(item.get("sourceAudioName") or item.get("outputName") or f"item {index}")
+        if missing_uploaded_audio:
+            raise RuntimeError(
+                "Uploaded audio artifacts da bi thieu, khong the retry batch nay: "
+                + ", ".join(str(name) for name in missing_uploaded_audio[:5])
+            )
+
+        retry_started_at = _utc_now()
+        self._extend_retry_retention()
+        self.progress["status"] = "pending"
+        for index in failed_indexes:
+            self._update_item_progress(
+                index,
+                "pending",
+                0,
+                "Cho retry...",
+                status="pending",
+                output_video=None,
+                job_id=None,
+                error=None,
+                retryable=False,
+                failure_code=None,
+                failure_stage=None,
+                last_retry_at=retry_started_at,
+            )
+        self._save()
+        return failed_indexes
+
+    def _build_shared_image_render_plan(self) -> dict:
+        rng = random.Random(_stable_seed(self.batch_id, "shared_image_render_plan"))
+        plan_items = []
+        for image_path in self.shared_image_paths:
+            preset = self.animation_presets[rng.randrange(len(self.animation_presets))]
+            plan_items.append(
+                {
+                    "source_image_relative_path": storage_relative_path(image_path),
+                    "animation_preset_id": preset["id"],
+                }
+            )
+        return {"version": 1, "batch_id": self.batch_id, "items": plan_items}
+
+    def _build_shared_image_pool_manifest(self, image_clips: list[dict], render_plan: dict) -> dict:
+        cache_hits = int(render_plan.get("cache_hits") or 0)
+        cache_misses = int(render_plan.get("cache_misses") or 0)
+        records = []
+        for index, clip in enumerate(image_clips):
+            records.append(
+                {
+                    "sharedClipId": f"shared_img_clip_{index:04d}",
+                    "sourceImageRelativePath": clip["source_image_relative_path"],
+                    "animationPresetId": clip.get("animation_preset_id"),
+                    "relativePath": clip["relative_path"],
+                    "duration": clip.get("duration"),
+                    "cacheKey": clip.get("cache_key"),
+                }
+            )
+        return {
+            "version": 1,
+            "batchId": self.batch_id,
+            "totalClips": len(records),
+            "cacheHits": cache_hits,
+            "cacheMisses": cache_misses,
+            "clips": records,
+        }
+
+    def _file_fingerprint(self, path: str) -> tuple[int, int]:
+        stat_result = os.stat(path)
+        return (int(stat_result.st_size), int(stat_result.st_mtime_ns))
+
+    def _mark_shared_clip_verified(self, record: dict):
+        clip_id = record["sharedClipId"]
+        clip_path = storage_absolute_path(record["relativePath"])
+        self._verified_shared_clip_ids.add(clip_id)
+        self._shared_clip_fingerprints[clip_id] = self._file_fingerprint(clip_path)
+
+    def _shared_clip_is_valid(self, record: dict) -> bool:
+        clip_path = storage_absolute_path(record["relativePath"])
+        if not os.path.isfile(clip_path):
+            return False
+        expected_duration = float(record.get("duration") or Config.IMG_CLIP_DURATION)
+        actual_duration = FFmpegHelper.probe_duration(clip_path)
+        minimum_duration = max(0.1, expected_duration * 0.8)
+        return actual_duration >= minimum_duration
+
+    def _shared_clip_needs_repair(self, record: dict) -> bool:
+        clip_id = record["sharedClipId"]
+        clip_path = storage_absolute_path(record["relativePath"])
+        if not os.path.isfile(clip_path):
+            return True
+
+        current_fingerprint = self._file_fingerprint(clip_path)
+        known_fingerprint = self._shared_clip_fingerprints.get(clip_id)
+        if clip_id not in self._verified_shared_clip_ids:
+            return not self._shared_clip_is_valid(record)
+        if known_fingerprint and current_fingerprint != known_fingerprint:
+            return not self._shared_clip_is_valid(record)
+        return False
+
+    def _repair_shared_clip(self, record: dict) -> dict:
+        source_image_path = storage_absolute_path(record["sourceImageRelativePath"])
+        if not os.path.isfile(source_image_path):
+            raise RuntimeError(f"Shared source image is missing: {source_image_path}")
+
+        paths = self._shared_paths()
+        repair_root = os.path.join(paths["temp"], "repair", record["sharedClipId"])
+        repair_dirs = {
+            "img_clips": os.path.join(repair_root, "clips"),
+            "temp": os.path.join(repair_root, "temp"),
+        }
+        processor = ImageProcessor(
+            self.batch_id,
+            repair_dirs,
+            animation_presets=self.animation_presets,
+            image_render_plan=self.shared_image_render_plan,
+        )
+
+        logger.warning(
+            f"[BatchPipeline] Shared clip missing or invalid. Regenerating {record['sharedClipId']} from "
+            f"{record['sourceImageRelativePath']}"
+        )
+        try:
+            repaired_clips = processor.process_images([source_image_path])
+            if len(repaired_clips) != 1:
+                raise RuntimeError(f"Could not regenerate shared clip {record['sharedClipId']}")
+
+            repaired_clip = repaired_clips[0]
+            target_path = storage_absolute_path(record["relativePath"])
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            shutil.copy2(repaired_clip["path"], target_path)
+
+            record["duration"] = repaired_clip.get("duration")
+            record["animationPresetId"] = repaired_clip.get("animation_preset_id") or record.get("animationPresetId")
+            record["cacheKey"] = repaired_clip.get("cache_key")
+            self._mark_shared_clip_verified(record)
+            if self.shared_image_pool is not None:
+                _save_json(paths["manifest"], self.shared_image_pool)
+            return record
+        finally:
+            if os.path.isdir(repair_root):
+                shutil.rmtree(repair_root, ignore_errors=True)
+
+    def _ensure_shared_clip_record(self, record: dict) -> dict:
+        if not self._shared_clip_needs_repair(record):
+            clip_path = storage_absolute_path(record["relativePath"])
+            if os.path.isfile(clip_path):
+                self._verified_shared_clip_ids.add(record["sharedClipId"])
+                self._shared_clip_fingerprints[record["sharedClipId"]] = self._file_fingerprint(clip_path)
+            return record
+        return self._repair_shared_clip(record)
+
+    def _prepare_shared_image_pool(self) -> dict:
+        if self.shared_image_pool is not None:
+            return self.shared_image_pool
+
+        paths = self._shared_paths()
+        os.makedirs(paths["shared_clips"], exist_ok=True)
+        os.makedirs(paths["temp"], exist_ok=True)
+        self.shared_image_render_plan = self._build_shared_image_render_plan()
+
+        cached_manifest = _load_json(paths["manifest"])
+        if cached_manifest and isinstance(cached_manifest.get("clips"), list):
+            self.shared_image_pool = cached_manifest
+            for record in self.shared_image_pool["clips"]:
+                clip_path = storage_absolute_path(record["relativePath"])
+                if os.path.isfile(clip_path):
+                    self._verified_shared_clip_ids.add(record["sharedClipId"])
+                    self._shared_clip_fingerprints[record["sharedClipId"]] = self._file_fingerprint(clip_path)
+            self._update_shared_image_pool_progress(
+                "completed",
+                f"Da nap shared image clip pool ({len(self.shared_image_pool['clips'])} clip).",
+                completed_clips=len(self.shared_image_pool["clips"]),
+                total_clips=len(self.shared_image_pool["clips"]),
+                cache_hits=int(self.shared_image_pool.get("cacheHits") or 0),
+                cache_misses=int(self.shared_image_pool.get("cacheMisses") or 0),
+                error=None,
+            )
+            logger.info(
+                f"[BatchPipeline] Loaded existing shared image clip pool for {self.batch_id}: "
+                f"{len(self.shared_image_pool['clips'])} clips"
+            )
+            return self.shared_image_pool
+
+        self._update_shared_image_pool_progress(
+            "running",
+            f"Dang tao shared image clip pool tu {len(self.shared_image_paths)} anh...",
+            completed_clips=0,
+            total_clips=len(self.shared_image_paths),
+            cache_hits=0,
+            cache_misses=0,
+            error=None,
+        )
+
+        processor = ImageProcessor(
+            self.batch_id,
+            {"img_clips": paths["shared_clips"], "temp": paths["temp"]},
+            animation_presets=self.animation_presets,
+            image_render_plan=self.shared_image_render_plan,
+        )
+
+        def _progress(event: dict):
+            self._update_shared_image_pool_progress(
+                "running",
+                event.get("message", "Dang tao shared image clip pool..."),
+                completed_clips=int(event.get("currentImage") or 0),
+                total_clips=max(int(event.get("totalImages") or len(self.shared_image_paths)), 0),
+                cache_hits=int(event.get("cacheHits") or 0),
+                cache_misses=int(event.get("cacheMisses") or 0),
+            )
+
+        image_clips = processor.process_images(self.shared_image_paths, progress_callback=_progress)
+        if len(image_clips) != len(self.shared_image_paths):
+            raise RuntimeError(
+                f"Shared image clip pool is incomplete: expected {len(self.shared_image_paths)}, got {len(image_clips)}."
+            )
+
+        self.shared_image_render_plan = processor.updated_image_render_plan
+        self.shared_image_pool = self._build_shared_image_pool_manifest(image_clips, self.shared_image_render_plan)
+        _save_json(paths["manifest"], self.shared_image_pool)
+
+        for record in self.shared_image_pool["clips"]:
+            self._mark_shared_clip_verified(record)
+
+        self._update_shared_image_pool_progress(
+            "completed",
+            f"Da tao xong shared image clip pool ({len(image_clips)} clip).",
+            completed_clips=len(image_clips),
+            total_clips=len(image_clips),
+            cache_hits=int(self.shared_image_pool.get("cacheHits") or 0),
+            cache_misses=int(self.shared_image_pool.get("cacheMisses") or 0),
+            error=None,
+        )
+        logger.info(
+            f"[BatchPipeline] Shared image clip pool ready: {len(image_clips)} clips "
+            f"(cache hit {self.shared_image_pool['cacheHits']}, miss {self.shared_image_pool['cacheMisses']})"
+        )
+        return self.shared_image_pool
+
+    def _ordered_shared_image_clips(self, index: int) -> list[dict]:
+        shared_pool = self._prepare_shared_image_pool()
+        record_indexes = list(range(len(shared_pool["clips"])))
+        rng = random.Random(_stable_seed(self.batch_id, "shared_image_clip_order", index))
+        rng.shuffle(record_indexes)
+
+        ordered_clips = []
+        for record_index in record_indexes:
+            record = self._ensure_shared_clip_record(shared_pool["clips"][record_index])
+            ordered_clips.append(
+                {
+                    "id": record["sharedClipId"],
+                    "shared_clip_id": record["sharedClipId"],
+                    "kind": "image",
+                    "path": storage_absolute_path(record["relativePath"]),
+                    "relative_path": record["relativePath"],
+                    "source_image_relative_path": record["sourceImageRelativePath"],
+                    "duration": round(float(record.get("duration") or 0), 3),
+                    "animation_preset_id": record.get("animationPresetId"),
+                    "cache_key": record.get("cacheKey"),
+                }
+            )
+
+        logger.info(
+            f"[BatchPipeline] Item {index}: Reusing {len(ordered_clips)} shared image clips with deterministic order."
+        )
+        return ordered_clips
+
+    def _manifest_image_render_plan_for_item(self, ordered_clips: list[dict]) -> dict:
+        shared_manifest_relative_path = storage_relative_path(_shared_image_manifest_path(self.batch_id))
+        return {
+            "version": 1,
+            "source": "batch_shared_pool",
+            "batch_id": self.batch_id,
+            "shared_image_pool_relative_path": shared_manifest_relative_path,
+            "cache_hits": int((self.shared_image_pool or {}).get("cacheHits") or 0),
+            "cache_misses": int((self.shared_image_pool or {}).get("cacheMisses") or 0),
+            "items": [
+                {
+                    "clip_index": clip_index,
+                    "shared_clip_id": clip["shared_clip_id"],
+                    "source_image_relative_path": clip["source_image_relative_path"],
+                    "animation_preset_id": clip.get("animation_preset_id"),
+                    "cache_key": clip.get("cache_key"),
+                }
+                for clip_index, clip in enumerate(ordered_clips)
+            ],
+        }
+
+    def _cleanup_batch_assets(self):
+        paths = self._shared_paths()
+        for label, path in (
+            ("shared images", paths["shared_images"]),
+            ("shared clips", paths["shared_clips"]),
+            ("batch temp", paths["temp"]),
+        ):
+            if not os.path.exists(path):
+                continue
+            try:
+                shutil.rmtree(path)
+                logger.info(f"[BatchPipeline] Cleaned up {label} for batch {self.batch_id}")
+            except Exception as exc:
+                logger.warning(f"[BatchPipeline] Failed to clean {label} for batch {self.batch_id}: {exc}")
+
+    def _fail_pending_items(self, error_message: str):
+        for index, progress_item in enumerate(self.progress["items"]):
+            if progress_item["status"] != "pending":
+                continue
+            self._update_item_progress(
+                index,
+                "failed",
+                0,
+                f"That bai: {error_message[:200]}",
+                status="failed",
+                error=error_message[:500],
+                failure_code="batch_shared_pool_failed",
+                failure_stage="shared_image_pool",
+            )
 
     def _run_single_url(self, index: int, item: dict):
-        """Execute the full pipeline for one URL: TTS → Job → Images → Timeline → Render."""
+        """Execute TTS -> job setup -> shared clip reuse -> timeline -> render."""
         output_name = item["outputName"]
-        doc_url = item["docUrl"]
+        source_type = str(item.get("sourceType") or "doc_url")
+        doc_url = item.get("docUrl") or ""
+        source_audio_name = item.get("sourceAudioName") or ""
+        source_audio_relative_path = item.get("sourceAudioRelativePath") or ""
         decor_video_id = item.get("decorVideoId", "")
 
-        logger.info(f"[BatchPipeline] Starting item {index}: {output_name} | {doc_url}")
-
-        # --- Stage 1: TTS Audio ---
-        self._update_item_progress(index, "tts_audio", 5, f"Dang tao audio tu Google Docs...")
-        audio_result = create_audio_from_google_doc(
-            doc_url=doc_url,
-            output_name=output_name,
-            voice_id=self.voice_id,
-            speed=self.speed,
-            volume=self.volume,
+        logger.info(
+            f"[BatchPipeline] Starting item {index}: {output_name} | "
+            f"{doc_url if source_type == 'doc_url' else source_audio_name}"
         )
-        audio_relative_path = audio_result["audio"]["relativePath"]
-        logger.info(f"[BatchPipeline] Item {index}: Audio created → {audio_relative_path}")
 
-        # --- Stage 2: Job Setup ---
-        self._update_item_progress(index, "job_setup", 25, "Dang tao job va copy anh nguon...")
+        if source_type == "uploaded_audio":
+            self._update_item_progress(
+                index,
+                "audio_source",
+                12,
+                f"Dang nap audio nguon: {source_audio_name or output_name}...",
+            )
+            if not self._is_valid_uploaded_audio_relative_path(source_audio_relative_path):
+                raise RuntimeError(f"Uploaded audio source for '{output_name}' is missing or invalid.")
+            source_audio_path = storage_absolute_path(source_audio_relative_path)
+            if not validate_audio(source_audio_path):
+                raise RuntimeError(f"Uploaded audio for '{output_name}' is invalid.")
+            self._apply_audio_state(
+                index,
+                {
+                    "audioRelativePath": source_audio_relative_path,
+                    "audioStatus": "ready",
+                    "chunkSummary": {"completed": 0, "failed": 0, "total": 0},
+                },
+                clear_failure=True,
+            )
+            audio_relative_path = source_audio_relative_path
+            logger.info(f"[BatchPipeline] Item {index}: Uploaded audio ready -> {audio_relative_path}")
+        else:
+            self._update_item_progress(index, "tts_audio", 5, "Dang tao audio tu Google Docs...")
+            audio_result = create_audio_from_google_doc(
+                doc_url=doc_url,
+                output_name=output_name,
+                voice_id=self.voice_id,
+                speed=self.speed,
+                volume=self.volume,
+            )
+            self._apply_audio_state(index, audio_result.get("audioState"), clear_failure=True)
+            audio_relative_path = audio_result["audio"]["relativePath"]
+            logger.info(f"[BatchPipeline] Item {index}: Audio created -> {audio_relative_path}")
+
+        self._update_item_progress(index, "job_setup", 25, "Dang tao job...")
         job_id = str(uuid.uuid4())[:8]
         self._update_item_progress(index, "job_setup", 25, "Dang tao job...", job_id=job_id)
         dirs = setup_directories(job_id)
 
-        # Copy audio to job
-        audio_path = copy_generated_audio_to_job(audio_relative_path, dirs["audio"])
+        if source_type == "uploaded_audio":
+            audio_path = self._copy_uploaded_audio_to_job(audio_relative_path, dirs["audio"])
+        else:
+            audio_path = copy_generated_audio_to_job(audio_relative_path, dirs["audio"])
         if not validate_audio(audio_path):
             raise RuntimeError(f"Audio generated for '{output_name}' is invalid.")
         audio_duration = get_audio_duration(audio_path)
 
-        # Copy shuffled images to job
-        shuffled_images = self._shuffle_images_for_index(index)
-        image_paths = self._copy_images_to_job(shuffled_images, dirs["raw_images"])
+        self._update_item_progress(
+            index,
+            "shared_image_pool",
+            35,
+            f"Dang dung lai shared image clip pool ({len(self.shared_image_paths)} clip)...",
+        )
+        image_clips = self._ordered_shared_image_clips(index)
+        if not image_clips:
+            raise RuntimeError(f"No valid shared image clips available for '{output_name}'.")
 
-        # Save manifest
         manifest = {
             "job_id": job_id,
             "created_at": _utc_now(),
             "audio_relative_path": storage_relative_path(audio_path),
             "audio_duration": round(audio_duration, 3),
             "render_mode": "image_audio_only",
-            "image_paths": [storage_relative_path(p) for p in image_paths],
+            "image_paths": [storage_relative_path(path) for path in self.shared_image_paths],
             "source_videos": [],
             "download_errors": [],
             "review_clips": [],
@@ -266,39 +956,19 @@ class BatchPipelineRunner:
             "batch_id": self.batch_id,
             "batch_item_index": index,
             "batch_output_name": output_name,
+            "image_render_plan": self._manifest_image_render_plan_for_item(image_clips),
         }
         save_job_manifest(job_id, manifest)
-        logger.info(f"[BatchPipeline] Item {index}: Job {job_id} created with {len(image_paths)} images")
+        logger.info(f"[BatchPipeline] Item {index}: Job {job_id} created with {len(image_clips)} shared image clips")
 
-        # --- Stage 3: Image Processing ---
-        self._update_item_progress(index, "image_processing", 35, f"Dang xu ly {len(image_paths)} anh...")
-        animation_presets = load_active_animation_presets()
-        img_processor = ImageProcessor(job_id, dirs, animation_presets=animation_presets)
-
-        def _img_progress(event: dict):
-            current = int(event.get("currentImage") or 0)
-            total = max(int(event.get("totalImages") or len(image_paths)), 1)
-            pct = 35 + (20 * current / total)
-            self._update_item_progress(index, "image_processing", pct, event.get("message", ""))
-
-        image_clips = img_processor.process_images(image_paths, progress_callback=_img_progress)
-        if not image_clips:
-            raise RuntimeError(f"No valid image clips generated for '{output_name}'.")
-
-        # Update manifest with image render plan
-        manifest["image_render_plan"] = img_processor.updated_image_render_plan
-        save_job_manifest(job_id, manifest)
-
-        # --- Stage 4: Timeline ---
         self._update_item_progress(index, "timeline", 58, "Dang tao timeline render...")
         timeline_composer = TimelineComposer(job_id, dirs)
-        timeline_data = timeline_composer.create_timeline([], image_clips, audio_duration)
+        timeline_data = timeline_composer.create_timeline([], image_clips, audio_duration, shuffle_inputs=False)
         segments = timeline_data.get("segments", [])
         if not segments:
             raise RuntimeError(f"Timeline generated 0 segments for '{output_name}'.")
         logger.info(f"[BatchPipeline] Item {index}: Timeline has {len(segments)} segments")
 
-        # --- Stage 5: Render ---
         self._update_item_progress(index, "render_video", 62, f"Dang render video ({len(segments)} segments)...")
         transition_presets = load_active_transition_presets()
         renderer = Renderer(job_id, dirs, transition_presets=transition_presets)
@@ -306,19 +976,20 @@ class BatchPipelineRunner:
 
         def _render_progress(event: dict):
             stage = event.get("stage", "render_video")
-            ffmpeg_pct = event.get("ffmpegPercent")
-            if stage in ("render_chunks", "render_video") and isinstance(ffmpeg_pct, (int, float)):
-                pct = 62 + (30 * float(ffmpeg_pct) / 100)
+            ffmpeg_percent = event.get("ffmpegPercent")
+            if stage in ("render_chunks", "render_video") and isinstance(ffmpeg_percent, (int, float)):
+                percent = 62 + (30 * float(ffmpeg_percent) / 100)
             elif stage == "join_chunks":
-                pct = 92 + (5 * (float(ffmpeg_pct) / 100 if isinstance(ffmpeg_pct, (int, float)) else 0))
+                fraction = float(ffmpeg_percent) / 100 if isinstance(ffmpeg_percent, (int, float)) else 0
+                percent = 92 + (5 * fraction)
             elif stage == "finalize":
-                pct = 97
+                percent = 97
             else:
-                pct = 65
+                percent = 65
             self._update_item_progress(
                 index,
                 stage,
-                pct,
+                percent,
                 event.get("message", f"Dang render {output_name}..."),
             )
 
@@ -332,7 +1003,6 @@ class BatchPipelineRunner:
         if not output_path:
             raise RuntimeError(f"Render failed for '{output_name}'. Check logs/app.log.")
 
-        # Rename output to use the user-provided outputName
         desired_output = os.path.join(Config.OUTPUT_DIR, f"{output_name}.mp4")
         if os.path.abspath(output_path) != os.path.abspath(desired_output):
             os.makedirs(os.path.dirname(desired_output), exist_ok=True)
@@ -353,36 +1023,94 @@ class BatchPipelineRunner:
             f"Render hoan tat: {output_name}.mp4",
             status="completed",
             output_video=output_relative,
+            failure_code=None,
+            failure_stage=None,
+            error=None,
         )
-        logger.info(f"[BatchPipeline] Item {index} ({output_name}) completed → {output_relative}")
+        logger.info(f"[BatchPipeline] Item {index} ({output_name}) completed -> {output_relative}")
 
-    def run_batch(self):
-        """Process all items sequentially. Failed items are skipped."""
+    def run_batch(self, target_indexes: list[int] | None = None):
+        """Process selected items sequentially. Failed items are skipped."""
+        indexes_to_run = list(range(len(self.items))) if target_indexes is None else list(target_indexes)
         self.progress["status"] = "running"
         self._save()
-        logger.info(f"[BatchPipeline] Batch {self.batch_id} started with {len(self.items)} items")
+        logger.info(
+            f"[BatchPipeline] Batch {self.batch_id} started with {len(indexes_to_run)} "
+            f"target items out of {len(self.items)}"
+        )
 
-        for index, item in enumerate(self.items):
-            try:
-                self._run_single_url(index, item)
-            except Exception as exc:
-                error_msg = str(exc)
-                logger.exception(f"[BatchPipeline] Item {index} ({item['outputName']}) failed: {error_msg}")
+        try:
+            self._prepare_shared_image_pool()
+        except Exception as exc:
+            error_message = str(exc)
+            logger.exception(f"[BatchPipeline] Shared image clip pool failed: {error_message}")
+            self._update_shared_image_pool_progress(
+                "failed",
+                f"That bai: {error_message[:200]}",
+                error=error_message[:500],
+            )
+            for index in indexes_to_run:
+                if self.progress["items"][index]["status"] in {"completed", "failed"}:
+                    continue
                 self._update_item_progress(
                     index,
                     "failed",
                     0,
-                    f"That bai: {error_msg[:200]}",
+                    f"That bai: {error_message[:200]}",
                     status="failed",
-                    error=error_msg[:500],
+                    error=error_message[:500],
+                    failure_code="batch_shared_pool_failed",
+                    failure_stage="shared_image_pool",
+                )
+            self.progress["status"] = "failed" if all(
+                item["status"] == "failed" for item in self.progress["items"]
+            ) else "completed"
+            self._save()
+            return
+
+        for index in indexes_to_run:
+            item = self.items[index]
+            try:
+                self._run_single_url(index, item)
+            except TTSAudioError as exc:
+                error_message = str(exc)
+                logger.exception(f"[BatchPipeline] Item {index} ({item['outputName']}) failed: {error_message}")
+                audio_state = exc.details.get("audioState") if isinstance(exc.details, dict) else None
+                self._apply_audio_state(index, audio_state)
+                self._update_item_progress(
+                    index,
+                    "failed",
+                    0,
+                    f"That bai: {error_message[:200]}",
+                    status="failed",
+                    error=error_message[:500],
+                    failure_code=exc.code,
+                    failure_stage=(
+                        audio_state.get("failureStage")
+                        if isinstance(audio_state, dict)
+                        else self.progress["items"][index].get("stage")
+                    )
+                    or "tts_audio",
+                )
+            except Exception as exc:
+                error_message = str(exc)
+                logger.exception(f"[BatchPipeline] Item {index} ({item['outputName']}) failed: {error_message}")
+                self._update_item_progress(
+                    index,
+                    "failed",
+                    0,
+                    f"That bai: {error_message[:200]}",
+                    status="failed",
+                    error=error_message[:500],
+                    failure_code="batch_item_failed",
+                    failure_stage=self.progress["items"][index].get("stage") or "failed",
                 )
 
-        # Determine overall batch status
-        statuses = {it["status"] for it in self.progress["items"]}
+        statuses = {progress_item["status"] for progress_item in self.progress["items"]}
         if statuses == {"completed"}:
             self.progress["status"] = "completed"
         elif "completed" in statuses:
-            self.progress["status"] = "completed"  # partial success is still "completed"
+            self.progress["status"] = "completed"
         else:
             self.progress["status"] = "failed"
 
@@ -392,12 +1120,3 @@ class BatchPipelineRunner:
             f"Status: {self.progress['status']}, "
             f"Completed: {self.progress['completedUrls']}/{self.progress['totalUrls']}"
         )
-
-        # Cleanup shared images to save space
-        batch_images_dir = os.path.join(Config.STORAGE_DIR, "batch", self.batch_id, "shared_images")
-        if os.path.exists(batch_images_dir):
-            try:
-                shutil.rmtree(batch_images_dir)
-                logger.info(f"[BatchPipeline] Cleaned up shared images for batch {self.batch_id}")
-            except Exception as e:
-                logger.warning(f"[BatchPipeline] Failed to clean shared images for batch {self.batch_id}: {e}")

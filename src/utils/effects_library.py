@@ -77,9 +77,12 @@ def ensure_effects_library_dirs() -> dict[str, str]:
 def build_zoompan_filter(ffmpeg_filter: str, duration_seconds: float) -> str:
     total_frames = max(1, int(round(Config.TARGET_FPS * duration_seconds)))
     normalized_filter = ffmpeg_filter.replace("fps*6", str(total_frames))
-    target_width = Config.TARGET_RESOLUTION.split("x")[0]
+    
+    # [FIX JITTER]: Upscale image drastically before zoompan to eliminate sub-pixel shaking artifacts
+    target_width_scaled = int(Config.TARGET_RESOLUTION.split("x")[0]) * 4
+    
     return (
-        f"scale={target_width}:-1,zoompan={normalized_filter}:d={total_frames}:"
+        f"scale={target_width_scaled}:-1,zoompan={normalized_filter}:d={total_frames}:"
         f"s={Config.TARGET_RESOLUTION}:fps={Config.TARGET_FPS}"
     )
 

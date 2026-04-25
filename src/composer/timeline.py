@@ -59,12 +59,19 @@ class TimelineComposer:
 
         return self._timeline_payload(segments, raw_duration, audio_duration, "image_audio_only")
 
-    def create_timeline(self, vid_clips: list[str], img_clips: list[dict], audio_duration: float) -> dict:
+    def create_timeline(
+        self,
+        vid_clips: list[str],
+        img_clips: list[dict],
+        audio_duration: float,
+        shuffle_inputs: bool = True,
+    ) -> dict:
         """Arrange timeline items alternately to match audio duration."""
         shuffled_video_paths = list(vid_clips)
         shuffled_image_items = list(img_clips)
-        random.shuffle(shuffled_video_paths)
-        random.shuffle(shuffled_image_items)
+        if shuffle_inputs:
+            random.shuffle(shuffled_video_paths)
+            random.shuffle(shuffled_image_items)
 
         video_items = [
             {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
+import { TopNav } from "@/components/top-nav";
 import { EmptyCard } from "@/components/empty-card";
 import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
@@ -139,29 +139,3 @@ export function DecorLibraryPage() {
   );
 }
 
-function TopNav() {
-  return (
-    <nav className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-border/70 bg-card/90 px-4 py-3 shadow-lg backdrop-blur md:px-6">
-      <Link to="/" className="text-sm font-semibold tracking-tight text-foreground">
-        Auto Video Review Studio
-      </Link>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button asChild variant="ghost">
-          <Link to="/">Upload</Link>
-        </Button>
-        <Button asChild variant="ghost">
-          <Link to="/docs-to-audio">Docs to Audio</Link>
-        </Button>
-        <Button asChild variant="ghost">
-          <Link to="/voices">Voices</Link>
-        </Button>
-        <Button asChild variant="secondary">
-          <Link to="/decor-library">Decor Library</Link>
-        </Button>
-        <Button asChild variant="ghost">
-          <Link to="/effects-library">Effects Library</Link>
-        </Button>
-      </div>
-    </nav>
-  );
-}

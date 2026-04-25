@@ -3,6 +3,7 @@ import type {
   AudioLibraryResponse,
   BatchPipelineResponse,
   BatchProgressResponse,
+  BatchRetryResponse,
   CloneVoiceResponse,
   CreateJobResponse,
   DecorVideoListResponse,
@@ -140,3 +141,8 @@ export const startBatchPipeline = (formData: FormData) =>
 
 export const getBatchProgress = (batchId: string) =>
   requestJson<BatchProgressResponse>(`/api/batch-pipeline/${batchId}/progress`);
+
+export const retryFailedBatch = (batchId: string) =>
+  requestJson<BatchRetryResponse>(`/api/batch-pipeline/${batchId}/retry-failed`, {
+    method: "POST",
+  });

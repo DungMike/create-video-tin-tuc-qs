@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
+import { TopNav } from "@/components/top-nav";
 import { EffectPresetCard } from "@/components/effect-preset-card";
 import { EmptyCard } from "@/components/empty-card";
 import { LoadingCard } from "@/components/loading-card";
@@ -129,6 +129,7 @@ export function EffectsLibraryPage() {
 
   return (
     <AppShell>
+      <TopNav />
       <HeroCard
         eyebrow="Global Effects Library"
         title="Cau hinh animation va transition cho image clip"
@@ -146,9 +147,6 @@ export function EffectsLibraryPage() {
 
       <PageSection className="space-y-4">
         <div className="flex flex-wrap items-center gap-3">
-          <Button asChild variant="secondary">
-            <Link to="/">Ve trang tao job</Link>
-          </Button>
           <Button
             variant="outline"
             onClick={() => {

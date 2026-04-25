@@ -57,6 +57,7 @@ class Config:
     OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./storage/output")
     EFFECTS_LIBRARY_DIR = os.getenv("EFFECTS_LIBRARY_DIR", "./storage/effects_library")
     DECOR_VIDEOS_DIR = os.getenv("DECOR_VIDEOS_DIR", "./storage/decor_videos")
+    BATCH_RETRY_RETENTION_SECONDS = int(os.getenv("BATCH_RETRY_RETENTION_SECONDS", "86400"))
 
     # Web UI
     WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
