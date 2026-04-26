@@ -20,6 +20,7 @@ from src.utils.effects_library import load_active_animation_presets, load_active
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.file_manager import (
     cleanup_job_files,
+    remove_file_with_retries,
     save_job_manifest,
     setup_directories,
     storage_absolute_path,
@@ -615,6 +616,41 @@ class BatchPipelineRunner:
             "clips": records,
         }
 
+    def _remove_failed_shared_images(self, image_clips: list[dict]) -> list[str]:
+        successful_paths = {
+            os.path.normcase(os.path.abspath(storage_absolute_path(clip["source_image_relative_path"])))
+            for clip in image_clips
+            if clip.get("source_image_relative_path")
+        }
+        failed_paths = [
+            image_path
+            for image_path in self.shared_image_paths
+            if os.path.normcase(os.path.abspath(image_path)) not in successful_paths
+        ]
+        if not failed_paths:
+            return []
+
+        for image_path in failed_paths:
+            removed = remove_file_with_retries(image_path)
+            relative_path = storage_relative_path(image_path)
+            if removed:
+                logger.warning(
+                    f"[BatchPipeline] Removed failed shared image from batch pool: {relative_path}"
+                )
+            else:
+                logger.warning(
+                    f"[BatchPipeline] Failed to remove bad shared image from batch pool: {relative_path}"
+                )
+
+        self.shared_image_paths = [
+            image_path
+            for image_path in self.shared_image_paths
+            if os.path.normcase(os.path.abspath(image_path)) in successful_paths
+        ]
+        self.state["sharedImagePaths"] = [storage_relative_path(path) for path in self.shared_image_paths]
+        self._save_state()
+        return failed_paths
+
     def _file_fingerprint(self, path: str) -> tuple[int, int]:
         stat_result = os.stat(path)
         return (int(stat_result.st_size), int(stat_result.st_mtime_ns))
@@ -759,10 +795,18 @@ class BatchPipelineRunner:
                 cache_misses=int(event.get("cacheMisses") or 0),
             )
 
+        original_image_count = len(self.shared_image_paths)
         image_clips = processor.process_images(self.shared_image_paths, progress_callback=_progress)
-        if len(image_clips) != len(self.shared_image_paths):
-            raise RuntimeError(
-                f"Shared image clip pool is incomplete: expected {len(self.shared_image_paths)}, got {len(image_clips)}."
+        if len(image_clips) != original_image_count:
+            if not image_clips:
+                raise RuntimeError(
+                    f"Shared image clip pool has no valid clips from {original_image_count} image(s)."
+                )
+            failed_paths = self._remove_failed_shared_images(image_clips)
+            failed_relatives = [storage_relative_path(path) for path in failed_paths]
+            logger.warning(
+                f"[BatchPipeline] Shared image clip pool skipped {len(failed_paths)} failed image(s). "
+                f"expected={original_image_count}, got={len(image_clips)}, skipped={failed_relatives}"
             )
 
         self.shared_image_render_plan = processor.updated_image_render_plan
@@ -774,7 +818,7 @@ class BatchPipelineRunner:
 
         self._update_shared_image_pool_progress(
             "completed",
-            f"Da tao xong shared image clip pool ({len(image_clips)} clip).",
+            f"Da tao xong shared image clip pool ({len(image_clips)} clip hop le).",
             completed_clips=len(image_clips),
             total_clips=len(image_clips),
             cache_hits=int(self.shared_image_pool.get("cacheHits") or 0),
