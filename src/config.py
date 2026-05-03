@@ -9,10 +9,10 @@ class Config:
     MIN_IMAGE_CLIPS = int(os.getenv("MIN_IMAGE_CLIPS", "30"))
 
     # Timeline Control
-    VID_CLIP_MIN_DURATION = int(os.getenv("VID_CLIP_MIN_DURATION", "3"))
-    VID_CLIP_MAX_DURATION = int(os.getenv("VID_CLIP_MAX_DURATION", "10"))
+    VID_CLIP_MIN_DURATION = float(os.getenv("VID_CLIP_MIN_DURATION", "5"))
+    VID_CLIP_MAX_DURATION = float(os.getenv("VID_CLIP_MAX_DURATION", "5"))
     IMG_CLIP_DURATION = int(os.getenv("IMG_CLIP_DURATION", "6"))
-    REVIEW_CLIP_DURATION = int(os.getenv("REVIEW_CLIP_DURATION", "6"))
+    REVIEW_CLIP_DURATION = float(os.getenv("REVIEW_CLIP_DURATION", "6"))
     REVIEW_PAGE_SIZE = int(os.getenv("REVIEW_PAGE_SIZE", "30"))
     IMAGE_TRANSITION_DURATION = float(os.getenv("IMAGE_TRANSITION_DURATION", "0.75"))
     EFFECT_PREVIEW_CLIP_DURATION = float(os.getenv("EFFECT_PREVIEW_CLIP_DURATION", "2.25"))
@@ -23,7 +23,7 @@ class Config:
     TARGET_RESOLUTION = os.getenv("TARGET_RESOLUTION", "1920x1080")
     TARGET_FPS = int(os.getenv("TARGET_FPS", "30"))
     USE_GPU_NVENC = os.getenv("USE_GPU_NVENC", "true").lower() == "true"
-    FFMPEG_PRESET = os.getenv("FFMPEG_PRESET", "p4")
+    FFMPEG_PRESET = os.getenv("FFMPEG_PRESET", "p2")
     VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "8M")
     FFMPEG_COMMAND_TIMEOUT_SECONDS = int(os.getenv("FFMPEG_COMMAND_TIMEOUT_SECONDS", "0"))
     FFMPEG_IMAGE_CLIP_TIMEOUT_SECONDS = int(os.getenv("FFMPEG_IMAGE_CLIP_TIMEOUT_SECONDS", "120"))
@@ -32,8 +32,11 @@ class Config:
     IMAGE_ONLY_FAST_CHUNK_CONCAT = os.getenv("IMAGE_ONLY_FAST_CHUNK_CONCAT", "true").lower() == "true"
     IMAGE_ONLY_SKIP_XFADE = os.getenv("IMAGE_ONLY_SKIP_XFADE", "true").lower() == "true"
     IMAGE_CLIP_FADE_DURATION = float(os.getenv("IMAGE_CLIP_FADE_DURATION", "0.5"))
+    # Zoom factor for video clips: 1.0 = no zoom, 1.23 = 123% (zoom in, crop edges)
+    VID_CLIP_ZOOM_FACTOR = float(os.getenv("VID_CLIP_ZOOM_FACTOR", "1.23"))
 
     # Overlay / Watermark
+    ENABLE_OVERLAY = os.getenv("ENABLE_OVERLAY", "true").lower() == "true"
     OVERLAY_VIDEO_POSITION = os.getenv("OVERLAY_VIDEO_POSITION", "top_right")
     OVERLAY_VIDEO_SCALE = float(os.getenv("OVERLAY_VIDEO_SCALE", "0.25"))
     OVERLAY_VIDEO_MARGIN = int(os.getenv("OVERLAY_VIDEO_MARGIN", "10"))
@@ -42,6 +45,16 @@ class Config:
     SOURCE_TEXT_FONT = os.getenv("SOURCE_TEXT_FONT", "C:/Windows/Fonts/arial.ttf")
     SOURCE_TEXT_POSITION = os.getenv("SOURCE_TEXT_POSITION", "bottom_left")
     SOURCE_TEXT_MARGIN = int(os.getenv("SOURCE_TEXT_MARGIN", "20"))
+    # Overlay pass performance tuning
+    # Bitrate for overlay output (can be lower than main render bitrate - 4M is sufficient for news)
+    OVERLAY_OUTPUT_BITRATE = os.getenv("OVERLAY_OUTPUT_BITRATE", "4M")
+    # NVENC preset for overlay pass: p1=fastest, p4=balanced. Use p1 for max speed.
+    OVERLAY_NVENC_PRESET = os.getenv("OVERLAY_NVENC_PRESET", "p1")
+    # CPU threads for overlay filter pass (0=auto). More threads = faster overlay.
+    OVERLAY_CPU_THREADS = int(os.getenv("OVERLAY_CPU_THREADS", "0"))
+    # Use GPU full-pipeline (overlay_cuda): requires FFmpeg libnpp support
+    # Set false if overlay_cuda returns 'Function not implemented'
+    OVERLAY_USE_GPU_PIPELINE = os.getenv("OVERLAY_USE_GPU_PIPELINE", "false").lower() == "true"
 
     # Output
     OUTPUT_USE_AUDIO_FILENAME = os.getenv("OUTPUT_USE_AUDIO_FILENAME", "true").lower() == "true"

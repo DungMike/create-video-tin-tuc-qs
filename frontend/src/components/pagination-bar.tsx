@@ -19,14 +19,14 @@ export function PaginationBar({
 
   return (
     <div className="flex flex-wrap items-center justify-center gap-3">
-      <Button variant="outline" onClick={onPrevious} disabled={page <= 1}>
+      <Button type="button" variant="outline" onClick={onPrevious} disabled={page <= 1}>
         <ChevronLeft className="mr-2 size-4" />
         Previous
       </Button>
       <div className="text-sm font-medium text-muted-foreground">
         Page {page} / {totalPages}
       </div>
-      <Button variant="outline" onClick={onNext} disabled={page >= totalPages}>
+      <Button type="button" variant="outline" onClick={onNext} disabled={page >= totalPages}>
         Next
         <ChevronRight className="ml-2 size-4" />
       </Button>

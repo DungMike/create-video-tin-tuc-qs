@@ -81,11 +81,17 @@ class FFmpegHelper:
             stderr_thread.start()
 
             if process.stdout:
-                for line in process.stdout:
+                while True:
+                    # Check timeout before each readline
                     if timeout and time.monotonic() - start_time > timeout:
                         process.kill()
                         logger.error(f"FFmpeg timed out after {timeout}s: {' '.join(cmd_list)}")
                         return False
+
+                    line = process.stdout.readline()
+                    if not line:
+                        # EOF on stdout - process has finished writing
+                        break
 
                     key, separator, value = line.strip().partition("=")
                     if not separator:
@@ -101,8 +107,16 @@ class FFmpegHelper:
                         progress_callback({"outTimeSeconds": round(seconds, 2), "ffmpegPercent": percent})
                     elif key == "progress" and value == "end":
                         progress_callback({"ffmpegPercent": 100})
+                        # Drain remaining stdout without blocking
+                        try:
+                            process.stdout.read()
+                        except Exception:
+                            pass
+                        break
 
-            return_code = process.wait(timeout=timeout)
+            # Wait with a reasonable cap to avoid infinite hang
+            effective_wait = min(timeout, 300) if timeout else 300
+            return_code = process.wait(timeout=effective_wait)
             stderr_thread.join(timeout=2)
             if return_code != 0:
                 logger.error(f"FFmpeg error:\n{''.join(stderr_lines)}")

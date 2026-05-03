@@ -47,4 +47,8 @@ export const router = createBrowserRouter([
     path: "/batch-pipeline",
     element: <BatchPipelinePage />,
   },
+  {
+    path: "/batch-pipeline/:pipelineId",
+    element: <BatchPipelinePage />,
+  },
 ]);

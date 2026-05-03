@@ -1,9 +1,14 @@
 import type {
   ApiErrorPayload,
   AudioLibraryResponse,
+  BatchDraftResponse,
+  BatchLibrarySourcesResponse,
   BatchPipelineResponse,
   BatchProgressResponse,
   BatchRetryResponse,
+  BatchSourceSetDetailResponse,
+  BatchSourceSetsResponse,
+  BatchSourceVideoResponse,
   CloneVoiceResponse,
   CreateJobResponse,
   DecorVideoListResponse,
@@ -138,6 +143,57 @@ export const startBatchPipeline = (formData: FormData) =>
     method: "POST",
     body: formData,
   });
+
+export const prepareBatchSourceVideos = (formData: FormData) =>
+  requestJson<BatchSourceVideoResponse>("/api/batch-pipeline/source-videos", {
+    method: "POST",
+    body: formData,
+  });
+
+export const createBatchDraft = () =>
+  requestJson<BatchDraftResponse>("/api/batch-pipeline/drafts", {
+    method: "POST",
+  });
+
+export const getBatchDraft = (draftId: string) =>
+  requestJson<BatchDraftResponse>(`/api/batch-pipeline/drafts/${draftId}`);
+
+export const updateBatchDraft = (draftId: string, payload: Partial<BatchDraftResponse>) =>
+  requestJson<BatchDraftResponse>(`/api/batch-pipeline/drafts/${draftId}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+export const uploadBatchDraftFiles = (draftId: string, formData: FormData) =>
+  requestJson<BatchDraftResponse>(`/api/batch-pipeline/drafts/${draftId}/files`, {
+    method: "POST",
+    body: formData,
+  });
+
+export const submitBatchDraft = (draftId: string, payload: Partial<BatchDraftResponse>) =>
+  requestJson<BatchPipelineResponse>(`/api/batch-pipeline/drafts/${draftId}/submit`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+export const getBatchSourceSets = () =>
+  requestJson<BatchSourceSetsResponse>("/api/batch-pipeline/source-sets");
+
+export const getBatchSourceSet = (batchSourceId: string) =>
+  requestJson<BatchSourceSetDetailResponse>(`/api/batch-pipeline/source-sets/${batchSourceId}`);
+
+export const getBatchLibrarySources = (tags: string[]) => {
+  const params = new URLSearchParams();
+  tags.forEach((tag) => params.append("tags", tag));
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return requestJson<BatchLibrarySourcesResponse>(`/api/batch-pipeline/library-sources${suffix}`);
+};
 
 export const getBatchProgress = (batchId: string) =>
   requestJson<BatchProgressResponse>(`/api/batch-pipeline/${batchId}/progress`);

@@ -255,6 +255,71 @@ export interface BatchPipelineResponse {
   message: string;
 }
 
+export interface BatchSourceVideoResponse {
+  batchSourceId: string;
+  reviewClips: ReviewClip[];
+  downloadErrors: string[];
+  availableTags: string[];
+}
+
+export type BatchSourceRef =
+  | { origin: "batch_source"; batchSourceId: string; clipId: string }
+  | { origin: "library"; assetId: string };
+
+export interface BatchSourceSet {
+  batchSourceId: string;
+  displayName: string;
+  createdAt: string | null;
+  sourceNames: string[];
+  clipCount: number;
+  validClipCount: number;
+  downloadErrors: string[];
+}
+
+export interface BatchSourceSetsResponse {
+  sourceSets: BatchSourceSet[];
+}
+
+export interface BatchSourceSetDetailResponse {
+  sourceSet: BatchSourceSet;
+  reviewClips: ReviewClip[];
+  availableTags: string[];
+}
+
+export interface BatchLibrarySourcesResponse {
+  clips: ReviewClip[];
+  assets: LibraryAsset[];
+  availableTags: string[];
+  selectedTags: string[];
+  totalAssetCount: number;
+}
+
+export interface BatchDraftFile {
+  index: number;
+  name: string;
+  filename: string;
+  relativePath: string;
+  size: number;
+}
+
+export interface BatchDraftResponse {
+  draftId: string;
+  createdAt: string;
+  updatedAt: string;
+  inputMode: BatchInputMode;
+  voiceId?: string;
+  speed?: number;
+  volume?: number;
+  docEntries: Array<{ docUrl: string; outputName: string; decorVideoId: string }>;
+  audioEntries: Array<{ outputName: string; decorVideoId: string; sourceAudioName: string; audioFileIndex: number }>;
+  sourceVideoLinks: string;
+  selectedSourceRefs: BatchSourceRef[];
+  clipTags: Record<string, string[]>;
+  timelineConfig: Record<string, number>;
+  imageFiles: BatchDraftFile[];
+  audioFiles: BatchDraftFile[];
+}
+
 export interface BatchRetryResponse {
   batchId: string;
   failedUrls: number;
@@ -305,4 +370,9 @@ export interface BatchProgressResponse {
   startedAt: string;
   updatedAt: string;
   items: BatchItemProgress[];
+  sourceVideoPool?: {
+    batchSourceId: string;
+    selectedClips: number;
+    downloadErrors: string[];
+  };
 }

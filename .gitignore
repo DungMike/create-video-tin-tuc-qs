@@ -1,4 +1,5 @@
 node_modules
 storage
 .env
-logs/app.log
+logs
+tests

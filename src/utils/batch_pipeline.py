@@ -20,7 +20,6 @@ from src.utils.effects_library import load_active_animation_presets, load_active
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.file_manager import (
     cleanup_job_files,
-    remove_file_with_retries,
     save_job_manifest,
     setup_directories,
     storage_absolute_path,
@@ -215,6 +214,11 @@ class BatchPipelineRunner:
         volume: float,
         input_mode: str = "docs",
         *,
+        source_video_clips: list[dict] | None = None,
+        source_video_batch_source_id: str = "",
+        source_video_download_errors: list[str] | None = None,
+        source_video_clip_tags: dict | None = None,
+        timeline_config: dict | None = None,
         progress: dict | None = None,
         state: dict | None = None,
     ):
@@ -225,6 +229,11 @@ class BatchPipelineRunner:
         self.speed = speed
         self.volume = volume
         self.input_mode = input_mode if input_mode in {"docs", "audio_upload"} else "docs"
+        self.source_video_clips = self._normalize_source_video_clips(source_video_clips or [])
+        self.source_video_batch_source_id = str(source_video_batch_source_id or "")
+        self.source_video_download_errors = list(source_video_download_errors or [])
+        self.source_video_clip_tags = source_video_clip_tags if isinstance(source_video_clip_tags, dict) else {}
+        self.timeline_config = self._normalize_timeline_config(timeline_config)
         self.animation_presets = load_active_animation_presets()
         self.shared_image_render_plan: dict | None = None
         self.shared_image_pool: dict | None = None
@@ -241,8 +250,18 @@ class BatchPipelineRunner:
             "volume": volume,
             "items": self.items,
             "sharedImagePaths": [storage_relative_path(path) for path in self.shared_image_paths],
+            "sourceVideoBatchSourceId": self.source_video_batch_source_id,
+            "sourceVideoClips": self.source_video_clips,
+            "sourceVideoDownloadErrors": self.source_video_download_errors,
+            "sourceVideoClipTags": self.source_video_clip_tags,
+            "timelineConfig": self.timeline_config,
         }
         self.state["inputMode"] = self.input_mode
+        self.state.setdefault("sourceVideoBatchSourceId", self.source_video_batch_source_id)
+        self.state.setdefault("sourceVideoClips", self.source_video_clips)
+        self.state.setdefault("sourceVideoDownloadErrors", self.source_video_download_errors)
+        self.state.setdefault("sourceVideoClipTags", self.source_video_clip_tags)
+        self.state.setdefault("timelineConfig", self.timeline_config)
 
         if progress is None:
             self.progress = {
@@ -258,6 +277,11 @@ class BatchPipelineRunner:
                 "retryArtifactsAvailable": True,
                 "canRetryFailed": False,
                 "retryFailedLabel": "Retry all failed",
+                "sourceVideoPool": {
+                    "batchSourceId": self.source_video_batch_source_id,
+                    "selectedClips": len(self.source_video_clips),
+                    "downloadErrors": self.source_video_download_errors,
+                },
                 "sharedImagePool": {
                     "status": "pending",
                     "totalClips": len(shared_image_paths),
@@ -314,6 +338,21 @@ class BatchPipelineRunner:
             self.progress.setdefault("failedUrls", 0)
             self.progress.setdefault("canRetryFailed", False)
             self.progress.setdefault("retryFailedLabel", "Retry all failed")
+            self.source_video_clips = self._normalize_source_video_clips(self.state.get("sourceVideoClips") or [])
+            self.source_video_batch_source_id = str(self.state.get("sourceVideoBatchSourceId") or "")
+            self.source_video_download_errors = list(self.state.get("sourceVideoDownloadErrors") or [])
+            self.source_video_clip_tags = (
+                self.state.get("sourceVideoClipTags") if isinstance(self.state.get("sourceVideoClipTags"), dict) else {}
+            )
+            self.timeline_config = self._normalize_timeline_config(self.state.get("timelineConfig"))
+            self.progress.setdefault(
+                "sourceVideoPool",
+                {
+                    "batchSourceId": self.source_video_batch_source_id,
+                    "selectedClips": len(self.source_video_clips),
+                    "downloadErrors": self.source_video_download_errors,
+                },
+            )
             self.progress.setdefault(
                 "sharedImagePool",
                 {
@@ -328,6 +367,50 @@ class BatchPipelineRunner:
                 },
             )
             _refresh_retry_flags(self.progress)
+
+    def _normalize_source_video_clips(self, clips: list[dict]) -> list[dict]:
+        normalized = []
+        for index, clip in enumerate(clips):
+            if not isinstance(clip, dict):
+                continue
+            relative_path = clip.get("relative_path") or clip.get("relativePath")
+            if not relative_path:
+                continue
+            normalized.append(
+                {
+                    "id": str(clip.get("id") or f"source_clip_{index}"),
+                    "relative_path": str(relative_path).replace("\\", "/"),
+                    "source_name": clip.get("source_name") or clip.get("sourceName"),
+                    "start": clip.get("start"),
+                    "end": clip.get("end"),
+                    "duration": clip.get("duration"),
+                    "origin": clip.get("origin"),
+                    "batch_source_id": clip.get("batch_source_id") or clip.get("batchSourceId"),
+                    "asset_id": clip.get("asset_id") or clip.get("assetId"),
+                    "source_clip_id": clip.get("source_clip_id") or clip.get("sourceClipId"),
+                }
+            )
+        return normalized
+
+    def _normalize_timeline_config(self, config: dict | None) -> dict:
+        source = config if isinstance(config, dict) else {}
+
+        def _int_value(key: str, default: int) -> int:
+            try:
+                return int(source.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        after_min = max(1, _int_value("afterPhaseImageEveryMin", 2))
+        after_max = max(after_min, _int_value("afterPhaseImageEveryMax", 5))
+        return {
+            "mode": "batch_mixed_media",
+            "firstPhaseSeconds": max(0, _int_value("firstPhaseSeconds", 300)),
+            "firstPhaseVideoCount": max(1, _int_value("firstPhaseVideoCount", 3)),
+            "firstPhaseImageCount": max(0, _int_value("firstPhaseImageCount", 1)),
+            "afterPhaseImageEveryMin": after_min,
+            "afterPhaseImageEveryMax": after_max,
+        }
 
     @classmethod
     def from_saved_batch(cls, batch_id: str) -> "BatchPipelineRunner":
@@ -348,6 +431,11 @@ class BatchPipelineRunner:
             speed=float(state.get("speed") or 1),
             volume=float(state.get("volume") or 1),
             input_mode=str(state.get("inputMode") or progress.get("inputMode") or "docs"),
+            source_video_clips=list(state.get("sourceVideoClips") or []),
+            source_video_batch_source_id=str(state.get("sourceVideoBatchSourceId") or ""),
+            source_video_download_errors=list(state.get("sourceVideoDownloadErrors") or []),
+            source_video_clip_tags=state.get("sourceVideoClipTags") if isinstance(state.get("sourceVideoClipTags"), dict) else {},
+            timeline_config=state.get("timelineConfig") if isinstance(state.get("timelineConfig"), dict) else None,
             progress=progress,
             state=state,
         )
@@ -544,6 +632,17 @@ class BatchPipelineRunner:
         if missing_shared_images:
             raise RuntimeError("Shared image artifacts da bi thieu, khong the retry batch nay.")
 
+        missing_source_clips = [
+            clip.get("id") or clip.get("relative_path")
+            for clip in self.source_video_clips
+            if not os.path.isfile(storage_absolute_path(str(clip.get("relative_path") or "")))
+        ]
+        if missing_source_clips:
+            raise RuntimeError(
+                "Source video clip artifacts da bi thieu, khong the retry batch nay: "
+                + ", ".join(str(name) for name in missing_source_clips[:5])
+            )
+
         missing_uploaded_audio = []
         for index in failed_indexes:
             item = self.items[index]
@@ -615,41 +714,6 @@ class BatchPipelineRunner:
             "cacheMisses": cache_misses,
             "clips": records,
         }
-
-    def _remove_failed_shared_images(self, image_clips: list[dict]) -> list[str]:
-        successful_paths = {
-            os.path.normcase(os.path.abspath(storage_absolute_path(clip["source_image_relative_path"])))
-            for clip in image_clips
-            if clip.get("source_image_relative_path")
-        }
-        failed_paths = [
-            image_path
-            for image_path in self.shared_image_paths
-            if os.path.normcase(os.path.abspath(image_path)) not in successful_paths
-        ]
-        if not failed_paths:
-            return []
-
-        for image_path in failed_paths:
-            removed = remove_file_with_retries(image_path)
-            relative_path = storage_relative_path(image_path)
-            if removed:
-                logger.warning(
-                    f"[BatchPipeline] Removed failed shared image from batch pool: {relative_path}"
-                )
-            else:
-                logger.warning(
-                    f"[BatchPipeline] Failed to remove bad shared image from batch pool: {relative_path}"
-                )
-
-        self.shared_image_paths = [
-            image_path
-            for image_path in self.shared_image_paths
-            if os.path.normcase(os.path.abspath(image_path)) in successful_paths
-        ]
-        self.state["sharedImagePaths"] = [storage_relative_path(path) for path in self.shared_image_paths]
-        self._save_state()
-        return failed_paths
 
     def _file_fingerprint(self, path: str) -> tuple[int, int]:
         stat_result = os.stat(path)
@@ -768,6 +832,43 @@ class BatchPipelineRunner:
             )
             return self.shared_image_pool
 
+        # Pre-validate images: remove corrupt/broken files before processing
+        valid_image_paths = []
+        for img_path in self.shared_image_paths:
+            if not os.path.isfile(img_path):
+                logger.warning(f"[BatchPipeline] Shared image missing, skipping: {img_path}")
+                continue
+            if os.path.getsize(img_path) < 1024:  # < 1KB is almost certainly corrupt
+                logger.warning(
+                    f"[BatchPipeline] Shared image too small ({os.path.getsize(img_path)} bytes), "
+                    f"removing corrupt file: {img_path}"
+                )
+                try:
+                    os.remove(img_path)
+                except OSError:
+                    pass
+                continue
+            try:
+                from PIL import Image as _PILImage
+                with _PILImage.open(img_path) as _img:
+                    _img.verify()
+                valid_image_paths.append(img_path)
+            except Exception as exc:
+                logger.warning(
+                    f"[BatchPipeline] Shared image corrupt, removing: {img_path} | {exc}"
+                )
+                try:
+                    os.remove(img_path)
+                except OSError:
+                    pass
+
+        if len(valid_image_paths) != len(self.shared_image_paths):
+            logger.info(
+                f"[BatchPipeline] Filtered {len(self.shared_image_paths) - len(valid_image_paths)} "
+                f"invalid images. Proceeding with {len(valid_image_paths)} valid images."
+            )
+            self.shared_image_paths = valid_image_paths
+
         self._update_shared_image_pool_progress(
             "running",
             f"Dang tao shared image clip pool tu {len(self.shared_image_paths)} anh...",
@@ -795,18 +896,13 @@ class BatchPipelineRunner:
                 cache_misses=int(event.get("cacheMisses") or 0),
             )
 
-        original_image_count = len(self.shared_image_paths)
         image_clips = processor.process_images(self.shared_image_paths, progress_callback=_progress)
-        if len(image_clips) != original_image_count:
-            if not image_clips:
-                raise RuntimeError(
-                    f"Shared image clip pool has no valid clips from {original_image_count} image(s)."
-                )
-            failed_paths = self._remove_failed_shared_images(image_clips)
-            failed_relatives = [storage_relative_path(path) for path in failed_paths]
+        if not image_clips and self.shared_image_paths:
+            raise RuntimeError("All shared image clips failed to process.")
+        elif len(image_clips) != len(self.shared_image_paths):
             logger.warning(
-                f"[BatchPipeline] Shared image clip pool skipped {len(failed_paths)} failed image(s). "
-                f"expected={original_image_count}, got={len(image_clips)}, skipped={failed_relatives}"
+                f"[BatchPipeline] Shared image clip pool is incomplete: expected {len(self.shared_image_paths)}, got {len(image_clips)}. "
+                "Continuing with successfully processed clips."
             )
 
         self.shared_image_render_plan = processor.updated_image_render_plan
@@ -818,7 +914,7 @@ class BatchPipelineRunner:
 
         self._update_shared_image_pool_progress(
             "completed",
-            f"Da tao xong shared image clip pool ({len(image_clips)} clip hop le).",
+            f"Da tao xong shared image clip pool ({len(image_clips)} clip).",
             completed_clips=len(image_clips),
             total_clips=len(image_clips),
             cache_hits=int(self.shared_image_pool.get("cacheHits") or 0),
@@ -858,6 +954,24 @@ class BatchPipelineRunner:
             f"[BatchPipeline] Item {index}: Reusing {len(ordered_clips)} shared image clips with deterministic order."
         )
         return ordered_clips
+
+    def _ordered_source_video_paths(self, index: int) -> list[str]:
+        record_indexes = list(range(len(self.source_video_clips)))
+        rng = random.Random(_stable_seed(self.batch_id, "source_video_clip_order", index))
+        rng.shuffle(record_indexes)
+
+        ordered_paths = []
+        for record_index in record_indexes:
+            clip = self.source_video_clips[record_index]
+            clip_path = storage_absolute_path(str(clip.get("relative_path") or ""))
+            if os.path.isfile(clip_path):
+                ordered_paths.append(clip_path)
+            else:
+                logger.warning(
+                    f"[BatchPipeline] Source video clip missing for item {index}: "
+                    f"{clip.get('id') or clip.get('relative_path')}"
+                )
+        return ordered_paths
 
     def _manifest_image_render_plan_for_item(self, ordered_clips: list[dict]) -> dict:
         shared_manifest_relative_path = storage_relative_path(_shared_image_manifest_path(self.batch_id))
@@ -1017,24 +1131,28 @@ class BatchPipelineRunner:
         image_clips = self._ordered_shared_image_clips(index)
         if not image_clips:
             raise RuntimeError(f"No valid shared image clips available for '{output_name}'.")
+        selected_video_paths = self._ordered_source_video_paths(index)
+        render_mode = "mixed_media" if selected_video_paths else "image_audio_only"
 
         manifest = {
             "job_id": job_id,
             "created_at": _utc_now(),
             "audio_relative_path": storage_relative_path(audio_path),
             "audio_duration": round(audio_duration, 3),
-            "render_mode": "image_audio_only",
+            "render_mode": render_mode,
             "image_paths": [storage_relative_path(path) for path in self.shared_image_paths],
-            "source_videos": [],
-            "download_errors": [],
-            "review_clips": [],
-            "selected_clip_ids": [],
+            "source_videos": [storage_relative_path(path) for path in selected_video_paths],
+            "download_errors": self.source_video_download_errors,
+            "review_clips": self.source_video_clips,
+            "selected_clip_ids": [clip["id"] for clip in self.source_video_clips],
             "selected_library_asset_ids": [],
-            "clip_tags": {},
+            "clip_tags": self.source_video_clip_tags,
             "output_video": None,
             "batch_id": self.batch_id,
             "batch_item_index": index,
             "batch_output_name": output_name,
+            "batch_source_video_id": self.source_video_batch_source_id,
+            "timeline_config": self.timeline_config,
             "image_render_plan": self._manifest_image_render_plan_for_item(image_clips),
         }
         save_job_manifest(job_id, manifest)
@@ -1045,7 +1163,16 @@ class BatchPipelineRunner:
 
         self._update_item_progress(index, "timeline", 58, "Dang tao timeline render...")
         timeline_composer = TimelineComposer(job_id, dirs)
-        timeline_data = timeline_composer.create_timeline([], image_clips, audio_duration, shuffle_inputs=False)
+        if selected_video_paths:
+            timeline_data = timeline_composer.create_batch_mixed_timeline(
+                selected_video_paths,
+                image_clips,
+                audio_duration,
+                seed=_stable_seed(self.batch_id, "batch_mixed_timeline", index),
+                config=self.timeline_config,
+            )
+        else:
+            timeline_data = timeline_composer.create_timeline([], image_clips, audio_duration, shuffle_inputs=False)
         segments = timeline_data.get("segments", [])
         if not segments:
             raise RuntimeError(f"Timeline generated 0 segments for '{output_name}'.")

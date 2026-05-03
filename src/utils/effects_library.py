@@ -83,7 +83,7 @@ def build_zoompan_filter(ffmpeg_filter: str, duration_seconds: float) -> str:
     
     return (
         f"scale={target_width_scaled}:-1,zoompan={normalized_filter}:d={total_frames}:"
-        f"s={Config.TARGET_RESOLUTION}:fps={Config.TARGET_FPS}"
+        f"s={Config.TARGET_RESOLUTION}:fps={Config.TARGET_FPS},format=yuv420p"
     )
 
 
