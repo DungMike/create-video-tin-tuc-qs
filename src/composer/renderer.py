@@ -17,6 +17,7 @@ class Renderer:
         self.temp_dir = dirs["temp"]
         self.progress_callback = None
         self.decor_video_path: str | None = None
+        self.source_text_override: str | None = None
         self.transition_presets = list(transition_presets or load_active_transition_presets())
         if not self.transition_presets:
             self.transition_presets = [dict(DEFAULT_TRANSITION_FALLBACK, active=True)]
@@ -597,8 +598,12 @@ class Renderer:
 
     def _has_source_text(self) -> bool:
         """Source text is always shown when SOURCE_TEXT is configured,
-        regardless of ENABLE_OVERLAY setting."""
-        return bool(Config.SOURCE_TEXT)
+        regardless of ENABLE_OVERLAY setting.
+
+        Uses per-item override if set, otherwise falls back to global config.
+        """
+        text = self.source_text_override if self.source_text_override is not None else Config.SOURCE_TEXT
+        return bool(text)
 
     def _has_overlays(self) -> bool:
         """Returns True if any overlay (PiP video or source text) needs to be applied."""
@@ -677,7 +682,8 @@ class Renderer:
 
         # --- Source text (drawtext) ---
         if has_text:
-            escaped_text = self._escape_drawtext_value(Config.SOURCE_TEXT)
+            effective_source_text = self.source_text_override if self.source_text_override is not None else Config.SOURCE_TEXT
+            escaped_text = self._escape_drawtext_value(effective_source_text)
             font_path = self._prepare_font()
             # Use forward slashes; the font copy lives in the temp dir
             # which is under the project root (no spaces in the temp subpath).
@@ -850,9 +856,11 @@ class Renderer:
         audio_duration: float,
         progress_callback=None,
         decor_video_path: str | None = None,
+        source_text_override: str | None = None,
     ):
         self.progress_callback = progress_callback
         self.decor_video_path = decor_video_path
+        self.source_text_override = source_text_override
         output_file = self._output_filename(audio_path)
         segments = list(timeline_data.get("segments", []))
 

@@ -242,10 +242,21 @@ export interface BatchPipelineItem {
   sourceType: BatchSourceType;
   outputName: string;
   decorVideoId?: string;
+  sourceText?: string;
   docUrl?: string | null;
   audioFileIndex?: number | null;
   sourceAudioName?: string | null;
   sourceAudioRelativePath?: string | null;
+}
+
+export interface SourceTextOption {
+  key: string;
+  label: string;
+}
+
+export interface SourceTextOptionsResponse {
+  sourceTextOptions: SourceTextOption[];
+  defaultKey: string;
 }
 
 export interface BatchPipelineResponse {
@@ -310,8 +321,8 @@ export interface BatchDraftResponse {
   voiceId?: string;
   speed?: number;
   volume?: number;
-  docEntries: Array<{ docUrl: string; outputName: string; decorVideoId: string }>;
-  audioEntries: Array<{ outputName: string; decorVideoId: string; sourceAudioName: string; audioFileIndex: number }>;
+  docEntries: Array<{ docUrl: string; outputName: string; decorVideoId: string; sourceText: string }>;
+  audioEntries: Array<{ outputName: string; decorVideoId: string; sourceText: string; sourceAudioName: string; audioFileIndex: number }>;
   sourceVideoLinks: string;
   selectedSourceRefs: BatchSourceRef[];
   clipTags: Record<string, string[]>;
@@ -341,6 +352,7 @@ export interface BatchItemProgress {
   sourceAudioRelativePath: string | null;
   decorVideoId: string;
   decorVideoName: string;
+  sourceText: string;
   status: "pending" | "running" | "completed" | "failed";
   stage: string;
   percent: number;

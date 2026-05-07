@@ -1,4 +1,4 @@
-import { Plus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ export function ReviewClipCard({
   onCheckedChange,
   onToggleTag,
   onAddTag,
+  onDelete,
 }: {
   clip: ReviewClip;
   checked: boolean;
@@ -24,9 +25,22 @@ export function ReviewClipCard({
   onCheckedChange: (checked: boolean) => void;
   onToggleTag: (tag: string) => void;
   onAddTag: (tag: string) => void;
+  onDelete?: () => void;
 }) {
   return (
-    <Card className="h-full border-border/70 bg-card/90 shadow-lg">
+    <Card className="relative h-full border-border/70 bg-card/90 shadow-lg">
+      {onDelete ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="absolute right-2 top-2 z-10 h-8 w-8 rounded-full bg-destructive/80 p-0 text-white shadow-md hover:bg-destructive hover:text-white"
+          onClick={onDelete}
+          title="Xoá clip"
+        >
+          <Trash2 className="size-4" />
+        </Button>
+      ) : null}
       <CardContent className="space-y-4 p-4">
         <video
           controls

@@ -42,6 +42,22 @@ class Config:
     OVERLAY_VIDEO_MARGIN = int(os.getenv("OVERLAY_VIDEO_MARGIN", "10"))
     SOURCE_TEXT = os.getenv("SOURCE_TEXT", "")
     SOURCE_TEXT_FONT_SIZE = int(os.getenv("SOURCE_TEXT_FONT_SIZE", "22"))
+
+    @classmethod
+    def get_source_text_options(cls) -> dict[str, str]:
+        """Collect all SOURCE_TEXT_N options from environment.
+
+        Scans for SOURCE_TEXT_1, SOURCE_TEXT_2, ... and returns a dict
+        like {"SOURCE_TEXT_1": "Nguồn: Tổng hợp", "SOURCE_TEXT_2": "..."}.
+        Falls back to the global SOURCE_TEXT if no numbered options exist.
+        """
+        options: dict[str, str] = {}
+        for key, value in os.environ.items():
+            if key.startswith("SOURCE_TEXT_") and key[len("SOURCE_TEXT_"):].isdigit() and value.strip():
+                options[key] = value.strip()
+        if not options and cls.SOURCE_TEXT:
+            options["SOURCE_TEXT_1"] = cls.SOURCE_TEXT
+        return dict(sorted(options.items()))
     SOURCE_TEXT_FONT = os.getenv("SOURCE_TEXT_FONT", "C:/Windows/Fonts/arial.ttf")
     SOURCE_TEXT_POSITION = os.getenv("SOURCE_TEXT_POSITION", "bottom_left")
     SOURCE_TEXT_MARGIN = int(os.getenv("SOURCE_TEXT_MARGIN", "20"))

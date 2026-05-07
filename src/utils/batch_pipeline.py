@@ -309,6 +309,7 @@ class BatchPipelineRunner:
                         "sourceAudioRelativePath": item.get("sourceAudioRelativePath"),
                         "decorVideoId": item.get("decorVideoId", ""),
                         "decorVideoName": decor_name,
+                        "sourceText": item.get("sourceText", ""),
                         "status": "pending",
                         "stage": "pending",
                         "percent": 0,
@@ -1034,6 +1035,7 @@ class BatchPipelineRunner:
         source_audio_name = item.get("sourceAudioName") or ""
         source_audio_relative_path = item.get("sourceAudioRelativePath") or ""
         decor_video_id = item.get("decorVideoId", "")
+        item_source_text = item.get("sourceText", "") or Config.SOURCE_TEXT
         item_start_time = _time.time()
 
         def _elapsed():
@@ -1044,7 +1046,7 @@ class BatchPipelineRunner:
             f"  outputName={output_name}, sourceType={source_type}, inputMode={self.input_mode}\n"
             f"  docUrl={doc_url!r}\n"
             f"  voiceId={self.voice_id!r}, speed={self.speed}, volume={self.volume}\n"
-            f"  decorVideoId={decor_video_id!r}, batchId={self.batch_id}"
+            f"  decorVideoId={decor_video_id!r}, sourceText={item_source_text!r}, batchId={self.batch_id}"
         )
 
         if source_type == "uploaded_audio":
@@ -1212,6 +1214,7 @@ class BatchPipelineRunner:
             audio_duration,
             progress_callback=_render_progress,
             decor_video_path=decor_path,
+            source_text_override=item_source_text,
         )
         render_elapsed = f"{(_time.time() - render_start) * 1000:.0f}ms"
         if not output_path:

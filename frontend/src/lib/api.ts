@@ -22,6 +22,7 @@ import type {
   ResourcesPageResponse,
   ResultPageResponse,
   ReviewPageResponse,
+  SourceTextOptionsResponse,
   UpdateEffectsConfigRequest,
   VoicesResponse,
 } from "@/types/api";
@@ -125,6 +126,9 @@ export const cloneVoice = (formData: FormData) =>
 export const getDecorVideos = () =>
   requestJson<DecorVideoListResponse>("/api/decor-videos");
 
+export const getSourceTextOptions = () =>
+  requestJson<SourceTextOptionsResponse>("/api/source-text-options");
+
 export const uploadDecorVideo = (formData: FormData) =>
   requestJson<DecorVideoUploadResponse>("/api/decor-videos", {
     method: "POST",
@@ -187,6 +191,12 @@ export const getBatchSourceSets = () =>
 
 export const getBatchSourceSet = (batchSourceId: string) =>
   requestJson<BatchSourceSetDetailResponse>(`/api/batch-pipeline/source-sets/${batchSourceId}`);
+
+export const deleteBatchSourceClip = (batchSourceId: string, clipId: string) =>
+  requestJson<{ deleted: boolean; clipId: string; batchSourceId: string; remainingClips: number }>(
+    `/api/batch-pipeline/source-sets/${batchSourceId}/clips/${clipId}`,
+    { method: "DELETE" },
+  );
 
 export const getBatchLibrarySources = (tags: string[]) => {
   const params = new URLSearchParams();

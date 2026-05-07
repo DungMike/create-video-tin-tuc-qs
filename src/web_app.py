@@ -1143,6 +1143,19 @@ def decor_videos_list():
     return jsonify({"decorVideos": list_decor_videos()})
 
 
+@app.route("/api/source-text-options", methods=["GET"])
+def source_text_options():
+    """Return all configured SOURCE_TEXT_N options from .env."""
+    options = Config.get_source_text_options()
+    default_key = next(iter(options), "")
+    return jsonify({
+        "sourceTextOptions": [
+            {"key": key, "label": value}
+            for key, value in options.items()
+        ],
+        "defaultKey": default_key,
+    })
+
 @app.route("/api/decor-videos", methods=["POST"])
 def decor_videos_upload():
     video_file = request.files.get("video")
@@ -1293,6 +1306,40 @@ def batch_source_set_detail(batch_source_id: str):
     )
 
 
+@app.route("/api/batch-pipeline/source-sets/<batch_source_id>/clips/<clip_id>", methods=["DELETE"])
+def delete_batch_source_clip(batch_source_id: str, clip_id: str):
+    manifest = _load_batch_source_manifest(batch_source_id)
+    if not manifest:
+        return _json_error("Batch source video khong tim thay.", status_code=404, code="not_found")
+
+    review_clips = [clip for clip in manifest.get("review_clips", []) if isinstance(clip, dict)]
+    clip_to_delete = None
+    remaining_clips = []
+    for clip in review_clips:
+        if str(clip.get("id")) == clip_id:
+            clip_to_delete = clip
+        else:
+            remaining_clips.append(clip)
+
+    if not clip_to_delete:
+        return _json_error("Clip khong tim thay trong batch source.", status_code=404, code="clip_not_found")
+
+    relative_path = str(clip_to_delete.get("relative_path") or clip_to_delete.get("relativePath") or "")
+    if relative_path:
+        abs_path = storage_absolute_path(relative_path)
+        if os.path.isfile(abs_path):
+            try:
+                os.remove(abs_path)
+                logger.info(f"Deleted clip file: {abs_path}")
+            except OSError as exc:
+                logger.warning(f"Failed to delete clip file {abs_path}: {exc}")
+
+    manifest["review_clips"] = remaining_clips
+    _save_batch_source_manifest(batch_source_id, manifest)
+
+    return jsonify({"deleted": True, "clipId": clip_id, "batchSourceId": batch_source_id, "remainingClips": len(remaining_clips)})
+
+
 @app.route("/api/batch-pipeline/library-sources", methods=["GET"])
 def batch_library_sources():
     library_index, library_assets = _load_library_assets()
@@ -1394,6 +1441,7 @@ def batch_draft_files(draft_id: str):
             {
                 "outputName": os.path.splitext(record["name"])[0] or f"audio-{index + 1}",
                 "decorVideoId": "",
+                "sourceText": next(iter(Config.get_source_text_options()), "SOURCE_TEXT_1"),
                 "sourceAudioName": record["name"],
                 "audioFileIndex": index,
             }
@@ -1540,6 +1588,13 @@ def submit_batch_draft(draft_id: str):
         output_names_seen.add(output_name)
         item["outputName"] = output_name
         item["decorVideoId"] = (item.get("decorVideoId") or "").strip()
+        # Resolve per-item source text: key like "SOURCE_TEXT_1" -> actual value
+        source_text_key = (item.get("sourceText") or "").strip()
+        if source_text_key:
+            all_source_texts = Config.get_source_text_options()
+            item["sourceText"] = all_source_texts.get(source_text_key, source_text_key)
+        else:
+            item["sourceText"] = Config.SOURCE_TEXT
         if input_mode == "docs":
             doc_url = (item.get("docUrl") or "").strip()
             if not doc_url:
@@ -1684,6 +1739,13 @@ def start_batch_pipeline():
         output_names_seen.add(output_name)
         item["outputName"] = output_name
         item["decorVideoId"] = (item.get("decorVideoId") or "").strip()
+        # Resolve per-item source text
+        source_text_key = (item.get("sourceText") or "").strip()
+        if source_text_key:
+            all_source_texts = Config.get_source_text_options()
+            item["sourceText"] = all_source_texts.get(source_text_key, source_text_key)
+        else:
+            item["sourceText"] = Config.SOURCE_TEXT
         if input_mode == "docs":
             doc_url = (item.get("docUrl") or "").strip()
             if not doc_url:

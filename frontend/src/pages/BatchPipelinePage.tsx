@@ -14,12 +14,14 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   ApiError,
   createBatchDraft,
+  deleteBatchSourceClip,
   getBatchDraft,
   getBatchLibrarySources,
   getBatchProgress,
   getBatchSourceSet,
   getBatchSourceSets,
   getDecorVideos,
+  getSourceTextOptions,
   getVoices,
   prepareBatchSourceVideos,
   retryFailedBatch,
@@ -45,6 +47,7 @@ import type {
   DecorVideo,
   JobSelectionState,
   ReviewClip,
+  SourceTextOption,
   VoiceRecord,
 } from "@/types/api";
 
@@ -52,18 +55,20 @@ interface DocEntry {
   docUrl: string;
   outputName: string;
   decorVideoId: string;
+  sourceText: string;
 }
 
 interface AudioEntry {
   outputName: string;
   decorVideoId: string;
+  sourceText: string;
   sourceAudioName: string;
   audioFileIndex: number;
 }
 
 type SourceMode = "links" | "sets" | "library";
 
-const EMPTY_DOC_ENTRY: DocEntry = { docUrl: "", outputName: "", decorVideoId: "" };
+const EMPTY_DOC_ENTRY: DocEntry = { docUrl: "", outputName: "", decorVideoId: "", sourceText: "" };
 const SOURCE_CLIP_PAGE_SIZE = 20;
 const DEFAULT_TIMELINE_CONFIG = {
   firstPhaseSeconds: 300,
@@ -150,6 +155,8 @@ export function BatchPipelinePage() {
   const [speed, setSpeed] = useState(1);
   const [volume, setVolume] = useState(1);
   const [decorVideos, setDecorVideos] = useState<DecorVideo[]>([]);
+  const [sourceTextOptions, setSourceTextOptions] = useState<SourceTextOption[]>([]);
+  const [defaultSourceTextKey, setDefaultSourceTextKey] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
@@ -186,8 +193,8 @@ export function BatchPipelinePage() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getVoices(), getDecorVideos(), getBatchSourceSets(), getBatchLibrarySources([])])
-      .then(([voiceRes, decorRes, sourceSetRes, libraryRes]) => {
+    Promise.all([getVoices(), getDecorVideos(), getBatchSourceSets(), getBatchLibrarySources([]), getSourceTextOptions()])
+      .then(([voiceRes, decorRes, sourceSetRes, libraryRes, sourceTextRes]) => {
         if (cancelled) return;
         setVoices(voiceRes.voices);
         setDefaultVoiceId(voiceRes.defaultVoiceId);
@@ -196,6 +203,8 @@ export function BatchPipelinePage() {
         setSourceSets(sourceSetRes.sourceSets);
         setLibraryTags(libraryRes.availableTags);
         setSourceAvailableTags(libraryRes.availableTags);
+        setSourceTextOptions(sourceTextRes.sourceTextOptions);
+        setDefaultSourceTextKey(sourceTextRes.defaultKey);
       })
       .catch((err) => {
         if (!cancelled) setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai cau hinh.");
@@ -373,7 +382,7 @@ export function BatchPipelinePage() {
     setDocEntries((prev) => prev.map((entry, entryIndex) => (entryIndex === index ? { ...entry, [field]: value } : entry)));
   };
 
-  const updateAudioEntry = (index: number, field: "outputName" | "decorVideoId", value: string) => {
+  const updateAudioEntry = (index: number, field: "outputName" | "decorVideoId" | "sourceText", value: string) => {
     setAudioEntries((prev) =>
       prev.map((entry, entryIndex) => (entryIndex === index ? { ...entry, [field]: value } : entry)),
     );
@@ -383,7 +392,7 @@ export function BatchPipelinePage() {
     setInputMode(nextMode);
     setErrorMessage(null);
     if (nextMode === "docs" && docEntries.length === 0) {
-      setDocEntries([{ ...EMPTY_DOC_ENTRY }]);
+      setDocEntries([{ ...EMPTY_DOC_ENTRY, sourceText: defaultSourceTextKey }]);
     }
   };
 
@@ -479,7 +488,7 @@ export function BatchPipelinePage() {
     }
   };
 
-  const addDocEntry = () => setDocEntries((prev) => [...prev, { ...EMPTY_DOC_ENTRY }]);
+  const addDocEntry = () => setDocEntries((prev) => [...prev, { ...EMPTY_DOC_ENTRY, sourceText: defaultSourceTextKey }]);
   const removeDocEntry = (index: number) => {
     setDocEntries((prev) => (prev.length <= 1 ? prev : prev.filter((_, entryIndex) => entryIndex !== index)));
   };
@@ -556,6 +565,36 @@ export function BatchPipelinePage() {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the retry cac item failed.");
       setIsRetrying(false);
     }
+  };
+
+  const handleDeleteClip = async (clipId: string) => {
+    // Try to delete from backend (physical file + manifest)
+    const ref = sourceClipRefs[clipId] ?? refFromClipId(clipId);
+    if (ref && ref.origin === "batch_source" && ref.batchSourceId && ref.clipId) {
+      try {
+        await deleteBatchSourceClip(ref.batchSourceId, ref.clipId);
+      } catch (err) {
+        setErrorMessage(err instanceof ApiError ? err.message : "Khong the xoa clip tu server.");
+        return;
+      }
+    }
+
+    // Remove from local state
+    setSourceClips((current) => current.filter((clip) => clip.id !== clipId));
+    setSourceClipRefs((current) => {
+      const next = { ...current };
+      delete next[clipId];
+      return next;
+    });
+    setSourceSelectionState((current) => {
+      const nextClipTags = { ...current.clipTags };
+      delete nextClipTags[clipId];
+      return {
+        ...current,
+        selectedClipIds: current.selectedClipIds.filter((id) => id !== clipId),
+        clipTags: nextClipTags,
+      };
+    });
   };
 
   const sourceTotalPages = Math.max(1, Math.ceil(sourceClips.length / SOURCE_CLIP_PAGE_SIZE));
@@ -856,6 +895,7 @@ export function BatchPipelinePage() {
                           if (!normalized.length) return;
                           setSourceSelectionState((current) => setClipTags(current, clip.id, [...(current.clipTags[clip.id] ?? []), ...normalized]));
                         }}
+                        onDelete={() => handleDeleteClip(clip.id)}
                       />
                     ))}
                   </section>
@@ -901,14 +941,24 @@ export function BatchPipelinePage() {
                           <Input placeholder="VD: tin-tuc-1" value={entry.outputName} onChange={(event) => updateDocEntry(index, "outputName", event.target.value)} required />
                         </div>
                       </div>
-                      <div className="grid gap-1.5">
-                        <Label className="text-xs">PiP Overlay</Label>
-                        <select value={entry.decorVideoId} onChange={(event) => updateDocEntry(index, "decorVideoId", event.target.value)} className="h-9 rounded-md border border-input bg-background px-3 text-sm">
-                          <option value="">Auto (random tu thu vien)</option>
-                          {decorVideos.map((decorVideo) => (
-                            <option key={decorVideo.id} value={decorVideo.id}>{decorVideo.name} ({decorVideo.durationSeconds}s)</option>
-                          ))}
-                        </select>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="grid gap-1.5">
+                          <Label className="text-xs">PiP Overlay</Label>
+                          <select value={entry.decorVideoId} onChange={(event) => updateDocEntry(index, "decorVideoId", event.target.value)} className="h-9 rounded-md border border-input bg-background px-3 text-sm">
+                            <option value="">Auto (random tu thu vien)</option>
+                            {decorVideos.map((decorVideo) => (
+                              <option key={decorVideo.id} value={decorVideo.id}>{decorVideo.name} ({decorVideo.durationSeconds}s)</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="grid gap-1.5">
+                          <Label className="text-xs">Source Text *</Label>
+                          <select value={entry.sourceText || defaultSourceTextKey} onChange={(event) => updateDocEntry(index, "sourceText", event.target.value)} className="h-9 rounded-md border border-input bg-background px-3 text-sm" required>
+                            {sourceTextOptions.map((opt) => (
+                              <option key={opt.key} value={opt.key}>{opt.label}</option>
+                            ))}
+                          </select>
+                        </div>
                       </div>
                     </div>
                   ))
@@ -928,14 +978,24 @@ export function BatchPipelinePage() {
                           <Input value={entry.outputName || outputNameFromFileName(entry.sourceAudioName)} onChange={(event) => updateAudioEntry(index, "outputName", event.target.value)} required />
                         </div>
                       </div>
-                      <div className="grid gap-1.5">
-                        <Label className="text-xs">PiP Overlay</Label>
-                        <select value={entry.decorVideoId} onChange={(event) => updateAudioEntry(index, "decorVideoId", event.target.value)} className="h-9 rounded-md border border-input bg-background px-3 text-sm">
-                          <option value="">Auto (random tu thu vien)</option>
-                          {decorVideos.map((decorVideo) => (
-                            <option key={decorVideo.id} value={decorVideo.id}>{decorVideo.name} ({decorVideo.durationSeconds}s)</option>
-                          ))}
-                        </select>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="grid gap-1.5">
+                          <Label className="text-xs">PiP Overlay</Label>
+                          <select value={entry.decorVideoId} onChange={(event) => updateAudioEntry(index, "decorVideoId", event.target.value)} className="h-9 rounded-md border border-input bg-background px-3 text-sm">
+                            <option value="">Auto (random tu thu vien)</option>
+                            {decorVideos.map((decorVideo) => (
+                              <option key={decorVideo.id} value={decorVideo.id}>{decorVideo.name} ({decorVideo.durationSeconds}s)</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="grid gap-1.5">
+                          <Label className="text-xs">Source Text *</Label>
+                          <select value={entry.sourceText || defaultSourceTextKey} onChange={(event) => updateAudioEntry(index, "sourceText", event.target.value)} className="h-9 rounded-md border border-input bg-background px-3 text-sm" required>
+                            {sourceTextOptions.map((opt) => (
+                              <option key={opt.key} value={opt.key}>{opt.label}</option>
+                            ))}
+                          </select>
+                        </div>
                       </div>
                     </div>
                   ))}
