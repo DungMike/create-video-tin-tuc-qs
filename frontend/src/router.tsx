@@ -1,9 +1,11 @@
 import { createBrowserRouter } from "react-router-dom";
 
 import { BatchPipelinePage } from "@/pages/BatchPipelinePage";
+import { ChannelManagerPage } from "@/pages/ChannelManagerPage";
 import { DecorLibraryPage } from "@/pages/DecorLibraryPage";
 import { DocsToAudioPage } from "@/pages/DocsToAudioPage";
 import { EffectsLibraryPage } from "@/pages/EffectsLibraryPage";
+import { NewsBulletinPage } from "@/pages/NewsBulletinPage";
 import { ResourcesPage } from "@/pages/ResourcesPage";
 import { ResultPage } from "@/pages/ResultPage";
 import { ReviewPage } from "@/pages/ReviewPage";
@@ -51,4 +53,17 @@ export const router = createBrowserRouter([
     path: "/batch-pipeline/:pipelineId",
     element: <BatchPipelinePage />,
   },
+  {
+    path: "/news-bulletin",
+    element: <NewsBulletinPage />,
+  },
+  {
+    path: "/news-bulletin/:bulletinId",
+    element: <NewsBulletinPage />,
+  },
+  {
+    path: "/channels",
+    element: <ChannelManagerPage />,
+  },
 ]);
+

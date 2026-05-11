@@ -20,6 +20,12 @@ export function TopNav() {
         <Button asChild variant={currentPath === "/batch-pipeline" ? "secondary" : "ghost"}>
           <Link to="/batch-pipeline">Batch Pipeline</Link>
         </Button>
+        <Button asChild variant={currentPath.startsWith("/news-bulletin") ? "secondary" : "ghost"}>
+          <Link to="/news-bulletin">News Bulletin</Link>
+        </Button>
+        <Button asChild variant={currentPath === "/channels" ? "secondary" : "ghost"}>
+          <Link to="/channels">Channels</Link>
+        </Button>
         <Button asChild variant={currentPath === "/voices" ? "secondary" : "ghost"}>
           <Link to="/voices">Voices</Link>
         </Button>
@@ -33,3 +39,4 @@ export function TopNav() {
     </nav>
   );
 }
+

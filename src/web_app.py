@@ -58,6 +58,10 @@ from src.utils.tts_audio import (
 
 app = Flask(__name__, static_folder=None)
 app.secret_key = Config.WEB_SECRET_KEY
+
+# Register modular blueprints
+from src.routes.news_bulletin_routes import news_bp  # noqa: E402
+app.register_blueprint(news_bp)
 app.config["MAX_CONTENT_LENGTH"] = Config.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
 

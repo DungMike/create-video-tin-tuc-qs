@@ -388,3 +388,129 @@ export interface BatchProgressResponse {
     downloadErrors: string[];
   };
 }
+
+// --- Channel Management ---
+
+export interface ChannelGroup {
+  groupId: string;
+  groupName: string;
+  language: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface Channel {
+  channelId: string;
+  channelName: string;
+  groupId: string;
+  voiceId: string;
+  transitionVideoPath: string;
+  decorVideoId: string;
+  sourceText: string;
+  isActive: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ChannelsResponse {
+  channels: Channel[];
+  groups: ChannelGroup[];
+}
+
+// --- News Bulletin ---
+
+export interface ParsedNewsItem {
+  id: number;
+  resumeText: string;
+  detailText: string;
+}
+
+export interface ParsedScript {
+  intro: { text: string };
+  newsItems: ParsedNewsItem[];
+  outro: { text: string };
+}
+
+export interface ParseScriptResponse {
+  parsed: ParsedScript;
+  newsCount: number;
+}
+
+export interface BulletinCreateResponse {
+  bulletinId: string;
+  newsCount: number;
+  channelIds: string[];
+}
+
+export interface BulletinResourceSummary {
+  [newsId: string]: {
+    vidClips: number;
+    images: number;
+  };
+}
+
+export interface BulletinResourceItem {
+  filename: string;
+  relativePath: string;
+}
+
+export interface BulletinResourceDetails {
+  [newsId: string]: {
+    vidClips: BulletinResourceItem[];
+    images: BulletinResourceItem[];
+  };
+}
+
+export interface BulletinChannelProgress {
+  channelId: string;
+  channelName: string;
+  status: "pending" | "running" | "completed" | "failed";
+  stage: string;
+  percent: number;
+  message: string;
+  outputVideo: string | null;
+  error: string | null;
+}
+
+export interface BulletinDetailResponse {
+  bulletinId: string;
+  scriptText: string;
+  parsedScript: ParsedScript;
+  channelIds: string[];
+  newsCount: number;
+  resourceSummary: BulletinResourceSummary;
+  resourceDetails: BulletinResourceDetails;
+  status: string;
+  channels: Record<string, BulletinChannelProgress>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BulletinProgressResponse {
+  bulletinId: string;
+  status: string;
+  newsCount: number;
+  channelIds: string[];
+  channels: Record<string, BulletinChannelProgress>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BulletinScriptUpdateResponse {
+  bulletinId: string;
+  parsed: ParsedScript;
+  newsCount: number;
+  resourceSummary: BulletinResourceSummary;
+  resourceDetails: BulletinResourceDetails;
+  resourcesReset: boolean;
+}
+
+export interface BulletinListItem {
+  bulletinId: string;
+  status: string;
+  newsCount: number;
+  channelCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+

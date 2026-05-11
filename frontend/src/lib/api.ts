@@ -212,3 +212,138 @@ export const retryFailedBatch = (batchId: string) =>
   requestJson<BatchRetryResponse>(`/api/batch-pipeline/${batchId}/retry-failed`, {
     method: "POST",
   });
+
+// --- Channel Management ---
+
+import type {
+  BulletinCreateResponse,
+  BulletinDetailResponse,
+  BulletinListItem,
+  BulletinProgressResponse,
+  BulletinResourceDetails,
+  BulletinResourceSummary,
+  BulletinScriptUpdateResponse,
+  Channel,
+  ChannelGroup,
+  ChannelsResponse,
+  ParseScriptResponse,
+} from "@/types/api";
+
+export const getChannels = (groupId?: string) => {
+  const suffix = groupId ? `?groupId=${groupId}` : "";
+  return requestJson<ChannelsResponse>(`/api/channels${suffix}`);
+};
+
+export const createChannelApi = (data: Partial<Channel>) =>
+  requestJson<{ channel: Channel }>("/api/channels", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+
+export const updateChannelApi = (channelId: string, data: Partial<Channel>) =>
+  requestJson<{ channel: Channel }>(`/api/channels/${channelId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+
+export const deleteChannelApi = (channelId: string) =>
+  requestJson<{ deleted: boolean }>(`/api/channels/${channelId}`, { method: "DELETE" });
+
+export const createGroupApi = (data: Partial<ChannelGroup>) =>
+  requestJson<{ group: ChannelGroup }>("/api/channel-groups", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+
+export const updateGroupApi = (groupId: string, data: Partial<ChannelGroup>) =>
+  requestJson<{ group: ChannelGroup }>(`/api/channel-groups/${groupId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+
+export const deleteGroupApi = (groupId: string) =>
+  requestJson<{ deleted: boolean }>(`/api/channel-groups/${groupId}`, { method: "DELETE" });
+
+export const uploadChannelTransition = (channelId: string, formData: FormData) =>
+  requestJson<{ channel: Channel; transitionVideoPath: string }>(
+    `/api/channels/${channelId}/transition-video`,
+    { method: "POST", body: formData },
+  );
+
+// --- News Bulletin ---
+
+export const parseNewsScript = (scriptText: string) =>
+  requestJson<ParseScriptResponse>("/api/news-bulletin/parse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scriptText }),
+  });
+
+export const createNewsBulletin = (scriptText: string, channelIds: string[]) =>
+  requestJson<BulletinCreateResponse>("/api/news-bulletin", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scriptText, channelIds }),
+  });
+
+export const getNewsBulletin = (bulletinId: string) =>
+  requestJson<BulletinDetailResponse>(`/api/news-bulletin/${bulletinId}`);
+
+export const getNewsBulletinProgress = (bulletinId: string) =>
+  requestJson<BulletinProgressResponse>(`/api/news-bulletin/${bulletinId}/progress`);
+
+export const updateNewsBulletinScript = (bulletinId: string, scriptText: string) =>
+  requestJson<BulletinScriptUpdateResponse>(`/api/news-bulletin/${bulletinId}/script`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scriptText }),
+  });
+
+export const listNewsBulletins = () =>
+  requestJson<{ bulletins: BulletinListItem[] }>("/api/news-bulletin/list");
+
+export const uploadBulletinResources = (bulletinId: string, newsIdx: number, formData: FormData) =>
+  requestJson<{ newsIdx: number; addedVideos: number; addedImages: number; resourceSummary: BulletinResourceSummary; resourceDetails: BulletinResourceDetails }>(
+    `/api/news-bulletin/${bulletinId}/resources/${newsIdx}`,
+    { method: "POST", body: formData },
+  );
+
+export const clearBulletinResources = (bulletinId: string, newsIdx: number) =>
+  requestJson<{ newsIdx: number; resourceSummary: BulletinResourceSummary; resourceDetails: BulletinResourceDetails }>(
+    `/api/news-bulletin/${bulletinId}/resources/${newsIdx}`,
+    { method: "DELETE" },
+  );
+
+export const updateBulletinChannels = (bulletinId: string, channelIds: string[]) =>
+  requestJson<{ bulletinId: string; channelIds: string[] }>(
+    `/api/news-bulletin/${bulletinId}/channels`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channelIds }),
+    },
+  );
+
+export const startBulletinRender = (bulletinId: string) =>
+  requestJson<{ bulletinId: string; status: string; channelCount: number }>(
+    `/api/news-bulletin/${bulletinId}/start-render`,
+    { method: "POST" },
+  );
+
+export const addBulletinResourcesFromSource = (
+  bulletinId: string,
+  newsIdx: number,
+  clipPaths: string[],
+) =>
+  requestJson<{ newsIdx: number; addedVideos: number; addedImages: number; resourceSummary: BulletinResourceSummary; resourceDetails: BulletinResourceDetails }>(
+    `/api/news-bulletin/${bulletinId}/resources/${newsIdx}/from-source`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clipPaths }),
+    },
+  );
