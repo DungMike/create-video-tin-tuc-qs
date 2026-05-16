@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
+import { BannerPreview } from "@/components/BannerPreview";
 import { BatchSourcePicker } from "@/components/batch-source-picker";
 import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
@@ -14,17 +15,22 @@ import {
   ApiError,
   addBulletinResourcesFromSource,
   clearBulletinResources,
+  clearSegmentResources,
   createNewsBulletin,
   getChannels,
+  getChannelDecorImages,
   getNewsBulletin,
   getNewsBulletinProgress,
   listNewsBulletins,
   parseNewsScript,
+  retryBulletinRender,
   startBulletinRender,
   updateBulletinChannels,
   updateNewsBulletinScript,
   uploadBulletinResources,
+  uploadSegmentResources,
 } from "@/lib/api";
+import type { SegmentResourceSummary, SegmentType } from "@/lib/api";
 import type {
   BulletinChannelProgress,
   BulletinDetailResponse,
@@ -34,6 +40,7 @@ import type {
   BulletinResourceSummary,
   Channel,
   ChannelGroup,
+  DecorImage,
   ParsedScript,
   ParsedNewsItem,
   ReviewClip,
@@ -88,10 +95,17 @@ export function NewsBulletinPage() {
   const [groups, setGroups] = useState<ChannelGroup[]>([]);
   const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>([]);
   const [filterGroupId, setFilterGroupId] = useState("");
+  const [channelDecorImageMap, setChannelDecorImageMap] = useState<Record<string, DecorImage[]>>({});
+  const [selectedDecorImageIds, setSelectedDecorImageIds] = useState<Record<string, string>>({});
 
   const [bulletinDetail, setBulletinDetail] = useState<BulletinDetailResponse | null>(null);
   const [resourceSummary, setResourceSummary] = useState<BulletinResourceSummary>({});
   const [resourceDetails, setResourceDetails] = useState<BulletinResourceDetails>({});
+  const [segmentResSummary, setSegmentResSummary] = useState<SegmentResourceSummary>({
+    intro: { vidClips: 0, images: 0 },
+    detail_intro: { vidClips: 0, images: 0 },
+    outro: { vidClips: 0, images: 0 },
+  });
 
   const [bulletinList, setBulletinList] = useState<BulletinListItem[]>([]);
   const [showList, setShowList] = useState(false);
@@ -139,6 +153,10 @@ export function NewsBulletinPage() {
         setResourceSummary(detail.resourceSummary);
         setResourceDetails(detail.resourceDetails ?? {});
         setSelectedChannelIds(detail.channelIds);
+        // Sync segment resource summary from bulletin detail if available
+        if (detail.segmentResourceSummary) {
+          setSegmentResSummary(detail.segmentResourceSummary as SegmentResourceSummary);
+        }
 
         if (detail.status !== "draft") {
           setStep("progress");
@@ -255,7 +273,7 @@ export function NewsBulletinPage() {
     if (bulletinId) {
       setIsLoading(true);
       try {
-        await updateBulletinChannels(bulletinId, selectedChannelIds);
+        await updateBulletinChannels(bulletinId, selectedChannelIds, selectedDecorImageIds);
         setBulletinDetail((prev) => (prev ? { ...prev, channelIds: selectedChannelIds } : prev));
         flashSuccess("Da cap nhat channels.");
       } catch (err) {
@@ -298,7 +316,7 @@ export function NewsBulletinPage() {
         return;
       }
 
-      const res = await createNewsBulletin(scriptText, selectedChannelIds);
+      const res = await createNewsBulletin(scriptText, selectedChannelIds, selectedDecorImageIds);
       navigate(`/news-bulletin/${res.bulletinId}`, { replace: true });
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the luu kich ban.");
@@ -366,6 +384,45 @@ export function NewsBulletinPage() {
     } catch (err) {
       setIsSubmitting(false);
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the bat dau render.");
+    }
+  };
+
+  const handleSegmentUpload = async (segmentType: SegmentType, kind: "images" | "videos", files: FileList) => {
+    if (!bulletinId || !files.length || isLocked) return;
+    const formData = new FormData();
+    Array.from(files).forEach((file) => formData.append(kind, file));
+    try {
+      const res = await uploadSegmentResources(bulletinId, segmentType, formData);
+      setSegmentResSummary(res.segmentResourceSummary);
+      flashSuccess(`Da them ${res.added.images + res.added.vidClips} file cho phan ${segmentType}.`);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the upload segment resources.");
+    }
+  };
+
+  const handleClearSegment = async (segmentType: SegmentType) => {
+    if (!bulletinId || isLocked) return;
+    try {
+      const res = await clearSegmentResources(bulletinId, segmentType);
+      setSegmentResSummary(res.segmentResourceSummary);
+      flashSuccess(`Da xoa tai nguyen phan ${segmentType}.`);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the xoa segment resources.");
+    }
+  };
+
+  const handleRetryRender = async () => {
+    if (!bulletinId) return;
+    setErrorMessage(null);
+    setIsSubmitting(true);
+    try {
+      const res = await retryBulletinRender(bulletinId);
+      setBulletinDetail((prev) => (prev ? { ...prev, status: res.status } : prev));
+      flashSuccess(`Dang retry ${res.retriedCount} channel...`);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the retry render.");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -498,8 +555,33 @@ export function NewsBulletinPage() {
                     {channel.groupId ? <span className="text-xs text-muted-foreground">{groups.find((group) => group.groupId === channel.groupId)?.groupName}</span> : null}
                   </div>
                   <div className="text-xs text-muted-foreground mt-0.5">
-                    Voice: {channel.voiceId || "-"} | Transition: {channel.transitionVideoPath ? "yes" : "-"}
+                    Voice: {channel.voiceId || "-"} | Media: {channel.introVideoPath && channel.transitionVideoPath && channel.outroVideoPath ? "OK" : "thieu"}
                   </div>
+                  {selectedChannelIds.includes(channel.channelId) ? (
+                    <div className="mt-1">
+                      <select
+                        className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+                        value={selectedDecorImageIds[channel.channelId] || ""}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!channelDecorImageMap[channel.channelId]) {
+                            getChannelDecorImages(channel.channelId)
+                              .then((res) => setChannelDecorImageMap((prev) => ({ ...prev, [channel.channelId]: res.decorImages })))
+                              .catch(() => undefined);
+                          }
+                        }}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          setSelectedDecorImageIds((prev) => ({ ...prev, [channel.channelId]: e.target.value }));
+                        }}
+                      >
+                        <option value="">-- Không chọn ảnh decor --</option>
+                        {(channelDecorImageMap[channel.channelId] || []).map((di) => (
+                          <option key={di.id} value={di.id}>{di.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : null}
                 </div>
               </label>
             ))}
@@ -530,7 +612,7 @@ export function NewsBulletinPage() {
                 value={scriptText}
                 onChange={(event) => setScriptText(event.target.value)}
                 disabled={isLocked}
-                placeholder={"//intro\nBAN TIN THE GIOI TOI...\n//resume-news-1\nUkraina tung con mua UAV...\n//detail-news-1\n1. Ukraina tan cong UAV quy mo lon...\n//end-outro\nCam on quy vi da theo doi..."}
+                placeholder={"//intro\nBAN TIN THE GIOI TOI...\n//resume-news-1\nUkraina tung con mua UAV...\n//detail\nChi tiet ban tin:\n//detail-news-1\n1. Ukraina tan cong UAV quy mo lon...\n//end-outro\nCam on quy vi da theo doi..."}
                 className="min-h-[300px] font-mono text-sm"
               />
             </div>
@@ -552,19 +634,42 @@ export function NewsBulletinPage() {
                   <p className="text-sm text-foreground whitespace-pre-wrap">{parsedScript.intro.text}</p>
                 </div>
               ) : null}
-              {parsedScript.newsItems.map((item) => (
-                <div key={item.id} className="rounded-lg border border-border/70 bg-background/70 p-3">
-                  <div className="text-xs font-semibold uppercase tracking-wider text-primary mb-1">Tin #{item.id}</div>
-                  <div className="mb-2">
-                    <span className="text-xs font-medium text-muted-foreground">Tom tat:</span>
-                    <p className="text-sm text-foreground">{item.resumeText.slice(0, 180)}{item.resumeText.length > 180 ? "..." : ""}</p>
-                  </div>
-                  <div>
-                    <span className="text-xs font-medium text-muted-foreground">Chi tiet ({item.detailText.length} ky tu):</span>
-                    <p className="text-sm text-foreground">{item.detailText.slice(0, 260)}{item.detailText.length > 260 ? "..." : ""}</p>
-                  </div>
+              {parsedScript.detailIntro?.text ? (
+                <div className="rounded-lg border border-border/70 bg-background/70 p-3">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-primary mb-1">DETAIL INTRO</div>
+                  <p className="text-sm text-foreground whitespace-pre-wrap">{parsedScript.detailIntro.text}</p>
                 </div>
-              ))}
+              ) : null}
+              {parsedScript.newsItems.map((item) => {
+                // Find the first selected decor image for preview
+                const firstChannelId = selectedChannelIds[0];
+                const firstDecorImageId = firstChannelId ? selectedDecorImageIds[firstChannelId] : undefined;
+                const decorImages = firstChannelId ? channelDecorImageMap[firstChannelId] : undefined;
+                const previewDecorImage = decorImages?.find((di) => di.id === firstDecorImageId) ?? decorImages?.[0];
+
+                return (
+                  <div key={item.id} className="rounded-lg border border-border/70 bg-background/70 p-3">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-primary mb-1">Tin #{item.id}</div>
+                    <div className="mb-2">
+                      <span className="text-xs font-medium text-muted-foreground">Tom tat:</span>
+                      <p className="text-sm text-foreground">{item.resumeText.slice(0, 180)}{item.resumeText.length > 180 ? "..." : ""}</p>
+                    </div>
+                    <div>
+                      <span className="text-xs font-medium text-muted-foreground">Chi tiet ({item.detailText.length} ky tu):</span>
+                      <p className="text-sm text-foreground">{item.detailText.slice(0, 260)}{item.detailText.length > 260 ? "..." : ""}</p>
+                    </div>
+                    {previewDecorImage ? (
+                      <div className="mt-3">
+                        <span className="text-xs font-medium text-muted-foreground mb-1 block">Banner preview:</span>
+                        <BannerPreview
+                          decorImage={previewDecorImage}
+                          titleText={item.resumeText.slice(0, 80)}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
               {parsedScript.outro.text ? (
                 <div className="rounded-lg border border-border/70 bg-background/70 p-3">
                   <div className="text-xs font-semibold uppercase tracking-wider text-primary mb-1">OUTRO</div>
@@ -592,7 +697,16 @@ export function NewsBulletinPage() {
             Moi tin co bo tai nguyen doc lap de bien tap hinh anh/video minh hoa sat voi noi dung cua tin do.
           </p>
 
-          <div className="grid gap-5">
+          {/* Segment Resources: intro / detail_intro / outro */}
+          <SegmentResourcesPanel
+            bulletinId={bulletinId!}
+            disabled={isLocked}
+            summary={segmentResSummary}
+            onUpload={handleSegmentUpload}
+            onClear={handleClearSegment}
+          />
+
+          <div className="grid gap-5 mt-4">
             {parsedScript.newsItems.map((item) => (
               <NewsResourceEditor
                 key={item.id}
@@ -628,7 +742,14 @@ export function NewsBulletinPage() {
                 Status: <span className="font-medium text-foreground">{bulletinDetail.status}</span> | Channels: {channelProgressItems.length}
               </p>
             </div>
-            <div className="text-2xl font-semibold text-foreground">{overallPercent}%</div>
+            <div className="flex items-center gap-3">
+              {bulletinDetail.status === "failed" ? (
+                <Button onClick={handleRetryRender} disabled={isSubmitting} variant="destructive" size="sm">
+                  {isSubmitting ? "Dang retry..." : "🔄 Retry Render"}
+                </Button>
+              ) : null}
+              <div className="text-2xl font-semibold text-foreground">{overallPercent}%</div>
+            </div>
           </div>
 
           <div className="mb-5 h-3 w-full overflow-hidden rounded-full bg-muted">
@@ -832,3 +953,133 @@ function ResourceReviewGrid({
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Segment Resources Panel (intro / detail_intro / outro)
+// ---------------------------------------------------------------------------
+
+const SEGMENT_LABELS: Record<SegmentType, { title: string; desc: string; icon: string }> = {
+  intro: { title: "Lời mở đầu (Intro)", desc: "Ảnh/video nền cho phần mở đầu chung", icon: "🎬" },
+  detail_intro: { title: "Cầu nối chi tiết (Detail Intro)", desc: "Ảnh/video nền trước khi vào phần tin chi tiết", icon: "🔗" },
+  outro: { title: "Lời kết (Outro)", desc: "Ảnh/video nền cho phần kết thúc", icon: "🏁" },
+};
+
+function SegmentResourcesPanel({
+  bulletinId,
+  disabled,
+  summary,
+  onUpload,
+  onClear,
+}: {
+  bulletinId: string;
+  disabled: boolean;
+  summary: SegmentResourceSummary;
+  onUpload: (segmentType: SegmentType, kind: "images" | "videos", files: FileList) => void;
+  onClear: (segmentType: SegmentType) => void;
+}) {
+  return (
+    <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 shadow-sm mb-2">
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-sm font-semibold text-foreground">🎞️ Tài nguyên chung theo phân đoạn</span>
+        <span className="text-xs text-muted-foreground">(intro · cầu nối · outro)</span>
+      </div>
+      <div className="grid gap-3 md:grid-cols-3">
+        {(["intro", "detail_intro", "outro"] as SegmentType[]).map((seg) => (
+          <SegmentCard
+            key={seg}
+            segmentType={seg}
+            bulletinId={bulletinId}
+            disabled={disabled}
+            summary={summary[seg]}
+            onUpload={onUpload}
+            onClear={onClear}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SegmentCard({
+  segmentType,
+  bulletinId: _bulletinId,
+  disabled,
+  summary,
+  onUpload,
+  onClear,
+}: {
+  segmentType: SegmentType;
+  bulletinId: string;
+  disabled: boolean;
+  summary: { vidClips: number; images: number };
+  onUpload: (segmentType: SegmentType, kind: "images" | "videos", files: FileList) => void;
+  onClear: (segmentType: SegmentType) => void;
+}) {
+  const meta = SEGMENT_LABELS[segmentType];
+  const total = (summary?.vidClips ?? 0) + (summary?.images ?? 0);
+  const hasFiles = total > 0;
+
+  return (
+    <div className={`rounded-lg border p-3 transition-colors ${hasFiles ? "border-green-500/30 bg-green-500/5" : "border-border/60 bg-card/40"}`}>
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <div>
+          <div className="text-sm font-semibold text-foreground">
+            {meta.icon} {meta.title}
+          </div>
+          <div className="text-xs text-muted-foreground mt-0.5">{meta.desc}</div>
+        </div>
+        <div className="flex gap-1 flex-shrink-0">
+          {summary?.vidClips > 0 && (
+            <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400">{summary.vidClips} vid</span>
+          )}
+          {summary?.images > 0 && (
+            <span className="rounded-full bg-green-500/10 px-2 py-0.5 text-xs text-green-400">{summary.images} ảnh</span>
+          )}
+          {!hasFiles && (
+            <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">Mặc định</span>
+          )}
+        </div>
+      </div>
+
+      <div className="grid gap-2">
+        <div className="grid grid-cols-2 gap-1.5">
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Upload video</label>
+            <input
+              type="file"
+              accept=".mp4,.mov,.mkv,.webm"
+              multiple
+              disabled={disabled}
+              className="w-full text-xs file:mr-1 file:rounded file:border-0 file:bg-primary/10 file:px-2 file:py-0.5 file:text-xs file:text-primary hover:file:bg-primary/20 cursor-pointer"
+              onChange={(e) => { if (e.currentTarget.files?.length) onUpload(segmentType, "videos", e.currentTarget.files); }}
+            />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Upload ảnh</label>
+            <input
+              type="file"
+              accept=".jpg,.jpeg,.png,.webp"
+              multiple
+              disabled={disabled}
+              className="w-full text-xs file:mr-1 file:rounded file:border-0 file:bg-primary/10 file:px-2 file:py-0.5 file:text-xs file:text-primary hover:file:bg-primary/20 cursor-pointer"
+              onChange={(e) => { if (e.currentTarget.files?.length) onUpload(segmentType, "images", e.currentTarget.files); }}
+            />
+          </div>
+        </div>
+        {hasFiles && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={disabled}
+            className="h-7 text-xs text-muted-foreground hover:text-destructive"
+            onClick={() => onClear(segmentType)}
+          >
+            🗑 Xóa tất cả
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+

@@ -1,4 +1,5 @@
 import { Plus, Trash2 } from "lucide-react";
+import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -24,7 +25,7 @@ export function ReviewClipCard({
   suggestedTags: string[];
   onCheckedChange: (checked: boolean) => void;
   onToggleTag: (tag: string) => void;
-  onAddTag: (tag: string) => void;
+  onAddTag: (tag: string) => void | Promise<void>;
   onDelete?: () => void;
 }) {
   return (
@@ -119,23 +120,44 @@ export function ReviewClipCard({
   );
 }
 
-function TagInput({ onAddTag }: { onAddTag: (tag: string) => void }) {
+function TagInput({ onAddTag }: { onAddTag: (tag: string) => void | Promise<void> }) {
+  const [value, setValue] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const submitTag = async () => {
+    const nextTag = value.trim();
+    if (!nextTag || isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      await onAddTag(nextTag);
+      setValue("");
+    } catch {
+      // Parent handlers surface the API error near the page form.
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   return (
-    <form
+    <div
       className="flex flex-col gap-2 sm:flex-row"
-      onSubmit={(event) => {
-        event.preventDefault();
-        const formData = new FormData(event.currentTarget);
-        const nextTag = String(formData.get("tag") ?? "");
-        onAddTag(nextTag);
-        event.currentTarget.reset();
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          void submitTag();
+        }
       }}
     >
-      <Input name="tag" placeholder="Tạo tag mới cho clip này" className="flex-1" />
-      <Button type="submit" variant="outline" className="sm:w-auto">
+      <Input
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        placeholder="Tạo tag mới cho clip này"
+        className="flex-1"
+      />
+      <Button type="button" variant="outline" className="sm:w-auto" onClick={() => void submitTag()} disabled={isSubmitting}>
         <Plus className="mr-2 size-4" />
-        Thêm tag
+        {isSubmitting ? "Đang thêm..." : "Thêm tag"}
       </Button>
-    </form>
+    </div>
   );
 }

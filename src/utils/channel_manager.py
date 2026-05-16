@@ -36,6 +36,13 @@ def _load_index() -> dict:
             return {"groups": [], "channels": []}
         data.setdefault("groups", [])
         data.setdefault("channels", [])
+        for channel in data["channels"]:
+            channel.setdefault("introVideoPath", "")
+            channel.setdefault("transitionVideoPath", "")
+            channel.setdefault("outroVideoPath", "")
+            channel.setdefault("decorVideoId", "")
+            channel.setdefault("sourceText", "")
+            channel.setdefault("isActive", True)
         return data
     except (json.JSONDecodeError, OSError):
         return {"groups": [], "channels": []}
@@ -131,7 +138,9 @@ def create_channel(
     channel_name: str,
     group_id: str = "",
     voice_id: str = "",
+    intro_video_path: str = "",
     transition_video_path: str = "",
+    outro_video_path: str = "",
     decor_video_id: str = "",
     source_text: str = "",
     is_active: bool = True,
@@ -145,7 +154,9 @@ def create_channel(
         "channelName": channel_name.strip(),
         "groupId": group_id.strip(),
         "voiceId": voice_id.strip(),
+        "introVideoPath": intro_video_path.strip(),
         "transitionVideoPath": transition_video_path.strip(),
+        "outroVideoPath": outro_video_path.strip(),
         "decorVideoId": decor_video_id.strip(),
         "sourceText": source_text.strip(),
         "isActive": bool(is_active),
@@ -167,7 +178,15 @@ def update_channel(channel_id: str, updates: dict) -> dict:
                     if other["channelId"] != channel_id and other.get("channelName") == new_name:
                         raise ValueError(f"Channel name '{new_name}' da ton tai.")
                 channel["channelName"] = new_name
-            for field in ("groupId", "voiceId", "transitionVideoPath", "decorVideoId", "sourceText"):
+            for field in (
+                "groupId",
+                "voiceId",
+                "introVideoPath",
+                "transitionVideoPath",
+                "outroVideoPath",
+                "decorVideoId",
+                "sourceText",
+            ):
                 if field in updates:
                     channel[field] = str(updates[field]).strip()
             if "isActive" in updates:

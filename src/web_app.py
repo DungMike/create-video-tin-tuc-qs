@@ -136,7 +136,8 @@ def _save_uploaded_file(file_storage, target_dir: str, prefix: str = "") -> str:
     return filepath
 
 
-def _download_youtube_links(links: list[str], output_dir: str) -> tuple[list[str], list[str]]:
+def _download_youtube_links(links: list[str], output_dir: str, max_retries: int = 3) -> tuple[list[str], list[str]]:
+    import time
     downloaded_paths = []
     errors = []
 
@@ -155,23 +156,36 @@ def _download_youtube_links(links: list[str], output_dir: str) -> tuple[list[str
             "quiet": True,
             "no_warnings": True,
             "no_color": True,
+            # Retry & timeout settings to handle interrupted downloads
+            "retries": 5,
+            "fragment_retries": 5,
+            "socket_timeout": 30,
             "http_headers": {
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
                 ),
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                "Origin": "https://www.bilibili.com",
-                "Referer": "https://www.bilibili.com/",
+                "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
             },
         }
 
         before_files = set(os.listdir(output_dir))
-        try:
-            with yt_dlp.YoutubeDL(options) as downloader:
-                downloader.download([link])
-        except Exception as exc:
-            errors.append(f"{link}: {exc}")
+        last_exc = None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                with yt_dlp.YoutubeDL(options) as downloader:
+                    downloader.download([link])
+                last_exc = None
+                break  # success
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(f"Download attempt {attempt}/{max_retries} failed for {link}: {exc}")
+                if attempt < max_retries:
+                    time.sleep(2)
+
+        if last_exc is not None:
+            errors.append(f"{link}: {last_exc}")
             continue
 
         after_files = set(os.listdir(output_dir))
@@ -1362,6 +1376,102 @@ def batch_library_sources():
             "availableTags": collect_library_tags(library_index),
             "selectedTags": selected_tags,
             "totalAssetCount": len(library_assets),
+        }
+    )
+
+
+@app.route("/api/batch-pipeline/drafts/<draft_id>/source-tags", methods=["POST"])
+def add_batch_draft_source_tag(draft_id: str):
+    draft = _load_batch_draft(draft_id)
+    if not draft:
+        return _json_error("Batch draft khong tim thay.", status_code=404, code="not_found")
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _json_error("Body JSON khong hop le.", code="invalid_json")
+
+    ref = payload.get("clipRef")
+    if not isinstance(ref, dict):
+        return _json_error("clipRef khong hop le.", code="bad_request")
+
+    raw_tags = payload.get("tags", [])
+    if isinstance(raw_tags, str):
+        tag_values = [raw_tags]
+    elif isinstance(raw_tags, list):
+        tag_values = [str(value) for value in raw_tags if isinstance(value, str)]
+    else:
+        tag_values = []
+    tags = normalize_tags(tag_values)
+    if not tags:
+        return _json_error("Can nhap it nhat 1 tag.", code="empty_tags")
+
+    origin = str(ref.get("origin") or "")
+    asset_record = None
+    clip_key = ""
+
+    if origin == "batch_source":
+        batch_source_id = str(ref.get("batchSourceId") or ref.get("batch_source_id") or "")
+        clip_id = str(ref.get("clipId") or ref.get("clip_id") or "")
+        if not batch_source_id.startswith("batchsrc_") or not clip_id:
+            return _json_error("clipRef batch source khong hop le.", code="bad_request")
+
+        manifest = _load_batch_source_manifest(batch_source_id)
+        if not manifest:
+            return _json_error("Batch source video khong tim thay.", status_code=404, code="not_found")
+
+        source_clip = next(
+            (
+                clip
+                for clip in manifest.get("review_clips", [])
+                if isinstance(clip, dict) and str(clip.get("id")) == clip_id
+            ),
+            None,
+        )
+        if not source_clip:
+            return _json_error("Clip khong tim thay trong batch source.", status_code=404, code="clip_not_found")
+
+        normalized_clip = _clip_from_batch_source(batch_source_id, source_clip)
+        source_path = storage_absolute_path(normalized_clip["relative_path"])
+        if not os.path.isfile(source_path):
+            return _json_error("File clip khong con ton tai.", status_code=404, code="clip_file_missing")
+
+        clip_key = normalized_clip["id"]
+        tagged_clip = dict(normalized_clip)
+        tagged_clip["tags"] = tags
+        updated_assets = upsert_library_assets(draft_id, [tagged_clip])
+        asset_record = updated_assets[0] if updated_assets else None
+    elif origin == "library":
+        asset_id = str(ref.get("assetId") or ref.get("asset_id") or "")
+        if not asset_id:
+            return _json_error("clipRef library khong hop le.", code="bad_request")
+
+        library_index, library_assets = _load_library_assets()
+        asset_record = next(
+            (asset for asset in library_assets if str(asset.get("asset_id") or "") == asset_id),
+            None,
+        )
+        if not asset_record:
+            return _json_error("Library asset khong tim thay.", status_code=404, code="not_found")
+
+        clip_key = _source_ref_id("library", "", asset_id)
+        asset_record["tags"] = normalize_tags(list(asset_record.get("tags", [])) + tags)
+        asset_record["updated_at"] = _utc_now()
+        save_library_index(library_index)
+    else:
+        return _json_error("clipRef origin khong hop le.", code="bad_request")
+
+    draft_clip_tags = draft.get("clipTags") if isinstance(draft.get("clipTags"), dict) else {}
+    draft_clip_tags[clip_key] = normalize_tags(list(draft_clip_tags.get(clip_key, [])) + tags)
+    draft["clipTags"] = draft_clip_tags
+    _save_batch_draft(draft_id, draft)
+
+    library_index, _assets = _load_library_assets()
+    return jsonify(
+        {
+            "clipId": clip_key,
+            "clipTags": draft_clip_tags,
+            "availableTags": collect_library_tags(library_index),
+            "asset": _serialize_asset(asset_record) if asset_record else None,
         }
     )
 

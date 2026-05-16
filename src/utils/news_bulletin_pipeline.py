@@ -300,6 +300,112 @@ def get_resource_summary(bulletin_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Segment-level resources (intro / detail_intro / outro)
+# ---------------------------------------------------------------------------
+
+_VALID_SEGMENT_TYPES = {"intro", "detail_intro", "outro"}
+
+
+def _segment_resources_dir(bulletin_id: str, segment_type: str) -> str:
+    return os.path.join(_bulletin_dir(bulletin_id), "resources", f"segment_{segment_type}")
+
+
+def add_segment_resource_files(
+    bulletin_id: str,
+    segment_type: str,
+    kind: str,
+    file_paths: list[str],
+) -> dict:
+    """Add resource files for a special segment (intro/detail_intro/outro).
+
+    Args:
+        segment_type: "intro", "detail_intro", or "outro"
+        kind: "vid_clips" or "images"
+
+    Returns updated resource entry for this segment.
+    """
+    if segment_type not in _VALID_SEGMENT_TYPES:
+        raise ValueError(f"segment_type khong hop le: {segment_type}")
+
+    state = load_bulletin_state(bulletin_id)
+    if not state:
+        raise ValueError(f"Bulletin '{bulletin_id}' khong ton tai.")
+
+    res_dir = os.path.join(_segment_resources_dir(bulletin_id, segment_type), kind)
+    os.makedirs(res_dir, exist_ok=True)
+
+    added = []
+    for src_path in file_paths:
+        if not os.path.isfile(src_path):
+            continue
+        filename = os.path.basename(src_path)
+        dst_path = os.path.join(res_dir, filename)
+        if os.path.abspath(src_path) != os.path.abspath(dst_path):
+            shutil.copy2(src_path, dst_path)
+        rel_path = os.path.relpath(dst_path, Config.STORAGE_DIR).replace("\\", "/")
+        added.append({"path": dst_path, "relativePath": rel_path, "filename": filename})
+
+    # Update state
+    state_key = f"{segment_type}Resources"
+    res_entry = state.setdefault(state_key, {"vidClips": [], "images": []})
+    list_key = "vidClips" if kind == "vid_clips" else "images"
+    existing_paths = {item.get("relativePath") for item in res_entry.get(list_key, [])}
+    for item in added:
+        if item["relativePath"] not in existing_paths:
+            res_entry[list_key].append(item)
+
+    save_bulletin_state(bulletin_id, state)
+    return res_entry
+
+
+def get_segment_resource_pool(bulletin_id: str, segment_type: str) -> dict:
+    """Get resource pool for a special segment.
+
+    Returns: {"vid_clips": [...], "img_clips": [...]}
+    """
+    if segment_type not in _VALID_SEGMENT_TYPES:
+        return {"vid_clips": [], "img_clips": []}
+
+    state = load_bulletin_state(bulletin_id)
+    if not state:
+        return {"vid_clips": [], "img_clips": []}
+
+    state_key = f"{segment_type}Resources"
+    entry = state.get(state_key, {})
+
+    vid_clips = []
+    for item in entry.get("vidClips", []):
+        abs_path = os.path.join(Config.STORAGE_DIR, item.get("relativePath", ""))
+        if os.path.isfile(abs_path):
+            vid_clips.append({"path": abs_path, "relative_path": item.get("relativePath", "")})
+
+    img_clips = []
+    for item in entry.get("images", []):
+        abs_path = os.path.join(Config.STORAGE_DIR, item.get("relativePath", ""))
+        if os.path.isfile(abs_path):
+            img_clips.append({"path": abs_path, "relative_path": item.get("relativePath", "")})
+
+    return {"vid_clips": vid_clips, "img_clips": img_clips}
+
+
+def get_segment_resource_summary(bulletin_id: str) -> dict:
+    """Summarize resource counts for special segments."""
+    state = load_bulletin_state(bulletin_id)
+    if not state:
+        return {}
+
+    summary = {}
+    for seg_type in _VALID_SEGMENT_TYPES:
+        state_key = f"{seg_type}Resources"
+        entry = state.get(state_key, {})
+        summary[seg_type] = {
+            "vidClips": len(entry.get("vidClips", [])),
+            "images": len(entry.get("images", [])),
+        }
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Audio cache (reuse same voiceId audio across channels)
 # ---------------------------------------------------------------------------
 

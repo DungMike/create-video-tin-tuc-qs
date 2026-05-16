@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import time
 from datetime import datetime
@@ -119,7 +120,9 @@ def collect_library_tags(library_index: dict) -> list[str]:
 
 
 def _asset_id_for_clip(job_id: str, clip_id: str) -> str:
-    return f"job_{job_id}_{clip_id}"
+    safe_job_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(job_id or "")).strip("._") or "unknown"
+    safe_clip_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(clip_id or "")).strip("._") or "clip"
+    return f"job_{safe_job_id}_{safe_clip_id}"
 
 
 def upsert_library_assets(job_id: str, clips_with_tags: list[dict]) -> list[dict]:

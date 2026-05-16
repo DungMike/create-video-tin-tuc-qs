@@ -35,6 +35,8 @@ class NewsTimelineComposer:
         self.channel_id = channel_id
         self.vid_clip_duration = vid_clip_duration
         self.img_clip_duration = img_clip_duration
+        self.img_clip_min = 4.0
+        self.img_clip_max = 6.0
         self._seed = _stable_seed(bulletin_id, channel_id)
         self._rng = random.Random(self._seed)
 
@@ -77,7 +79,7 @@ class NewsTimelineComposer:
         # Fill remaining with image clips
         while remaining > 0.5 and img_clips:
             clip = self._rng.choice(img_clips)
-            clip_dur = min(self.img_clip_duration, remaining)
+            clip_dur = min(self._rng.uniform(self.img_clip_min, self.img_clip_max), remaining)
             timeline_items.append({
                 "type": "image",
                 "path": clip.get("path") or clip.get("relative_path", ""),
@@ -130,7 +132,7 @@ class NewsTimelineComposer:
             elif img_idx < len(available_imgs):
                 clip = available_imgs[img_idx]
                 img_idx += 1
-                clip_dur = min(self.img_clip_duration, remaining)
+                clip_dur = min(self._rng.uniform(self.img_clip_min, self.img_clip_max), remaining)
                 timeline_items.append({
                     "type": "image",
                     "path": clip.get("path") or clip.get("relative_path", ""),
@@ -158,8 +160,12 @@ class NewsTimelineComposer:
         parsed_script: dict,
         audio_durations: dict[str, float],
         resource_pools: dict[int, dict],
+        intro_clip_path: str | None = None,
+        intro_duration: float = 0.0,
         transition_clip_path: str | None = None,
         transition_duration: float = 0.5,
+        outro_clip_path: str | None = None,
+        outro_duration: float = 0.0,
     ) -> dict:
         """Build the complete bulletin timeline for this channel.
 
@@ -167,8 +173,10 @@ class NewsTimelineComposer:
             parsed_script: output from news_script_parser.parse_news_script()
             audio_durations: {segment_key: duration_seconds} e.g. {"intro": 5.0, "resume_1": 3.0, ...}
             resource_pools: {news_id: {"vid_clips": [...], "img_clips": [...]}}
+            intro_clip_path: path to channel's intro video bumper
             transition_clip_path: path to channel's transition video
-            transition_duration: duration of transition clip
+            transition_duration: full duration of transition clip
+            outro_clip_path: path to channel's outro video bumper
 
         Returns:
             {"segments": [...], "totalDuration": float, "newsOrder": [int, ...]}
@@ -179,8 +187,25 @@ class NewsTimelineComposer:
 
         segments = []
         total_duration = 0.0
+        has_transition = bool(transition_clip_path and os.path.isfile(transition_clip_path) and transition_duration > 0)
 
-        # 1. Intro segment
+        def add_channel_media(segment_key: str, clip_path: str | None, duration: float):
+            nonlocal total_duration
+            if clip_path and os.path.isfile(clip_path) and duration > 0:
+                segments.append({
+                    "segmentType": "channel_media",
+                    "segmentKey": segment_key,
+                    "clipPath": clip_path,
+                    "duration": duration,
+                })
+                total_duration += duration
+
+        def add_transition(segment_key: str):
+            if has_transition:
+                add_channel_media(segment_key, transition_clip_path, transition_duration)
+
+        # 1. Channel intro bumper, then spoken intro.
+        add_channel_media("channel_intro", intro_clip_path, intro_duration)
         intro_dur = audio_durations.get("intro", 0.0)
         if intro_dur > 0:
             segments.append({
@@ -191,7 +216,8 @@ class NewsTimelineComposer:
             })
             total_duration += intro_dur
 
-        # 2. Resume segments (in shuffled order)
+        # 2. Resume segments (in shuffled order), separated by channel transition.
+        emitted_resumes = 0
         for news_id in shuffled_order:
             seg_key = f"resume_{news_id}"
             dur = audio_durations.get(seg_key, 0.0)
@@ -212,19 +238,25 @@ class NewsTimelineComposer:
                 "clips": clips,
             })
             total_duration += dur
+            emitted_resumes += 1
+            if emitted_resumes < len([news_id for news_id in shuffled_order if audio_durations.get(f"resume_{news_id}", 0.0) > 0]):
+                add_transition(f"transition_resume_{news_id}")
 
-        # 3. Transition before details
-        if transition_clip_path and os.path.isfile(transition_clip_path):
+        # 3. Transition and spoken bridge before details.
+        add_transition("transition_pre_detail_intro")
+        detail_intro_dur = audio_durations.get("detail_intro", 0.0)
+        if detail_intro_dur > 0:
             segments.append({
-                "segmentType": "transition",
-                "segmentKey": "transition_pre_detail",
-                "clipPath": transition_clip_path,
-                "duration": transition_duration,
+                "segmentType": "detail_intro",
+                "segmentKey": "detail_intro",
+                "audioDuration": detail_intro_dur,
+                "clips": [],
             })
-            total_duration += transition_duration
+            total_duration += detail_intro_dur
 
-        # 4. Detail segments (in shuffled order, with transitions between)
-        for idx, news_id in enumerate(shuffled_order):
+        # 4. Detail segments (in shuffled order), separated by channel transition.
+        detail_ids = [news_id for news_id in shuffled_order if audio_durations.get(f"detail_{news_id}", 0.0) > 0]
+        for idx, news_id in enumerate(detail_ids):
             seg_key = f"detail_{news_id}"
             dur = audio_durations.get(seg_key, 0.0)
             if dur <= 0:
@@ -246,26 +278,13 @@ class NewsTimelineComposer:
             total_duration += dur
 
             # Insert transition between details (not after last one)
-            if idx < len(shuffled_order) - 1 and transition_clip_path and os.path.isfile(transition_clip_path):
-                segments.append({
-                    "segmentType": "transition",
-                    "segmentKey": f"transition_detail_{news_id}",
-                    "clipPath": transition_clip_path,
-                    "duration": transition_duration,
-                })
-                total_duration += transition_duration
+            if idx < len(detail_ids) - 1:
+                add_transition(f"transition_detail_{news_id}")
 
-        # 5. Transition before outro
-        if transition_clip_path and os.path.isfile(transition_clip_path):
-            segments.append({
-                "segmentType": "transition",
-                "segmentKey": "transition_pre_outro",
-                "clipPath": transition_clip_path,
-                "duration": transition_duration,
-            })
-            total_duration += transition_duration
+        # 5. Transition before spoken outro.
+        add_transition("transition_pre_outro")
 
-        # 6. Outro segment
+        # 6. Spoken outro, then channel outro bumper.
         outro_dur = audio_durations.get("outro", 0.0)
         if outro_dur > 0:
             segments.append({
@@ -275,6 +294,7 @@ class NewsTimelineComposer:
                 "clips": [],
             })
             total_duration += outro_dur
+        add_channel_media("channel_outro", outro_clip_path, outro_duration)
 
         return {
             "bulletinId": self.bulletin_id,

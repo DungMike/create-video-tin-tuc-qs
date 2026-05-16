@@ -22,7 +22,7 @@ from typing import Any
 
 
 _MARKER_PATTERN = re.compile(
-    r"^//(intro|resume-news-(\d+)|detail-news-(\d+)|end-outro)\s*$",
+    r"^//(intro|detail|resume-news-(\d+)|detail-news-(\d+)|end-outro)\s*$",
     re.IGNORECASE,
 )
 
@@ -67,6 +67,9 @@ def parse_news_script(raw_text: str) -> dict[str, Any]:
             if full_marker == "intro":
                 current_type = "intro"
                 current_id = None
+            elif full_marker == "detail":
+                current_type = "detail_intro"
+                current_id = None
             elif match.group(2) is not None:
                 current_type = "resume"
                 current_id = int(match.group(2))
@@ -86,6 +89,7 @@ def parse_news_script(raw_text: str) -> dict[str, Any]:
 
     # Build result
     intro_text = ""
+    detail_intro_text = ""
     resumes: dict[int, str] = {}
     details: dict[int, str] = {}
     outro_text = ""
@@ -94,6 +98,8 @@ def parse_news_script(raw_text: str) -> dict[str, Any]:
         text = "\n".join(seg_lines).strip()
         if seg_type == "intro":
             intro_text = text
+        elif seg_type == "detail_intro":
+            detail_intro_text = text
         elif seg_type == "resume" and seg_id is not None:
             resumes[seg_id] = text
         elif seg_type == "detail" and seg_id is not None:
@@ -120,6 +126,7 @@ def parse_news_script(raw_text: str) -> dict[str, Any]:
 
     return {
         "intro": {"text": intro_text},
+        "detailIntro": {"text": detail_intro_text},
         "newsItems": news_items,
         "outro": {"text": outro_text},
     }
@@ -151,6 +158,15 @@ def get_all_tts_segments(parsed_script: dict) -> list[dict]:
             "segmentKey": f"resume_{item['id']}",
             "newsId": item["id"],
             "text": item["resumeText"],
+        })
+
+    detail_intro_text = parsed_script.get("detailIntro", {}).get("text", "")
+    if detail_intro_text:
+        segments.append({
+            "segmentType": "detail_intro",
+            "segmentKey": "detail_intro",
+            "newsId": None,
+            "text": detail_intro_text,
         })
 
     for item in parsed_script.get("newsItems", []):

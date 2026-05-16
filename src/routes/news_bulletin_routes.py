@@ -25,11 +25,20 @@ from src.utils.channel_manager import (
     update_channel,
     update_group,
 )
+from src.utils.decor_images import (
+    add_decor_image,
+    delete_decor_image,
+    list_decor_images,
+    update_decor_image,
+)
 from src.utils.logger import logger
 from src.utils.news_bulletin_pipeline import (
     add_resource_files,
+    add_segment_resource_files,
     create_bulletin,
     get_resource_summary,
+    get_segment_resource_pool,
+    get_segment_resource_summary,
     list_bulletins,
     load_bulletin_progress,
     load_bulletin_state,
@@ -203,7 +212,9 @@ def api_create_channel():
             channel_name=channel_name,
             group_id=data.get("groupId", ""),
             voice_id=data.get("voiceId", ""),
+            intro_video_path=data.get("introVideoPath", ""),
             transition_video_path=data.get("transitionVideoPath", ""),
+            outro_video_path=data.get("outroVideoPath", ""),
             decor_video_id=data.get("decorVideoId", ""),
             source_text=data.get("sourceText", ""),
             is_active=data.get("isActive", True),
@@ -236,9 +247,27 @@ def api_delete_channel(channel_id: str):
 # Channel transition video upload
 # ===================================================================
 
-@news_bp.route("/api/channels/<channel_id>/transition-video", methods=["POST"])
-def api_upload_channel_transition(channel_id: str):
-    """Upload a transition video for a channel."""
+_CHANNEL_MEDIA_ROLES = {
+    "intro": ("introVideoPath", "intro"),
+    "transition": ("transitionVideoPath", "transitions"),
+    "transaction": ("transitionVideoPath", "transitions"),
+    "outro": ("outroVideoPath", "outro"),
+    "outtro": ("outroVideoPath", "outro"),
+}
+
+_CHANNEL_MEDIA_CANONICAL_ROLE = {
+    "intro": "intro",
+    "transition": "transition",
+    "transaction": "transition",
+    "outro": "outro",
+    "outtro": "outro",
+}
+
+
+def _upload_channel_media(channel_id: str, role: str):
+    role = str(role or "").strip().lower()
+    if role not in _CHANNEL_MEDIA_ROLES:
+        return _error_response("Loai video channel khong hop le.", code="invalid_channel_media_role", status=404)
     if "video" not in request.files:
         return _error_response("Can upload file video (field name: video).")
 
@@ -250,18 +279,107 @@ def api_upload_channel_transition(channel_id: str):
     if ext not in Config.ALLOWED_VIDEO_EXTENSIONS:
         return _error_response(f"Dinh dang video khong hop le: .{ext}")
 
-    transition_dir = os.path.join(Config.STORAGE_DIR, "channels", "transitions")
-    os.makedirs(transition_dir, exist_ok=True)
+    field_name, folder_name = _CHANNEL_MEDIA_ROLES[role]
+    canonical_role = _CHANNEL_MEDIA_CANONICAL_ROLE[role]
+    media_dir = os.path.join(Config.STORAGE_DIR, "channels", folder_name)
+    os.makedirs(media_dir, exist_ok=True)
 
-    filename = secure_filename(f"transition_{channel_id}.{ext}")
-    file_path = os.path.join(transition_dir, filename)
+    filename = secure_filename(f"{canonical_role}_{channel_id}.{ext}")
+    file_path = os.path.join(media_dir, filename)
     video_file.save(file_path)
 
     try:
-        channel = update_channel(channel_id, {"transitionVideoPath": file_path})
-        return jsonify({"channel": channel, "transitionVideoPath": file_path})
+        channel = update_channel(channel_id, {field_name: file_path})
+        return jsonify({"channel": channel, field_name: file_path, "role": canonical_role})
     except ValueError as exc:
         return _error_response(str(exc), status=404)
+
+
+@news_bp.route("/api/channels/<channel_id>/media/<role>", methods=["POST"])
+def api_upload_channel_media(channel_id: str, role: str):
+    """Upload intro/transition/outro video for a channel."""
+    return _upload_channel_media(channel_id, role)
+
+
+@news_bp.route("/api/channels/<channel_id>/transition-video", methods=["POST"])
+def api_upload_channel_transition(channel_id: str):
+    """Upload a transition video for a channel."""
+    return _upload_channel_media(channel_id, "transition")
+
+
+# ===================================================================
+# Channel Decor Images (PNG banners)
+# ===================================================================
+
+@news_bp.route("/api/channels/<channel_id>/decor-images", methods=["GET"])
+def api_list_decor_images(channel_id: str):
+    """List all decor images for a channel."""
+    channel = get_channel(channel_id)
+    if not channel:
+        return _error_response(f"Channel '{channel_id}' khong ton tai.", status=404)
+    images = list_decor_images(channel_id)
+    return jsonify({"decorImages": images, "channelId": channel_id})
+
+
+@news_bp.route("/api/channels/<channel_id>/decor-images", methods=["POST"])
+def api_upload_decor_image(channel_id: str):
+    """Upload a new decor image (PNG only) for a channel."""
+    channel = get_channel(channel_id)
+    if not channel:
+        return _error_response(f"Channel '{channel_id}' khong ton tai.", status=404)
+
+    if "image" not in request.files:
+        return _error_response("Can upload file anh (field name: image).")
+
+    image_file = request.files["image"]
+    if not image_file.filename:
+        return _error_response("File anh khong co ten.")
+
+    display_name = request.form.get("name", "").strip() or image_file.filename.rsplit(".", 1)[0]
+    title_offset_x = request.form.get("titleOffsetX")
+    title_offset_y = request.form.get("titleOffsetY")
+    title_max_width = request.form.get("titleMaxWidth")
+
+    try:
+        record = add_decor_image(
+            channel_id=channel_id,
+            display_name=display_name,
+            filename=image_file.filename,
+            file_bytes=image_file.read(),
+            title_offset_x=int(title_offset_x) if title_offset_x else None,
+            title_offset_y=int(title_offset_y) if title_offset_y else None,
+            title_max_width=int(title_max_width) if title_max_width else None,
+        )
+        return jsonify({"decorImage": record}), 201
+    except ValueError as exc:
+        return _error_response(str(exc))
+
+
+@news_bp.route("/api/channels/<channel_id>/decor-images/<image_id>", methods=["DELETE"])
+def api_delete_decor_image(channel_id: str, image_id: str):
+    """Delete a decor image."""
+    deleted = delete_decor_image(channel_id, image_id)
+    if not deleted:
+        return _error_response(f"Decor image '{image_id}' khong ton tai.", status=404)
+    return jsonify({"deleted": True})
+
+
+@news_bp.route("/api/channels/<channel_id>/decor-images/<image_id>", methods=["PUT"])
+def api_update_decor_image(channel_id: str, image_id: str):
+    """Update decor image title configuration (position, font, color)."""
+    channel = get_channel(channel_id)
+    if not channel:
+        return _error_response(f"Channel '{channel_id}' khong ton tai.", status=404)
+
+    data = request.get_json(silent=True) or {}
+    if not data:
+        return _error_response("Can cung cap du lieu cap nhat.")
+
+    updated = update_decor_image(channel_id, image_id, data)
+    if not updated:
+        return _error_response(f"Decor image '{image_id}' khong ton tai.", status=404)
+
+    return jsonify({"decorImage": updated})
 
 
 # ===================================================================
@@ -301,6 +419,7 @@ def api_create_bulletin():
     data = request.get_json(silent=True) or {}
     script_text = (data.get("scriptText") or "").strip()
     channel_ids = data.get("channelIds", [])
+    channel_decor_image_ids = data.get("channelDecorImageIds", {})
 
     if not script_text:
         return _error_response("Can nhap noi dung kich ban.")
@@ -310,6 +429,10 @@ def api_create_bulletin():
 
     try:
         state = create_bulletin(script_text, channel_ids)
+        # Save decor image mapping
+        if channel_decor_image_ids:
+            state["channelDecorImageIds"] = channel_decor_image_ids
+            save_bulletin_state(state["bulletinId"], state)
         return jsonify({
             "bulletinId": state["bulletinId"],
             "newsCount": state["newsCount"],
@@ -335,6 +458,7 @@ def api_get_bulletin(bulletin_id: str):
         "channelIds": state.get("channelIds", []),
         "newsCount": state.get("newsCount", 0),
         "resourceSummary": resource_summary,
+        "segmentResourceSummary": get_segment_resource_summary(bulletin_id),
         "resourceDetails": _resource_details(bulletin_id),
         "status": progress.get("status", "draft"),
         "channels": progress.get("channels", {}),
@@ -446,6 +570,105 @@ def api_clear_bulletin_resources(bulletin_id: str, news_idx: int):
     })
 
 
+# ---------------------------------------------------------------------------
+# Segment-level resources (intro / detail_intro / outro)
+# ---------------------------------------------------------------------------
+
+@news_bp.route("/api/news-bulletin/<bulletin_id>/segment-resources/<segment_type>", methods=["POST"])
+def api_upload_segment_resources(bulletin_id: str, segment_type: str):
+    """Upload images/videos for a special segment (intro, detail_intro, outro)."""
+    valid_types = {"intro", "detail_intro", "outro"}
+    if segment_type not in valid_types:
+        return _error_response(f"segment_type phai la: {', '.join(valid_types)}")
+
+    state = load_bulletin_state(bulletin_id)
+    if not state:
+        return _error_response(f"Bulletin '{bulletin_id}' khong ton tai.", status=404)
+    locked = _ensure_draft_bulletin(bulletin_id)
+    if locked:
+        return locked
+
+    if not request.files:
+        return _error_response("Khong co file nao duoc upload.")
+
+    saved_images = []
+    saved_videos = []
+    for key, file_obj in request.files.items(multi=True):
+        if not file_obj or not file_obj.filename:
+            continue
+        ext = os.path.splitext(file_obj.filename)[1].lstrip(".").lower()
+        if ext in Config.ALLOWED_IMAGE_EXTENSIONS:
+            kind = "images"
+        elif ext in Config.ALLOWED_VIDEO_EXTENSIONS:
+            kind = "vid_clips"
+        else:
+            continue
+
+        from src.utils.news_bulletin_pipeline import _segment_resources_dir
+        dest_dir = os.path.join(_segment_resources_dir(bulletin_id, segment_type), kind)
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_path = os.path.join(dest_dir, file_obj.filename)
+        file_obj.save(dest_path)
+
+        if kind == "images":
+            saved_images.append(dest_path)
+        else:
+            saved_videos.append(dest_path)
+
+    if saved_images:
+        add_segment_resource_files(bulletin_id, segment_type, "images", saved_images)
+    if saved_videos:
+        add_segment_resource_files(bulletin_id, segment_type, "vid_clips", saved_videos)
+
+    return jsonify({
+        "segmentType": segment_type,
+        "added": {"images": len(saved_images), "vidClips": len(saved_videos)},
+        "segmentResourceSummary": get_segment_resource_summary(bulletin_id),
+    })
+
+
+@news_bp.route("/api/news-bulletin/<bulletin_id>/segment-resources/<segment_type>", methods=["GET"])
+def api_get_segment_resources(bulletin_id: str, segment_type: str):
+    """Get resource pool for a special segment."""
+    valid_types = {"intro", "detail_intro", "outro"}
+    if segment_type not in valid_types:
+        return _error_response(f"segment_type phai la: {', '.join(valid_types)}")
+
+    pool = get_segment_resource_pool(bulletin_id, segment_type)
+    return jsonify({"segmentType": segment_type, "pool": pool})
+
+
+@news_bp.route("/api/news-bulletin/<bulletin_id>/segment-resources/<segment_type>", methods=["DELETE"])
+def api_clear_segment_resources(bulletin_id: str, segment_type: str):
+    """Clear all resources for a special segment."""
+    valid_types = {"intro", "detail_intro", "outro"}
+    if segment_type not in valid_types:
+        return _error_response(f"segment_type phai la: {', '.join(valid_types)}")
+
+    state = load_bulletin_state(bulletin_id)
+    if not state:
+        return _error_response(f"Bulletin '{bulletin_id}' khong ton tai.", status=404)
+    locked = _ensure_draft_bulletin(bulletin_id)
+    if locked:
+        return locked
+
+    state_key = f"{segment_type}Resources"
+    state[state_key] = {"vidClips": [], "images": []}
+    save_bulletin_state(bulletin_id, state)
+
+    # Clean up files
+    from src.utils.news_bulletin_pipeline import _segment_resources_dir
+    seg_dir = _segment_resources_dir(bulletin_id, segment_type)
+    if os.path.isdir(seg_dir):
+        import shutil
+        shutil.rmtree(seg_dir, ignore_errors=True)
+
+    return jsonify({
+        "segmentType": segment_type,
+        "segmentResourceSummary": get_segment_resource_summary(bulletin_id),
+    })
+
+
 @news_bp.route("/api/news-bulletin/<bulletin_id>/channels", methods=["PUT"])
 def api_update_bulletin_channels(bulletin_id: str):
     """Update the selected channels for a bulletin."""
@@ -458,10 +681,13 @@ def api_update_bulletin_channels(bulletin_id: str):
 
     data = request.get_json(silent=True) or {}
     channel_ids = data.get("channelIds", [])
+    channel_decor_image_ids = data.get("channelDecorImageIds", {})
     if not channel_ids:
         return _error_response("Can chon it nhat 1 channel.")
 
     state["channelIds"] = channel_ids
+    if channel_decor_image_ids:
+        state["channelDecorImageIds"] = channel_decor_image_ids
     save_bulletin_state(bulletin_id, state)
     _sync_progress_channels(bulletin_id, channel_ids)
 
@@ -573,6 +799,74 @@ def api_start_bulletin_render(bulletin_id: str):
         })
     except ValueError as exc:
         return _error_response(str(exc))
+
+
+
+@news_bp.route("/api/news-bulletin/<bulletin_id>/retry-render", methods=["POST"])
+def api_retry_bulletin_render(bulletin_id: str):
+    """Retry rendering for failed channels of a bulletin."""
+    state = load_bulletin_state(bulletin_id)
+    if not state:
+        return _error_response(f"Bulletin '{bulletin_id}' khong ton tai.", status=404)
+
+    status = _bulletin_status(bulletin_id)
+    if status not in ("failed",):
+        return _error_response(
+            "Chi co the retry khi bulletin o trang thai failed.",
+            code="bulletin_not_failed",
+            status=409,
+        )
+
+    parsed_script = state.get("parsedScript")
+    if not parsed_script:
+        return _error_response("Bulletin khong co kich ban da parse.")
+
+    progress = load_bulletin_progress(bulletin_id) or {}
+    channels_data = progress.get("channels", {})
+
+    failed_channel_ids = [
+        ch_id for ch_id, ch_data in channels_data.items()
+        if ch_data.get("status") == "failed"
+    ]
+    if not failed_channel_ids:
+        return _error_response("Khong co channel nao bi loi de retry.")
+
+    for ch_id in failed_channel_ids:
+        ch = get_channel(ch_id)
+        channels_data[ch_id] = {
+            "channelId": ch_id,
+            "channelName": ch.get("channelName", ch_id) if ch else ch_id,
+            "status": "running",
+            "stage": "pending",
+            "percent": 0,
+            "message": "Dang retry...",
+            "outputVideo": None,
+            "error": None,
+        }
+
+    progress["status"] = "running"
+    progress["channels"] = channels_data
+    save_bulletin_progress(bulletin_id, progress)
+
+    import threading
+    from src.utils.news_bulletin_render_worker import _render_channel
+
+    for ch_id in failed_channel_ids:
+        t = threading.Thread(
+            target=_render_channel,
+            args=(bulletin_id, ch_id, parsed_script),
+            daemon=True,
+            name=f"bulletin-retry-{bulletin_id}-{ch_id}",
+        )
+        t.start()
+        logger.info(f"[BulletinRetry] Retrying channel {ch_id} for bulletin {bulletin_id}")
+
+    return jsonify({
+        "bulletinId": bulletin_id,
+        "status": "running",
+        "retriedChannels": failed_channel_ids,
+        "retriedCount": len(failed_channel_ids),
+    })
 
 
 @news_bp.route("/api/news-bulletin/<bulletin_id>/resources/<int:news_idx>/from-source", methods=["POST"])

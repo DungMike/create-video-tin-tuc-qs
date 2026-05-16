@@ -8,6 +8,7 @@ import type {
   BatchRetryResponse,
   BatchSourceSetDetailResponse,
   BatchSourceSetsResponse,
+  BatchSourceTagResponse,
   BatchSourceVideoResponse,
   CloneVoiceResponse,
   CreateJobResponse,
@@ -205,6 +206,18 @@ export const getBatchLibrarySources = (tags: string[]) => {
   return requestJson<BatchLibrarySourcesResponse>(`/api/batch-pipeline/library-sources${suffix}`);
 };
 
+export const addBatchDraftSourceTag = (
+  draftId: string,
+  payload: { clipRef: BatchDraftResponse["selectedSourceRefs"][number]; tags: string[] },
+) =>
+  requestJson<BatchSourceTagResponse>(`/api/batch-pipeline/drafts/${draftId}/source-tags`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
 export const getBatchProgress = (batchId: string) =>
   requestJson<BatchProgressResponse>(`/api/batch-pipeline/${batchId}/progress`);
 
@@ -226,6 +239,9 @@ import type {
   Channel,
   ChannelGroup,
   ChannelsResponse,
+  DecorImage,
+  DecorImagesResponse,
+  DecorImageUploadResponse,
   ParseScriptResponse,
 } from "@/types/api";
 
@@ -274,6 +290,35 @@ export const uploadChannelTransition = (channelId: string, formData: FormData) =
     { method: "POST", body: formData },
   );
 
+export const uploadChannelMedia = (channelId: string, role: "intro" | "transition" | "outro", formData: FormData) =>
+  requestJson<{ channel: Channel; role: string; introVideoPath?: string; transitionVideoPath?: string; outroVideoPath?: string }>(
+    `/api/channels/${channelId}/media/${role}`,
+    { method: "POST", body: formData },
+  );
+
+// --- Channel Decor Images ---
+
+export const getChannelDecorImages = (channelId: string) =>
+  requestJson<DecorImagesResponse>(`/api/channels/${channelId}/decor-images`);
+
+export const uploadChannelDecorImage = (channelId: string, formData: FormData) =>
+  requestJson<DecorImageUploadResponse>(`/api/channels/${channelId}/decor-images`, {
+    method: "POST",
+    body: formData,
+  });
+
+export const deleteChannelDecorImage = (channelId: string, imageId: string) =>
+  requestJson<{ deleted: boolean }>(`/api/channels/${channelId}/decor-images/${imageId}`, {
+    method: "DELETE",
+  });
+
+export const updateDecorImageConfig = (channelId: string, imageId: string, config: Partial<DecorImage>) =>
+  requestJson<DecorImageUploadResponse>(`/api/channels/${channelId}/decor-images/${imageId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+
 // --- News Bulletin ---
 
 export const parseNewsScript = (scriptText: string) =>
@@ -283,11 +328,11 @@ export const parseNewsScript = (scriptText: string) =>
     body: JSON.stringify({ scriptText }),
   });
 
-export const createNewsBulletin = (scriptText: string, channelIds: string[]) =>
+export const createNewsBulletin = (scriptText: string, channelIds: string[], channelDecorImageIds?: Record<string, string>) =>
   requestJson<BulletinCreateResponse>("/api/news-bulletin", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scriptText, channelIds }),
+    body: JSON.stringify({ scriptText, channelIds, channelDecorImageIds }),
   });
 
 export const getNewsBulletin = (bulletinId: string) =>
@@ -318,19 +363,25 @@ export const clearBulletinResources = (bulletinId: string, newsIdx: number) =>
     { method: "DELETE" },
   );
 
-export const updateBulletinChannels = (bulletinId: string, channelIds: string[]) =>
+export const updateBulletinChannels = (bulletinId: string, channelIds: string[], channelDecorImageIds?: Record<string, string>) =>
   requestJson<{ bulletinId: string; channelIds: string[] }>(
     `/api/news-bulletin/${bulletinId}/channels`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channelIds }),
+      body: JSON.stringify({ channelIds, channelDecorImageIds }),
     },
   );
 
 export const startBulletinRender = (bulletinId: string) =>
   requestJson<{ bulletinId: string; status: string; channelCount: number }>(
     `/api/news-bulletin/${bulletinId}/start-render`,
+    { method: "POST" },
+  );
+
+export const retryBulletinRender = (bulletinId: string) =>
+  requestJson<{ bulletinId: string; status: string; retriedChannels: string[]; retriedCount: number }>(
+    `/api/news-bulletin/${bulletinId}/retry-render`,
     { method: "POST" },
   );
 
@@ -346,4 +397,32 @@ export const addBulletinResourcesFromSource = (
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ clipPaths }),
     },
+  );
+
+
+// --- News Bulletin: Segment Resources (intro / detail_intro / outro) ---
+
+export type SegmentType = "intro" | "detail_intro" | "outro";
+
+export interface SegmentResourceSummary {
+  intro: { vidClips: number; images: number };
+  detail_intro: { vidClips: number; images: number };
+  outro: { vidClips: number; images: number };
+}
+
+export const uploadSegmentResources = (bulletinId: string, segmentType: SegmentType, formData: FormData) =>
+  requestJson<{ segmentType: string; added: { images: number; vidClips: number }; segmentResourceSummary: SegmentResourceSummary }>(
+    `/api/news-bulletin/${bulletinId}/segment-resources/${segmentType}`,
+    { method: "POST", body: formData },
+  );
+
+export const clearSegmentResources = (bulletinId: string, segmentType: SegmentType) =>
+  requestJson<{ segmentType: string; segmentResourceSummary: SegmentResourceSummary }>(
+    `/api/news-bulletin/${bulletinId}/segment-resources/${segmentType}`,
+    { method: "DELETE" },
+  );
+
+export const getSegmentResources = (bulletinId: string, segmentType: SegmentType) =>
+  requestJson<{ segmentType: string; pool: { vid_clips: Array<{ path: string; relative_path: string }>; img_clips: Array<{ path: string; relative_path: string }> } }>(
+    `/api/news-bulletin/${bulletinId}/segment-resources/${segmentType}`,
   );

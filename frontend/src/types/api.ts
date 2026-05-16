@@ -233,6 +233,32 @@ export interface DecorVideoUploadResponse {
   decorVideo: DecorVideo;
 }
 
+export interface DecorImage {
+  id: string;
+  channelId: string;
+  name: string;
+  filename: string;
+  relativePath: string;
+  width: number;
+  height: number;
+  titleOffsetX: number;
+  titleOffsetY: number;
+  titleMaxWidth: number;
+  titleFontSize: number;
+  titleColor: string;
+  titleFont: string;
+  createdAt: string;
+}
+
+export interface DecorImagesResponse {
+  decorImages: DecorImage[];
+  channelId: string;
+}
+
+export interface DecorImageUploadResponse {
+  decorImage: DecorImage;
+}
+
 // --- Batch Pipeline ---
 
 export type BatchInputMode = "docs" | "audio_upload";
@@ -440,6 +466,7 @@ export interface BulletinCreateResponse {
   bulletinId: string;
   newsCount: number;
   channelIds: string[];
+  channelDecorImageIds?: Record<string, string>;
 }
 
 export interface BulletinResourceSummary {

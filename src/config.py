@@ -13,6 +13,11 @@ class Config:
     VID_CLIP_MAX_DURATION = float(os.getenv("VID_CLIP_MAX_DURATION", "5"))
     IMG_CLIP_DURATION = int(os.getenv("IMG_CLIP_DURATION", "6"))
     REVIEW_CLIP_DURATION = float(os.getenv("REVIEW_CLIP_DURATION", "6"))
+    # News Bulletin: minimum display duration for resume (headline) segments.
+    # Short TTS headlines are padded with silence to ensure the banner has time to animate fully.
+    RESUME_MIN_DURATION = float(os.getenv("RESUME_MIN_DURATION", "4.5"))
+    # Silence appended to the end of each resume segment for a clean banner fade-out before next segment.
+    RESUME_SILENCE_PAD = float(os.getenv("RESUME_SILENCE_PAD", "0.4"))
     REVIEW_PAGE_SIZE = int(os.getenv("REVIEW_PAGE_SIZE", "30"))
     IMAGE_TRANSITION_DURATION = float(os.getenv("IMAGE_TRANSITION_DURATION", "0.75"))
     EFFECT_PREVIEW_CLIP_DURATION = float(os.getenv("EFFECT_PREVIEW_CLIP_DURATION", "2.25"))
@@ -71,6 +76,21 @@ class Config:
     # Use GPU full-pipeline (overlay_cuda): requires FFmpeg libnpp support
     # Set false if overlay_cuda returns 'Function not implemented'
     OVERLAY_USE_GPU_PIPELINE = os.getenv("OVERLAY_USE_GPU_PIPELINE", "false").lower() == "true"
+
+    # Decor Image Overlay (banner phía dưới video kèm tiêu đề tin)
+    DECOR_IMAGE_ENABLED = os.getenv("DECOR_IMAGE_ENABLED", "true").lower() == "true"
+    DECOR_IMAGE_WIDTH = int(os.getenv("DECOR_IMAGE_WIDTH", "1920"))
+    DECOR_IMAGE_HEIGHT = int(os.getenv("DECOR_IMAGE_HEIGHT", "300"))
+    DECOR_IMAGE_FADE_DURATION = float(os.getenv("DECOR_IMAGE_FADE_DURATION", "0.3"))
+    DECOR_IMAGE_ANIM_DURATION = float(os.getenv("DECOR_IMAGE_ANIM_DURATION", os.getenv("DECOR_IMAGE_FADE_DURATION", "0.3")))
+    DECOR_IMAGE_ANIMATION = os.getenv("DECOR_IMAGE_ANIMATION", "slide_up_fade")
+    DECOR_IMAGE_TITLE_FONT = os.getenv("DECOR_IMAGE_TITLE_FONT", os.getenv("SOURCE_TEXT_FONT", "C:/Windows/Fonts/arial.ttf"))
+    DECOR_IMAGE_TITLE_FONT_SIZE = int(os.getenv("DECOR_IMAGE_TITLE_FONT_SIZE", "36"))
+    DECOR_IMAGE_TITLE_COLOR = os.getenv("DECOR_IMAGE_TITLE_COLOR", "white")
+    DECOR_IMAGE_TITLE_MAX_LENGTH = int(os.getenv("DECOR_IMAGE_TITLE_MAX_LENGTH", "80"))
+    DECOR_IMAGE_DETAIL_GAP = float(os.getenv("DECOR_IMAGE_DETAIL_GAP", "0.2"))
+    DECOR_IMAGE_GAP_SECONDS = float(os.getenv("DECOR_IMAGE_GAP_SECONDS", os.getenv("DECOR_IMAGE_DETAIL_GAP", "0.2")))
+    DECOR_IMAGES_DIR = os.getenv("DECOR_IMAGES_DIR", "./storage/channels/decor_images")
 
     # Output
     OUTPUT_USE_AUDIO_FILENAME = os.getenv("OUTPUT_USE_AUDIO_FILENAME", "true").lower() == "true"

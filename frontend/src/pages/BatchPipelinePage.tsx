@@ -13,6 +13,7 @@ import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import {
   ApiError,
+  addBatchDraftSourceTag,
   createBatchDraft,
   deleteBatchSourceClip,
   getBatchDraft,
@@ -488,6 +489,31 @@ export function BatchPipelinePage() {
     }
   };
 
+  const handleAddSourceTag = async (clipId: string, tag: string) => {
+    const normalized = normalizeTags([tag]);
+    if (!normalized.length) return;
+
+    const nextTags = normalizeTags([...(sourceSelectionState.clipTags[clipId] ?? []), ...normalized]);
+    const ref = sourceClipRefs[clipId] ?? refFromClipId(clipId);
+    if (!draftId || !ref) {
+      setSourceSelectionState((current) => setClipTags(current, clipId, nextTags));
+      setSourceAvailableTags((current) => normalizeTags([...current, ...normalized]));
+      return;
+    }
+
+    setErrorMessage(null);
+    try {
+      const response = await addBatchDraftSourceTag(draftId, { clipRef: ref, tags: nextTags });
+      const savedTags = response.clipTags[clipId] ?? nextTags;
+      setSourceSelectionState((current) => setClipTags(current, clipId, savedTags));
+      setLibraryTags(response.availableTags);
+      setSourceAvailableTags(response.availableTags);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the them tag vao thu vien.");
+      throw err;
+    }
+  };
+
   const addDocEntry = () => setDocEntries((prev) => [...prev, { ...EMPTY_DOC_ENTRY, sourceText: defaultSourceTextKey }]);
   const removeDocEntry = (index: number) => {
     setDocEntries((prev) => (prev.length <= 1 ? prev : prev.filter((_, entryIndex) => entryIndex !== index)));
@@ -890,11 +916,7 @@ export function BatchPipelinePage() {
                         suggestedTags={sourceAvailableTags}
                         onCheckedChange={(checked) => setSourceSelectionState((current) => setClipSelected(current, clip.id, checked))}
                         onToggleTag={(tag) => setSourceSelectionState((current) => toggleClipTag(current, clip.id, tag))}
-                        onAddTag={(tag) => {
-                          const normalized = normalizeTags([tag]);
-                          if (!normalized.length) return;
-                          setSourceSelectionState((current) => setClipTags(current, clip.id, [...(current.clipTags[clip.id] ?? []), ...normalized]));
-                        }}
+                        onAddTag={(tag) => handleAddSourceTag(clip.id, tag)}
                         onDelete={() => handleDeleteClip(clip.id)}
                       />
                     ))}

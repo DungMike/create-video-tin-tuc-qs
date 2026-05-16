@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
+import { BannerTitleEditor } from "@/components/BannerTitleEditor";
 import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
 import { TopNav } from "@/components/top-nav";
@@ -15,11 +16,15 @@ import {
   deleteGroupApi,
   getChannels,
   getDecorVideos,
+  getChannelDecorImages,
+  uploadChannelDecorImage,
+  deleteChannelDecorImage,
+  updateDecorImageConfig,
   getVoices,
   updateChannelApi,
   uploadChannelTransition,
 } from "@/lib/api";
-import type { Channel, ChannelGroup, DecorVideo, VoiceRecord } from "@/types/api";
+import type { Channel, ChannelGroup, DecorImage, DecorVideo, VoiceRecord } from "@/types/api";
 
 export function ChannelManagerPage() {
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -44,6 +49,8 @@ export function ChannelManagerPage() {
   // Edit state
   const [editingChannelId, setEditingChannelId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Partial<Channel>>({});
+  const [channelDecorImages, setChannelDecorImages] = useState<DecorImage[]>([]);
+  const [editingDecorImage, setEditingDecorImage] = useState<{ channelId: string; image: DecorImage } | null>(null);
 
   const refresh = async () => {
     try {
@@ -133,7 +140,40 @@ export function ChannelManagerPage() {
 
   const startEdit = (channel: Channel) => {
     setEditingChannelId(channel.channelId);
-    setEditForm({ ...channel });
+    setEditForm(channel);
+    loadDecorImages(channel.channelId);
+  };
+
+  const loadDecorImages = async (channelId: string) => {
+    try {
+      const res = await getChannelDecorImages(channelId);
+      setChannelDecorImages(res.decorImages);
+    } catch {
+      setChannelDecorImages([]);
+    }
+  };
+
+  const handleUploadDecorImage = async (channelId: string, file: File) => {
+    const formData = new FormData();
+    formData.append("image", file);
+    formData.append("name", file.name.replace(/\.png$/i, ""));
+    try {
+      await uploadChannelDecorImage(channelId, formData);
+      await loadDecorImages(channelId);
+      showSuccess("Da upload anh decor.");
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the upload anh decor.");
+    }
+  };
+
+  const handleDeleteDecorImage = async (channelId: string, imageId: string) => {
+    try {
+      await deleteChannelDecorImage(channelId, imageId);
+      setChannelDecorImages((prev) => prev.filter((d) => d.id !== imageId));
+      showSuccess("Da xoa anh decor.");
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the xoa anh decor.");
+    }
   };
 
   const handleSaveEdit = async () => {
@@ -268,6 +308,40 @@ export function ChannelManagerPage() {
                       if (file) handleTransitionUpload(channel.channelId, file);
                     }} />
                     {channel.transitionVideoPath ? <p className="text-xs text-muted-foreground">Hien tai: {channel.transitionVideoPath}</p> : null}
+                  </div>
+                  {/* Decor Images (PNG banners) */}
+                  <div className="grid gap-2">
+                    <Label>Ảnh Decor (banner phía dưới video)</Label>
+                    <div className="flex flex-wrap gap-3">
+                      {channelDecorImages.map((di) => (
+                        <div key={di.id} className="relative group rounded-md border border-border overflow-hidden cursor-pointer" style={{ width: 192, height: 60 }}
+                          onClick={() => setEditingDecorImage({ channelId: channel.channelId, image: di })}
+                        >
+                          <img src={`/media/${di.relativePath}`} alt={di.name} className="w-full h-full object-cover" />
+                          <div className="absolute inset-0 bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                            <span className="text-white text-xs mr-1 max-w-[80px] truncate">{di.name}</span>
+                            <button className="text-cyan-400 text-xs hover:underline mr-1" onClick={(e) => { e.stopPropagation(); setEditingDecorImage({ channelId: channel.channelId, image: di }); }}>Sửa</button>
+                            <button className="text-red-400 text-xs hover:underline" onClick={(e) => { e.stopPropagation(); handleDeleteDecorImage(channel.channelId, di.id); }}>Xoá</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <Input type="file" accept=".png" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) handleUploadDecorImage(channel.channelId, file); event.currentTarget.value = ""; }} />
+                    <p className="text-xs text-muted-foreground">Chỉ hỗ trợ PNG trong suốt. Khuyến nghị: 1920×300px. Click vào ảnh để cấu hình vị trí tiêu đề.</p>
+                    {/* Banner Title Editor inline */}
+                    {editingDecorImage && editingDecorImage.channelId === channel.channelId && (
+                      <BannerTitleEditor
+                        decorImage={editingDecorImage.image}
+                        channelId={channel.channelId}
+                        onSave={async (config) => {
+                          await updateDecorImageConfig(channel.channelId, editingDecorImage.image.id, config);
+                          await loadDecorImages(channel.channelId);
+                          setEditingDecorImage(null);
+                          showSuccess("Đã lưu cấu hình tiêu đề banner.");
+                        }}
+                        onClose={() => setEditingDecorImage(null)}
+                      />
+                    )}
                   </div>
                   <div className="flex gap-2">
                     <Button onClick={handleSaveEdit}>Luu</Button>
