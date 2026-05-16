@@ -3,3 +3,10 @@ storage
 .env
 logs
 tests
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
