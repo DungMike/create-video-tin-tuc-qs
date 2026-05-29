@@ -1,0 +1,194 @@
+# PEXELS API SPECIFICATION & INTEGRATION GUIDE
+# Target Audience: AI Code Generation Agents & Developers
+# Output Format: Structured Text Reference (.txt)
+
+===============================================================================
+1. CORE ARCHITECTURE & SYSTEM OVERVIEW
+===============================================================================
+- Base URL: https://api.pexels.com/v1/
+- Protocol: HTTPS
+- Authentication Method: Custom HTTP Header (Authorization)
+- HTTP Header Format: 
+  Authorization: [YOUR_API_KEY]
+- Content-Type: application/json
+- Rate Limiting: 25,000 requests per month.
+- Rate Limit Headers (Returned in every API response):
+  * X-Ratelimit-Limit: The maximum number of requests allowed per month/period.
+  * X-Ratelimit-Remaining: The number of requests remaining in the current window.
+  * X-Ratelimit-Reset: The timestamp when the rate limit resets.
+
+===============================================================================
+2. ENDPOINT 1: SEARCH FOR VIDEOS
+===============================================================================
+URL: https://api.pexels.com/videos/search
+Method: GET
+
+[REQUEST QUERY PARAMETERS]
+-------------------------------------------------------------------------------
+Parameter    | Type    | Required | Default   | Description / Valid Values
+-------------------------------------------------------------------------------
+query        | string  | YES      | None      | The search term (e.g., "nature", "ocean").
+orientation  | string  | NO       | None      | Filter by orientation: "landscape", "portrait", "square"
+size         | string  | NO       | None      | Filter by size: "large" (4K), "medium" (HD), "small" (SD)
+locale       | string  | NO       | "en-US"   | The locale of the search term (e.g., "zh-CN", "es-ES").
+page         | integer | NO       | 1         | Page number for pagination.
+per_page     | integer | NO       | 15        | Number of results per page. Valid: 1 - 80.
+
+[SAMPLE RESPONSE PAYLOAD (JSON)]
+{
+  "page": 1,
+  "per_page": 1,
+  "total_results": 1000,
+  "url": "https://www.pexels.com/search/videos/nature/",
+  "videos": [
+    {
+      "id": 854123,
+      "width": 1920,
+      "height": 1080,
+      "url": "https://www.pexels.com/video/nature-video-854123/",
+      "image": "https://images.pexels.com/videos/854123/pictures/preview.jpg",
+      "duration": 15,
+      "user": {
+        "id": 1234,
+        "name": "John Doe",
+        "url": "https://www.pexels.com/@johndoe"
+      },
+      "video_files": [
+        {
+          "id": 111,
+          "quality": "hd",
+          "file_type": "video/mp4",
+          "width": 1920,
+          "height": 1080,
+          "link": "https://player.vimeo.com/external/854123.hd.mp4"
+        }
+      ],
+      "video_pictures": [
+        {
+          "id": 222,
+          "picture": "https://images.pexels.com/videos/854123/pictures/preview.jpg",
+          "nr": 0
+        }
+      ]
+    }
+  ]
+}
+
+===============================================================================
+3. ENDPOINT 2: POPULAR VIDEOS
+===============================================================================
+URL: https://api.pexels.com/videos/popular
+Method: GET
+
+[REQUEST QUERY PARAMETERS]
+-------------------------------------------------------------------------------
+Parameter    | Type    | Required | Default   | Description / Valid Values
+-------------------------------------------------------------------------------
+min_width    | integer | NO       | None      | Filter out videos with a width smaller than this value.
+min_height   | integer | NO       | None      | Filter out videos with a height smaller than this value.
+min_duration | integer | NO       | None      | Filter out videos with a duration shorter than this value (in seconds).
+max_duration | integer | NO       | None      | Filter out videos with a duration longer than this value (in seconds).
+page         | integer | NO       | 1         | Page number for pagination.
+per_page     | integer | NO       | 15        | Number of results per page. Valid: 1 - 80.
+
+[SAMPLE RESPONSE PAYLOAD (JSON)]
+{
+  "page": 1,
+  "per_page": 15,
+  "total_results": 4000,
+  "url": "https://www.pexels.com/popular-videos/",
+  "videos": [
+    {
+      "id": 994321,
+      "width": 3840,
+      "height": 2160,
+      "url": "https://www.pexels.com/video/popular-video-994321/",
+      "image": "https://images.pexels.com/videos/994321/pictures/preview.jpg",
+      "duration": 30,
+      "user": { "id": 5678, "name": "Jane Smith", "url": "https://www.pexels.com/@janesmith" },
+      "video_files": [
+        { "id": 333, "quality": "sd", "file_type": "video/mp4", "width": 640, "height": 360, "link": "https://player.vimeo.com/external/994321.sd.mp4" }
+      ],
+      "video_pictures": [
+        { "id": 444, "picture": "https://images.pexels.com/videos/994321/pictures/preview.jpg", "nr": 0 }
+      ]
+    }
+  ]
+}
+
+===============================================================================
+4. ENDPOINT 3: GET SPECIFIC VIDEO (SHOW VIDEO)
+===============================================================================
+URL: https://api.pexels.com/videos/videos/:id
+Method: GET
+
+[URL PATH PARAMETERS]
+-------------------------------------------------------------------------------
+Parameter    | Type    | Required | Description
+-------------------------------------------------------------------------------
+id           | integer | YES      | The unique ID of the target video.
+
+[SAMPLE RESPONSE PAYLOAD (JSON)]
+# Returns a single video object directly (not wrapped in a "videos" array).
+{
+  "id": 854123,
+  "width": 1920,
+  "height": 1080,
+  "url": "https://www.pexels.com/video/nature-video-854123/",
+  "image": "https://images.pexels.com/videos/854123/pictures/preview.jpg",
+  "duration": 15,
+  "user": {
+    "id": 1234,
+    "name": "John Doe",
+    "url": "https://www.pexels.com/@johndoe"
+  },
+  "video_files": [
+    {
+      "id": 111,
+      "quality": "hd",
+      "file_type": "video/mp4",
+      "width": 1920,
+      "height": 1080,
+      "link": "https://player.vimeo.com/external/854123.hd.mp4"
+    }
+  ],
+  "video_pictures": [
+    {
+      "id": 222,
+      "picture": "https://images.pexels.com/videos/854123/pictures/preview.jpg",
+      "nr": 0
+    }
+  ]
+}
+
+===============================================================================
+5. ENDPOINT 4: ACCOUNT STATISTICS
+===============================================================================
+URL: https://api.pexels.com/v1/statistics
+Method: GET
+
+[REQUEST QUERY PARAMETERS]
+-------------------------------------------------------------------------------
+None required. (Relies entirely on the Authorization token provided in headers).
+
+[SAMPLE RESPONSE PAYLOAD (JSON)]
+{
+  "id": "user_id_string_or_int",
+  "requests_this_month": 1250,
+  "requests_remaining": 23750
+}
+
+===============================================================================
+6. EXPLICIT AI AGENT IMPLEMENTATION RULES & HEURISTICS
+===============================================================================
+1. Header Invalidation Fault Protection:
+   Do NOT pass the API key in the URL string. The Pexels API will completely reject the request with a 401 Unauthorized error. You MUST inject the key strictly into the HTTP Request Headers using the exact key: `Authorization`.
+
+2. Video Quality Parsing Selection:
+   The `video_files` field is an array of objects representing different qualities (e.g., "hd", "sd"). AI Agents parsing this response MUST iterate through `video_files` and sort or select the desired file asset by combining the `quality`, `width`, and `file_type` fields.
+
+3. Pagination Convergence:
+   Monitor `total_results` inside the search/popular response. Program loops to increment the `page` index parameter. Halt execution safely when `(page * per_page) >= total_results` or when `video` list array is empty.
+
+4. Graceful Error & Throttling Mitigation:
+   If an HTTP 429 status is returned, the client wrapper must automatically read the `X-Ratelimit-Reset` header or apply exponential backoff. Do not continuous-retry without window exhaustion check.

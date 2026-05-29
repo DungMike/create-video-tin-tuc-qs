@@ -15,7 +15,7 @@ const FRAME_W = 1920;
 const FRAME_H = 1080;
 const DEFAULT_SAMPLE_TEXT = "Ukraina tung cơn mưa UAV tấn công Nga tối mặt đối phó";
 
-export function BannerTitleEditor({ decorImage, channelId, onSave, onClose }: BannerTitleEditorProps) {
+export function BannerTitleEditor({ decorImage, channelId: _channelId, onSave, onClose }: BannerTitleEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const bannerImgRef = useRef<HTMLImageElement | null>(null);

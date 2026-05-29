@@ -239,10 +239,24 @@ import type {
   Channel,
   ChannelGroup,
   ChannelsResponse,
+  CRTDemoResponse,
+  CRTPresetsResponse,
+  CRTSettings,
+  CreateStoryBatchRequest,
+  CreateStoryVideoRequest,
   DecorImage,
   DecorImagesResponse,
   DecorImageUploadResponse,
+  DownloadProgress,
   ParseScriptResponse,
+  StoryBatchProgress,
+  StoryLibraryResponse,
+  StoryLibraryStats,
+  StoryProviderVideo,
+  StoryProviderVideoSearchResponse,
+  StoryVideoProvider,
+  StoryVideoProgress,
+  WaveformOverlay,
 } from "@/types/api";
 
 export const getChannels = (groupId?: string) => {
@@ -426,3 +440,156 @@ export const getSegmentResources = (bulletinId: string, segmentType: SegmentType
   requestJson<{ segmentType: string; pool: { vid_clips: Array<{ path: string; relative_path: string }>; img_clips: Array<{ path: string; relative_path: string }> } }>(
     `/api/news-bulletin/${bulletinId}/segment-resources/${segmentType}`,
   );
+
+
+// === Story Video Library ===
+
+export async function getStoryLibrary(page = 1, perPage = 20, tags?: string[]) {
+  const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
+  if (tags?.length) params.set("tags", tags.join(","));
+  return requestJson<StoryLibraryResponse>(`/api/story-video/library?${params}`);
+}
+
+export async function downloadStoryVideos(links: string[], tags: string[] = []) {
+  return requestJson<{ sessionId: string }>("/api/story-video/library/download", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ links, tags }),
+  });
+}
+
+export async function uploadStoryVideos(files: File[], tags: string[] = []) {
+  const fd = new FormData();
+  files.forEach((f) => fd.append("files", f));
+  if (tags.length) fd.append("tags", JSON.stringify(tags));
+  return requestJson<{ sessionId: string }>("/api/story-video/library/upload", {
+    method: "POST",
+    body: fd,
+  });
+}
+
+export async function getStoryDownloadProgress(sessionId: string) {
+  return requestJson<DownloadProgress>(`/api/story-video/library/download-progress/${sessionId}`);
+}
+
+export async function searchStoryProviderVideos(
+  provider: StoryVideoProvider,
+  query: string,
+  page = 1,
+  perPage = 20,
+) {
+  const params = new URLSearchParams({ q: query, page: String(page), per_page: String(perPage) });
+  return requestJson<StoryProviderVideoSearchResponse>(`/api/story-video/video-search/${provider}?${params}`);
+}
+
+export async function importSelectedStoryVideos(items: StoryProviderVideo[], tags: string[] = []) {
+  return requestJson<{ sessionId: string }>("/api/story-video/library/import-selected", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      items: items.map((item) => ({
+        provider: item.provider,
+        id: item.id,
+        pageUrl: item.pageUrl,
+      })),
+      tags,
+    }),
+  });
+}
+
+export async function deleteStoryClip(clipId: string) {
+  return requestJson<void>(`/api/story-video/library/${clipId}`, { method: "DELETE" });
+}
+
+export async function updateStoryClipTags(clipId: string, tags: string[]) {
+  return requestJson<void>(`/api/story-video/library/${clipId}/tags`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tags }),
+  });
+}
+
+export async function getStoryLibraryStats() {
+  return requestJson<StoryLibraryStats>("/api/story-video/library/stats");
+}
+
+// === CRT Effect ===
+
+export async function getCRTPresets() {
+  return requestJson<CRTPresetsResponse>("/api/story-video/crt-presets");
+}
+
+export async function generateCRTDemo(settings: CRTSettings, sampleClipId?: string) {
+  return requestJson<CRTDemoResponse>("/api/story-video/crt-demo", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings, sampleClipId }),
+  });
+}
+
+// === Story Video ===
+
+export async function createStoryVideo(payload: CreateStoryVideoRequest, audioFile?: File) {
+  if (audioFile) {
+    const fd = new FormData();
+    fd.append("audio", audioFile);
+    fd.append("payload", JSON.stringify(payload));
+    return requestJson<{ storyId: string }>("/api/story-video/create", { method: "POST", body: fd });
+  }
+  return requestJson<{ storyId: string }>("/api/story-video/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getStoryVideoProgress(storyId: string) {
+  return requestJson<StoryVideoProgress>(`/api/story-video/${storyId}/progress`);
+}
+
+export async function getStoryVideoResult(storyId: string) {
+  return requestJson<{ videoPath: string }>(`/api/story-video/${storyId}/result`);
+}
+
+// === Story Video Batch ===
+
+export async function createStoryBatch(payload: CreateStoryBatchRequest, audioFiles?: File[]) {
+  const fd = new FormData();
+  fd.append("payload", JSON.stringify(payload));
+  if (audioFiles?.length) {
+    audioFiles.forEach((f) => fd.append("audio_files", f));
+  }
+  return requestJson<{ batchId: string }>("/api/story-video/batch/create", { method: "POST", body: fd });
+}
+
+export async function getStoryBatchProgress(batchId: string) {
+  return requestJson<StoryBatchProgress>(`/api/story-video/batch/${batchId}/progress`);
+}
+
+export async function retryStoryBatchFailed(batchId: string) {
+  return requestJson<{ batchId: string; retryCount: number }>(`/api/story-video/batch/${batchId}/retry-failed`, { method: "POST" });
+}
+
+// === Waveform Overlay ===
+
+export async function getWaveformOverlays() {
+  return requestJson<{ overlays: WaveformOverlay[] }>("/api/story-video/waveform-overlays");
+}
+
+export async function uploadWaveformOverlay(file: File) {
+  const fd = new FormData();
+  fd.append("file", file);
+  return requestJson<{ overlay: WaveformOverlay }>("/api/story-video/waveform-overlays", { method: "POST", body: fd });
+}
+
+export async function updateWaveformOverlay(id: string, payload: Partial<WaveformOverlay>) {
+  return requestJson<{ overlay: WaveformOverlay }>(`/api/story-video/waveform-overlays/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteWaveformOverlay(id: string) {
+  return requestJson<void>(`/api/story-video/waveform-overlays/${id}`, { method: "DELETE" });
+}

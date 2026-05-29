@@ -1,0 +1,187 @@
+# PIXABAY API SPECIFICATION & INTEGRATION GUIDE
+# Target Audience: AI Code Generation Agents & Developers
+# Output Format: Structured Text Reference (.txt)
+
+===============================================================================
+1. CORE ARCHITECTURE & SYSTEM OVERVIEW
+===============================================================================
+- Base URL (Images/Illustrations/Vectors): https://pixabay.com/api/
+- Base URL (Videos):                     https://pixabay.com/api/videos/
+- Protocol: HTTPS
+- HTTP Method: GET (All requests must be made via GET)
+- Content-Type: application/json (Responses are strictly returned as JSON objects)
+- Rate Limiting: 5,000 requests per hour.
+- Rate Limit Headers (Returned in every API response):
+  * X-RateLimit-Limit: The maximum number of requests allowed per hour.
+  * X-RateLimit-Remaining: The number of requests remaining in the current hour window.
+  * X-RateLimit-Reset: The remaining time in seconds until the rate limit resets.
+
+Authentication Requirement:
+- Authentication is handled exclusively via a query parameter named `key`.
+- Custom headers for authentication are NOT supported.
+- Pass the API key directly into the URL: `?key=YOUR_API_KEY_HERE`
+
+===============================================================================
+2. ENDPOINT 1: IMAGE SEARCH (PHOTOS, ILLUSTRATIONS, VECTORS)
+===============================================================================
+URL: https://pixabay.com/api/
+Method: GET
+
+[REQUEST QUERY PARAMETERS]
+-------------------------------------------------------------------------------
+Parameter    | Type    | Required | Default   | Description / Valid Values
+-------------------------------------------------------------------------------
+key          | string  | YES      | None      | Your unique Pixabay API key.
+q            | string  | NO       | None      | URL-encoded search term. Max 100 characters.
+             |         |          |           | Spaces replaced by '+' (e.g., 'yellow+flowers').
+lang         | string  | NO       | "en"      | Language code of search term: cs, da, de, en,
+             |         |          |           | es, fr, id, it, hu, nl, no, pl, pt, ro, sk, fi,
+             |         |          |           | sv, tr, vi, th, bg, ru, el, ja, ko, zh
+id           | string  | NO       | None      | Retrieve a specific image by its unique ID.
+             |         |          |           | Comma-separated list for multiple IDs.
+image_type   | string  | NO       | "all"     | "all", "photo", "illustration", "vector"
+orientation  | string  | NO       | "all"     | "all", "horizontal", "vertical"
+category     | string  | NO       | None      | "backgrounds", "fashion", "nature", "science",
+             |         |          |           | "education", "feelings", "health", "people",
+             |         |          |           | "religion", "places", "animals", "industry",
+             |         |          |           | "computer", "food", "sports", "transportation",
+             |         |          |           | "travel", "buildings", "business", "music"
+min_width    | integer | NO       | 0         | Minimum image width filter.
+min_height   | integer | NO       | 0         | Minimum image height filter.
+editors_choice| boolean| NO       | false     | "true" returns only editor's choice selections.
+safesearch   | boolean| NO       | false     | "true" filters out explicit/adult content.
+order        | string  | NO       | "popular" | "popular", "latest"
+page         | integer | NO       | 1         | Page number for pagination.
+per_page     | integer | NO       | 20        | Number of results per page. Valid: 3 - 200.
+callback     | string  | NO       | None      | JSONP callback function name.
+pretty       | boolean| NO       | false     | "true" indents the JSON response for readability.
+
+[SAMPLE RESPONSE PAYLOAD (JSON)]
+{
+  "total": 4692,
+  "totalHits": 500,
+  "hits": [
+    {
+      "id": 195893,
+      "pageURL": "https://pixabay.com/photos/tree-sunset-clouds-sky-silhouette-195893/",
+      "type": "photo",
+      "tags": "tree, sunset, clouds",
+      "previewURL": "https://cdn.pixabay.com/photo/2013/10/15/09/12/tree-195893_150.jpg",
+      "previewWidth": 150,
+      "previewHeight": 99,
+      "webformatURL": "https://pixabay.com/get/35b1c703_640.jpg",
+      "webformatWidth": 640,
+      "webformatHeight": 426,
+      "largeImageURL": "https://pixabay.com/get/ed6a9913_1280.jpg",
+      "imageWidth": 5245,
+      "imageHeight": 3497,
+      "imageSize": 2252202,
+      "views": 7654,
+      "downloads": 4321,
+      "collections": 234,
+      "likes": 567,
+      "comments": 89,
+      "user_id": 123456,
+      "user": "UsernameExample",
+      "userImageURL": "https://cdn.pixabay.com/user/2013/10/15/09/12/user_250.jpg"
+    }
+  ]
+}
+
+===============================================================================
+3. ENDPOINT 2: VIDEO SEARCH
+===============================================================================
+URL: https://pixabay.com/api/videos/
+Method: GET
+
+[REQUEST QUERY PARAMETERS]
+-------------------------------------------------------------------------------
+Parameter    | Type    | Required | Default   | Description / Valid Values
+-------------------------------------------------------------------------------
+key          | string  | YES      | None      | Your unique Pixabay API key.
+q            | string  | NO       | None      | URL-encoded search term. Max 100 characters.
+lang         | string  | NO       | "en"      | Language code (same supported list as images).
+id           | string  | NO       | None      | Retrieve a specific video by its unique ID.
+video_type   | string  | NO       | "all"     | "all", "film", "animation"
+category     | string  | NO       | None      | Same category list as image endpoint.
+min_width    | integer | NO       | 0         | Minimum video width filter.
+min_height   | integer | NO       | 0         | Minimum video height filter.
+editors_choice| boolean| NO       | false     | "true" returns only editor's choice videos.
+safesearch   | boolean| NO       | false     | "true" filters out explicit/adult content.
+order        | string  | NO       | "popular" | "popular", "latest"
+page         | integer | NO       | 1         | Page number for pagination.
+per_page     | integer | NO       | 20        | Number of results per page. Valid: 3 - 200.
+
+[SAMPLE RESPONSE PAYLOAD (JSON)]
+{
+  "total": 124,
+  "totalHits": 124,
+  "hits": [
+    {
+      "id": 125,
+      "pageURL": "https://pixabay.com/videos/id-125/",
+      "type": "animation",
+      "tags": "flowers, yellow, macro",
+      "duration": 22,
+      "videos": {
+        "large": {
+          "url": "https://player.vimeo.com/external/135123.hd.mp4?s=xxx",
+          "width": 1920,
+          "height": 1080,
+          "size": 6543210
+        },
+        "medium": {
+          "url": "https://player.vimeo.com/external/135123.hd.mp4?s=yyy",
+          "width": 1280,
+          "height": 720,
+          "size": 3456789
+        },
+        "small": {
+          "url": "https://player.vimeo.com/external/135123.sd.mp4?s=zzz",
+          "width": 960,
+          "height": 540,
+          "size": 1234567
+        },
+        "tiny": {
+          "url": "https://player.vimeo.com/external/135123.sd.mp4?s=aaa",
+          "width": 640,
+          "height": 360,
+          "size": 567890
+        }
+      },
+      "views": 15234,
+      "downloads": 8345,
+      "collections": 412,
+      "likes": 987,
+      "comments": 45,
+      "user_id": 98765,
+      "user": "VideoCreatorName",
+      "userImageURL": "https://cdn.pixabay.com/user/avatar.jpg"
+    }
+  ]
+}
+
+===============================================================================
+4. EXPLICIT AI AGENT IMPLEMENTATION RULES & HEURISTICS
+===============================================================================
+1. URL Encoding Rule:
+   Every dynamic value passed to the `q` parameter MUST be explicitly URL-encoded before sending the request. Spaces should be mapped to `+` or `%20`.
+
+2. Authentication Injection Rule:
+   Do NOT attempt to inject bearer tokens or API keys into headers like `Authorization` or `X-API-Key`. The system will throw a 401/403. Always inject via URL query params (`?key=...`).
+
+3. Pagination Heuristic:
+   To ingest complete datasets, monitor `totalHits`. Iterate through pages using the `page` parameter while setting `per_page=200` (max efficiency value) until `page * per_page >= totalHits`.
+
+4. Caching Compliance (Terms of Service):
+   Your application MUST cache API data and assets (images/videos) for at least 24 hours. Set native downstream caching headers to `Cache-Control: max-age=86400`.
+
+5. User Interface Attribution Rule:
+   If your AI code displays these assets on an end-user interface, you MUST provide a direct link back to Pixabay and credit the source as per the `pageURL` field.
+
+===============================================================================
+5. CORE ERROR CODES & HANDLING STRATEGY
+===============================================================================
+- HTTP 400: Bad Request (Invalid parameters or out-of-range configurations).
+- HTTP 429: Too Many Requests (Rate limit hit. Code must catch this status, parse the `X-RateLimit-Reset` header, and halt execution until the specified epoch/seconds expire).
+- HTTP 401 / 403: Invalid or missing API key parameter.

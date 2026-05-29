@@ -73,6 +73,10 @@ def _uploaded_audio_dir(batch_id: str) -> str:
     return os.path.join(_batch_dir(batch_id), "uploaded_audio")
 
 
+def _raw_video_output_dir() -> str:
+    return os.path.join(Config.OUTPUT_DIR, "raw-video")
+
+
 def _stable_seed(*parts) -> int:
     payload = "|".join(str(part) for part in parts)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -138,6 +142,7 @@ def _refresh_retry_flags(progress: dict):
         item.setdefault("audioRelativePath", None)
         item.setdefault("audioStatus", "none")
         item.setdefault("chunkSummary", {"completed": 0, "failed": 0, "total": 0})
+        item.setdefault("rawOutputVideo", None)
         item.setdefault("retryable", False)
         item.setdefault("failureCode", None)
         item.setdefault("failureStage", None)
@@ -315,6 +320,7 @@ class BatchPipelineRunner:
                         "percent": 0,
                         "message": "Cho xu ly...",
                         "outputVideo": None,
+                        "rawOutputVideo": None,
                         "jobId": None,
                         "error": None,
                         "audioRelativePath": None,
@@ -575,6 +581,29 @@ class BatchPipelineRunner:
             1 for existing_item in self.progress["items"] if existing_item["status"] in ("completed", "failed")
         )
         self._save()
+
+    def _copy_raw_video_output(self, source_path: str, output_name: str) -> str | None:
+        """Copy the rendered base video before PiP/source-text overlays.
+
+        This artifact is optional for the main pipeline; copy failures are
+        logged and ignored so the normal overlay/final render flow can finish.
+        """
+        try:
+            if not source_path or not os.path.isfile(source_path):
+                logger.warning(f"[BatchPipeline] Raw video source not found: {source_path}")
+                return None
+
+            safe_name = Path(str(output_name or "")).name.strip() or f"video_{uuid.uuid4().hex[:8]}"
+            raw_dir = _raw_video_output_dir()
+            os.makedirs(raw_dir, exist_ok=True)
+            raw_output_path = os.path.join(raw_dir, f"{safe_name}.mp4")
+            shutil.copy2(source_path, raw_output_path)
+            raw_relative = storage_relative_path(raw_output_path)
+            logger.info(f"[BatchPipeline] Raw no-overlay video copied: {raw_relative}")
+            return raw_relative
+        except Exception as exc:
+            logger.warning(f"[BatchPipeline] Cannot copy raw no-overlay video: {exc}", exc_info=True)
+            return None
 
     def _update_shared_image_pool_progress(
         self,
@@ -1150,6 +1179,7 @@ class BatchPipelineRunner:
             "selected_library_asset_ids": [],
             "clip_tags": self.source_video_clip_tags,
             "output_video": None,
+            "raw_output_video": None,
             "batch_id": self.batch_id,
             "batch_item_index": index,
             "batch_output_name": output_name,
@@ -1208,6 +1238,17 @@ class BatchPipelineRunner:
                 event.get("message", f"Dang render {output_name}..."),
             )
 
+        raw_output_relative = None
+
+        def _capture_pre_overlay_video(pre_overlay_path: str):
+            nonlocal raw_output_relative
+            raw_output_relative = self._copy_raw_video_output(pre_overlay_path, output_name)
+            if raw_output_relative:
+                manifest["raw_output_video"] = raw_output_relative
+                self.progress["items"][index]["rawOutputVideo"] = raw_output_relative
+                save_job_manifest(job_id, manifest)
+                self._save()
+
         output_path = renderer.render(
             timeline_data,
             audio_path,
@@ -1215,6 +1256,7 @@ class BatchPipelineRunner:
             progress_callback=_render_progress,
             decor_video_path=decor_path,
             source_text_override=item_source_text,
+            pre_overlay_callback=_capture_pre_overlay_video,
         )
         render_elapsed = f"{(_time.time() - render_start) * 1000:.0f}ms"
         if not output_path:
@@ -1234,6 +1276,8 @@ class BatchPipelineRunner:
 
         output_relative = storage_relative_path(output_path)
         manifest["output_video"] = output_relative
+        if raw_output_relative:
+            manifest["raw_output_video"] = raw_output_relative
         save_job_manifest(job_id, manifest)
         cleanup_job_files(job_id)
 

@@ -1,0 +1,14 @@
+# Core
+pyyaml>=6.0
+python-dotenv>=1.0
+pydantic>=2.0
+
+# Mining (Phase 2)
+yt-dlp>=2024.01.01
+google-genai>=1.0.0
+
+# Crawling base (Phase 3 — pre-installed for base_crawler)
+requests>=2.31
+
+# Logging
+rich>=13.0

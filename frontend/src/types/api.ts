@@ -323,6 +323,11 @@ export interface BatchSourceSetDetailResponse {
   availableTags: string[];
 }
 
+export interface BatchSourceTagResponse {
+  clipTags: Record<string, string[]>;
+  availableTags: string[];
+}
+
 export interface BatchLibrarySourcesResponse {
   clips: ReviewClip[];
   assets: LibraryAsset[];
@@ -430,7 +435,9 @@ export interface Channel {
   channelName: string;
   groupId: string;
   voiceId: string;
+  introVideoPath?: string;
   transitionVideoPath: string;
+  outroVideoPath?: string;
   decorVideoId: string;
   sourceText: string;
   isActive: boolean;
@@ -453,6 +460,7 @@ export interface ParsedNewsItem {
 
 export interface ParsedScript {
   intro: { text: string };
+  detailIntro?: { text: string };
   newsItems: ParsedNewsItem[];
   outro: { text: string };
 }
@@ -507,6 +515,7 @@ export interface BulletinDetailResponse {
   newsCount: number;
   resourceSummary: BulletinResourceSummary;
   resourceDetails: BulletinResourceDetails;
+  segmentResourceSummary?: Record<string, { vidClips: number; images: number }>;
   status: string;
   channels: Record<string, BulletinChannelProgress>;
   createdAt: string;
@@ -539,5 +548,165 @@ export interface BulletinListItem {
   channelCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+// --- Story Video ---
+
+export type StoryVideoProvider = "pixabay" | "pexels";
+
+export interface StoryClip {
+  id: string;
+  sourceType: StoryVideoProvider | "local" | "local_upload" | "direct";
+  sourceName: string;
+  relativePath: string;
+  duration: number;
+  tags: string[];
+  createdAt: string;
+}
+
+export interface StoryProviderVideo {
+  provider: StoryVideoProvider;
+  id: string;
+  title: string;
+  tags: string;
+  thumbnailUrl: string;
+  previewUrl: string;
+  pageUrl: string;
+  duration: number;
+  width: number;
+  height: number;
+  author: string;
+}
+
+export interface StoryProviderVideoSearchResponse {
+  provider: StoryVideoProvider;
+  items: StoryProviderVideo[];
+  total: number;
+  page: number;
+  perPage: number;
+}
+
+export interface StoryLibraryResponse {
+  clips: StoryClip[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export interface StoryLibraryStats {
+  totalClips: number;
+  totalDuration: number;
+  bySource: Record<string, number>;
+}
+
+export interface DownloadProgress {
+  sessionId: string;
+  status: "downloading" | "splitting" | "completed" | "failed";
+  current: number;
+  total: number;
+  message: string;
+  addedClips: number;
+}
+
+export interface CRTSettings {
+  noiseStrength: number;
+  scanlineOpacity: number;
+  vignetteAngle: string;
+  colorBleed: boolean;
+  flickerIntensity: number;
+}
+
+export interface CRTPreset {
+  name: string;
+  label: string;
+  settings: CRTSettings;
+}
+
+export interface CRTPresetsResponse {
+  presets: CRTPreset[];
+  currentConfig: CRTSettings;
+}
+
+export interface CRTDemoResponse {
+  demoPath: string;
+}
+
+export interface CreateStoryVideoRequest {
+  inputType: "audio_file" | "script_url";
+  inputValue: string;
+  outputName: string;
+  clipTags?: string[];
+  crtSettings?: CRTSettings;
+  waveformOverlayId?: string;
+  voiceId?: string;
+}
+
+export interface StoryVideoProgress {
+  storyId: string;
+  status: "pending" | "running" | "processing" | "completed" | "failed";
+  stage: string;
+  percent: number;
+  message: string;
+  outputName: string;
+  result?: { videoPath: string };
+  error?: string;
+}
+
+export interface CreateStoryBatchItem {
+  id: string;
+  inputType: "audio_file" | "script_url";
+  inputValue: string;
+  outputName: string;
+}
+
+export interface CreateStoryBatchRequest {
+  items: CreateStoryBatchItem[];
+  sharedConfig: {
+    clipTags?: string[];
+    crtSettings?: CRTSettings;
+    waveformOverlayId?: string;
+    voiceId?: string;
+  };
+}
+
+export interface StoryBatchItemProgress {
+  id: string;
+  outputName: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  stage?: string;
+  percent?: number;
+  message?: string;
+  result?: { videoPath: string };
+  error?: string;
+}
+
+export interface StoryBatchProgress {
+  batchId: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  totalItems: number;
+  completedItems: number;
+  failedItems: number;
+  currentIndex: number;
+  items: StoryBatchItemProgress[];
+}
+
+export interface WaveformOverlay {
+  id: string;
+  name: string;
+  filename: string;
+  processedFilename?: string;
+  relativePath?: string;
+  processedRelativePath?: string;
+  durationSeconds: number;
+  isDefault?: boolean;
+  keyColor?: string;
+  similarity?: number;
+  blend?: number;
+  scaleWidth?: number;
+  position?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
+  margin?: number;
+  createdAt: string;
+  updatedAt?: string;
 }
 

@@ -1,0 +1,149 @@
+# News Intelligence Service — Configuration
+# All settings centralized here. Add/remove sources without code changes.
+# API keys use ${ENV_VAR} syntax — resolved from .env at runtime.
+
+# === Script 1 & 2: Mining ===
+mining:
+  # yt-dlp settings for transcript extraction
+  transcript:
+    preferred_languages: ["vi", "en", "ru", "uk"]
+    fallback_auto_generated: true
+  # Gemini 2.5 Flash for entity extraction
+  llm:
+    provider: "gemini"
+    model: "gemini-2.5-flash"
+    api_key: "${GEMINI_API_KEY}"
+    max_tokens: 8192
+    temperature: 0.1
+
+# === Script 2.5: Smart Cache ===
+asset_library:
+  min_stock_before_skip: 50
+  stock_stale_days: 30
+  news_stale_hours: 6
+  db_path: "storage/asset_index.db"
+
+# === Script 3: Search Discovery ===
+search:
+  ddgs_domains:
+    news:
+      - "reuters.com"
+      - "apnews.com"
+      - "france24.com"
+      - "breakingdefense.com"
+    analysis:
+      - "rusi.org"
+      - "warontherocks.com"
+      - "thedrive.com/the-war-zone"
+      - "csis.org"
+    weapons_db:
+      - "janes.com"
+      - "military-today.com"
+      - "oryxspioenkop.com"
+      - "sipri.org"
+    maps:
+      - "understandingwar.org"
+      - "liveuamap.com"
+    vietnam_news:
+      - "qdnd.vn"
+      - "vov.vn"
+      - "vnanet.vn"
+    vietnam_audience:
+      - "soha.vn"
+      - "vnexpress.net"
+      - "dantri.com.vn"
+    nato:
+      - "natochannel.tv"
+
+  api_keys:
+    dvids: "${DVIDS_API_KEY}"
+    pexels: "${PEXELS_API_KEY}"
+    pixabay: "${PIXABAY_API_KEY}"
+    flickr_key: "${FLICKR_API_KEY}"
+    flickr_secret: "${FLICKR_API_SECRET}"
+    nasa_firms: "${FIRMS_MAP_KEY}"
+    reddit_client_id: "${REDDIT_CLIENT_ID}"
+    reddit_client_secret: "${REDDIT_CLIENT_SECRET}"
+
+# === Script 3: Social Media ===
+telegram:
+  api_id: "${TELEGRAM_API_ID}"
+  api_hash: "${TELEGRAM_API_HASH}"
+  channels:
+    overview: ["DeepStateUA", "Rybar", "intelslava", "Militaryland"]
+    verification: ["UAWeaponsTracker", "WarSpotting", "Oryxua"]
+    footage: ["combatfootage_tg", "UkrainianFront", "militarywave"]
+    analysis: ["JominiW", "wartranslated"]
+
+reddit:
+  subreddits:
+    footage: ["CombatFootage"]
+    photos: ["MilitaryPorn", "WarplanePorn"]
+    analysis: ["CredibleDefense", "LessCredibleDefence"]
+
+bluesky:
+  handle: "${BSKY_HANDLE}"
+  app_password: "${BSKY_APP_PASSWORD}"
+
+# === Crawl Settings ===
+crawl_settings:
+  default_delay_seconds: 2
+  max_retries: 3
+  per_source_overrides:
+    ddgs:
+      delay: 4
+      max_retries: 5
+      backoff_multiplier: 2
+      max_queries_per_session: 40
+    reddit:
+      delay: 1
+      max_retries: 3
+      backoff_multiplier: 1.5
+    telegram:
+      delay: 0.5
+      max_retries: 2
+      backoff_multiplier: 1
+    pexels:
+      delay: 1
+      max_retries: 3
+      backoff_multiplier: 1.5
+    bluesky:
+      delay: 1
+      max_retries: 3
+      backoff_multiplier: 1.5
+
+# === Script 4: Quality & License ===
+quality_scoring:
+  resolution:
+    "4K": 100
+    "1080p": 70
+    "720p": 40
+    "<720p": 10
+  source_reliability:
+    tier1: { score: 30, sources: ["dvids", "defense.gov", "nara"] }
+    tier2: { score: 25, sources: ["reuters", "ap", "afp"] }
+    tier3: { score: 20, sources: ["wikimedia", "flickr", "pexels", "pixabay"] }
+    tier4: { score: 15, sources: ["reddit", "telegram", "bluesky"] }
+  license_tiers:
+    public_domain:
+      monetizable: true
+      sources: ["dvids", "defense.gov", "nara", "archive.org", "nasa"]
+    cc_by:
+      monetizable: true
+      attribution_required: true
+      sources: ["wikimedia", "flickr_cc", "pixabay", "pexels"]
+    editorial:
+      monetizable: false
+      fair_use_only: true
+      sources: ["reuters", "ap", "afp", "janes", "isw"]
+    unknown:
+      monetizable: false
+      reference_only: true
+      sources: ["reddit", "telegram", "bluesky"]
+
+# === Storage ===
+storage:
+  base_dir: "storage"
+  assets_dir: "storage/assets"
+  crawl_logs_dir: "storage/crawl_logs"
+  failed_urls_path: "storage/failed_urls.json"

@@ -9,6 +9,8 @@ import { NewsBulletinPage } from "@/pages/NewsBulletinPage";
 import { ResourcesPage } from "@/pages/ResourcesPage";
 import { ResultPage } from "@/pages/ResultPage";
 import { ReviewPage } from "@/pages/ReviewPage";
+import { StoryVideoPage } from "@/pages/StoryVideoPage";
+import { StoryVideoSettingsPage } from "@/pages/StoryVideoSettingsPage";
 import { UploadPage } from "@/pages/UploadPage";
 import { VoicesPage } from "@/pages/VoicesPage";
 
@@ -64,6 +66,14 @@ export const router = createBrowserRouter([
   {
     path: "/channels",
     element: <ChannelManagerPage />,
+  },
+  {
+    path: "/story-video",
+    element: <StoryVideoPage />,
+  },
+  {
+    path: "/story-video/settings",
+    element: <StoryVideoSettingsPage />,
   },
 ]);
 

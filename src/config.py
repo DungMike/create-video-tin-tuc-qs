@@ -136,3 +136,30 @@ class Config:
     ALLOWED_AUDIO_EXTENSIONS = {"mp3", "wav", "m4a", "aac", "flac", "ogg"}
     ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
     ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "mkv", "webm"}
+
+    # --- Story Video ---
+    PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "")
+    PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
+    STORY_CLIP_DURATION = int(os.getenv("STORY_CLIP_DURATION", "5"))
+    STORY_LIBRARY_DIR = os.path.join(STORAGE_DIR, "story_library")
+    STORY_VIDEO_DIR = os.path.join(STORAGE_DIR, "story_video")
+    STORY_RAW_DIR = os.path.join(STORAGE_DIR, "story_raw_videos")
+    STORY_LIBRARY_PAGE_SIZE = int(os.getenv("STORY_LIBRARY_PAGE_SIZE", "20"))
+
+    # --- CRT Effect ---
+    CRT_NOISE_STRENGTH = int(os.getenv("CRT_NOISE_STRENGTH", "15"))
+    CRT_SCANLINE_OPACITY = float(os.getenv("CRT_SCANLINE_OPACITY", "0.06"))
+    CRT_VIGNETTE = os.getenv("CRT_VIGNETTE", "PI/5")
+    CRT_COLOR_BLEED = os.getenv("CRT_COLOR_BLEED", "true").lower() == "true"
+    CRT_FLICKER = float(os.getenv("CRT_FLICKER", "0.02"))
+    CRT_EFFECT_DIR = os.path.join(STORAGE_DIR, "crt_effect")
+
+    # --- Waveform Overlay ---
+    WAVEFORM_OVERLAY_DIR = os.path.join(STORAGE_DIR, "waveform_overlays")
+    WAVEFORM_OVERLAY_SCALE = float(os.getenv("WAVEFORM_OVERLAY_SCALE", "0.2"))
+    WAVEFORM_OVERLAY_POSITION = os.getenv("WAVEFORM_OVERLAY_POSITION", "bottom_right")
+    WAVEFORM_OVERLAY_MARGIN = int(os.getenv("WAVEFORM_OVERLAY_MARGIN", "15"))
+    WAVEFORM_OVERLAY_KEY_COLOR = os.getenv("WAVEFORM_OVERLAY_KEY_COLOR", "0x2baa40")
+    WAVEFORM_OVERLAY_KEY_SIMILARITY = float(os.getenv("WAVEFORM_OVERLAY_KEY_SIMILARITY", "0.12"))
+    WAVEFORM_OVERLAY_KEY_BLEND = float(os.getenv("WAVEFORM_OVERLAY_KEY_BLEND", "0.03"))
+    WAVEFORM_OVERLAY_WIDTH = int(os.getenv("WAVEFORM_OVERLAY_WIDTH", "420"))

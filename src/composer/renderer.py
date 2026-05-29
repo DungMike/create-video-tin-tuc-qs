@@ -857,6 +857,7 @@ class Renderer:
         progress_callback=None,
         decor_video_path: str | None = None,
         source_text_override: str | None = None,
+        pre_overlay_callback=None,
     ):
         self.progress_callback = progress_callback
         self.decor_video_path = decor_video_path
@@ -886,6 +887,9 @@ class Renderer:
                 render_ok = self._run_chunked_render(segments, audio_path, audio_duration, target)
             else:
                 render_ok = self._run_single_pass_render(segments, audio_path, audio_duration, target)
+
+        if render_ok and pre_overlay_callback:
+            pre_overlay_callback(target)
 
         if render_ok and has_overlays:
             render_ok = self._apply_overlays(target, audio_duration, output_file)

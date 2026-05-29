@@ -1,1 +1,1 @@
-Backend is complete (3 files updated). Frontend page is the remaining task — it's a large file. I'll write it in the next turn. Ready to continue?
+Let me first understand the current batch pipeline flow by examining the file.

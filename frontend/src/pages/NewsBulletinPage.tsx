@@ -155,7 +155,7 @@ export function NewsBulletinPage() {
         setSelectedChannelIds(detail.channelIds);
         // Sync segment resource summary from bulletin detail if available
         if (detail.segmentResourceSummary) {
-          setSegmentResSummary(detail.segmentResourceSummary as SegmentResourceSummary);
+          setSegmentResSummary(detail.segmentResourceSummary as unknown as SegmentResourceSummary);
         }
 
         if (detail.status !== "draft") {
