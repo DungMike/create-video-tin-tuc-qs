@@ -256,6 +256,9 @@ import type {
   StoryProviderVideoSearchResponse,
   StoryVideoProvider,
   StoryVideoProgress,
+  TVNoiseOverlay,
+  TVNoiseOverlayJob,
+  TVNoiseOverlayUploadResponse,
   WaveformOverlay,
 } from "@/types/api";
 
@@ -524,6 +527,50 @@ export async function generateCRTDemo(settings: CRTSettings, sampleClipId?: stri
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ settings, sampleClipId }),
+  });
+}
+
+// === TV Noise Overlay ===
+
+export async function getTVNoiseOverlays() {
+  return requestJson<{ overlays: TVNoiseOverlay[] }>("/api/story-video/tv-noise-overlays");
+}
+
+export async function uploadTVNoiseOverlay(file: File) {
+  const fd = new FormData();
+  fd.append("file", file);
+  return requestJson<TVNoiseOverlayUploadResponse>("/api/story-video/tv-noise-overlays", { method: "POST", body: fd });
+}
+
+export async function importTVNoiseOverlayFromYoutube(url: string, name?: string) {
+  return requestJson<TVNoiseOverlayUploadResponse>("/api/story-video/tv-noise-overlays/import-youtube", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, name }),
+  });
+}
+
+export async function getTVNoiseOverlayJob(sessionId: string) {
+  return requestJson<TVNoiseOverlayJob>(`/api/story-video/tv-noise-overlays/jobs/${sessionId}`);
+}
+
+export async function updateTVNoiseOverlay(id: string, payload: Partial<TVNoiseOverlay>) {
+  return requestJson<{ overlay: TVNoiseOverlay }>(`/api/story-video/tv-noise-overlays/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteTVNoiseOverlay(id: string) {
+  return requestJson<void>(`/api/story-video/tv-noise-overlays/${id}`, { method: "DELETE" });
+}
+
+export async function generateTVNoiseDemo(overlayId?: string, sampleClipId?: string) {
+  return requestJson<CRTDemoResponse>("/api/story-video/tv-noise-demo", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ overlayId, sampleClipId }),
   });
 }
 

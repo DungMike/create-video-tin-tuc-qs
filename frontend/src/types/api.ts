@@ -632,6 +632,42 @@ export interface CRTDemoResponse {
   demoPath: string;
 }
 
+export interface TVNoiseOverlay {
+  id: string;
+  name: string;
+  filename: string;
+  processedFilename?: string;
+  relativePath?: string;
+  processedRelativePath?: string;
+  durationSeconds: number;
+  status: "processing" | "ready" | "failed";
+  enabled: boolean;
+  order: number;
+  opacity: number;
+  tolerance: number;
+  softness: number;
+  sourceUrl?: string;
+  error?: string | null;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface TVNoiseOverlayJob {
+  sessionId: string;
+  status: "processing" | "downloading" | "completed" | "failed";
+  action: "upload" | "import_youtube" | string;
+  current: number;
+  total: number;
+  message: string;
+  overlayId?: string;
+  error?: string | null;
+}
+
+export interface TVNoiseOverlayUploadResponse {
+  sessionId: string;
+  overlay: TVNoiseOverlay;
+}
+
 export interface CreateStoryVideoRequest {
   inputType: "audio_file" | "script_url";
   inputValue: string;

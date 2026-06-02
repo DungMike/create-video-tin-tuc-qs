@@ -163,3 +163,10 @@ class Config:
     WAVEFORM_OVERLAY_KEY_SIMILARITY = float(os.getenv("WAVEFORM_OVERLAY_KEY_SIMILARITY", "0.12"))
     WAVEFORM_OVERLAY_KEY_BLEND = float(os.getenv("WAVEFORM_OVERLAY_KEY_BLEND", "0.03"))
     WAVEFORM_OVERLAY_WIDTH = int(os.getenv("WAVEFORM_OVERLAY_WIDTH", "420"))
+
+    # --- Story TV Noise Overlay ---
+    STORY_TV_NOISE_OVERLAY_DIR = os.path.join(STORAGE_DIR, "story_tv_noise_overlays")
+    STORY_TV_NOISE_TOLERANCE = float(os.getenv("STORY_TV_NOISE_TOLERANCE", "0.08"))
+    STORY_TV_NOISE_SOFTNESS = float(os.getenv("STORY_TV_NOISE_SOFTNESS", "0.02"))
+    STORY_TV_NOISE_OPACITY = float(os.getenv("STORY_TV_NOISE_OPACITY", "0.35"))
+    STORY_TV_NOISE_DEMO_SECONDS = float(os.getenv("STORY_TV_NOISE_DEMO_SECONDS", "3"))

@@ -1,1 +1,143 @@
-Let me first understand the current batch pipeline flow by examining the file.
+Phân tích & Cải tiến Color Grading TV 1990s cho Story Video
+Tóm tắt luồng hiện tại
+Pipeline Flow
+Bước Preprocess (1 lần)Source video nền đenlumakey→alpha → qtrle MOVopacity via colorchannelmixerAudio Input (file/TTS)Prepare AudioSelect 5s Clips từ LibraryConcat clips + mux audio_apply_story_overlays()Finalize → output/story-video/TV Noise Overlay #1 (lumakey alpha)TV Noise Overlay #2 (lumakey alpha)Waveform Overlay (chromakey alpha)
+Cách overlay hiện tại hoạt động
+Preprocess (story_tv_noise_overlays.py:126-163):
+scale → crop → fps → format=rgba → lumakey(0, tolerance, softness) → colorchannelmixer(aa=opacity) → format=argb → qtrle MOV
+Overlay vào video (story_video_pipeline.py:473-592):
+[input:v] → [tvnoise0] overlay(0:0) → [tvnoise1] overlay(0:0) → [waveform] overlay(x:y) → format=yuv420p → nvenc
+Vấn đề hiện tại
+Overlay hiện chỉ thêm noise texture lên trên video gốc, nhưng không thay đổi color grading của video nền. Video gốc giữ nguyên màu sắc hiện đại (xanh tươi, sắc nét) → không giống TV cũ 1990s.
+
+Phân tích kỹ thuật: Color Grading TV 1990s
+Đặc điểm màu sắc TV CRT 1990s thực tế
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Đặc tínhMô tảFFmpeg filterDesaturatedĐộ bão hòa thấp hơn (~60-70%)eq=saturation=0.65Warm sepia tintÁm vàng/nâu nhẹcolorbalance=rs=0.08:gs=0.04:bs=-0.08Reduced contrastBlacks không sâu, whites không sángeq=contrast=0.85:brightness=0.03Slight color shiftGreens bị muted, reds ấm hơncolorchannelmixerReduced sharpnessHơi mờ (blur nhẹ, không sắc nét 4K)unsharp=3:3:-0.5:3:3:-0.5Gamma liftShadows nhẹ hơn (lifted blacks)curves=m=0:0.05|1:0.95
+3 Options đề xuất
+
+Option A: Color Grade tích hợp vào filter chain overlay (⭐ Khuyên dùng)
+Ý tưởng: Thêm color grading filters trước khi overlay noise, trong cùng lệnh FFmpeg.
+[0:v] → eq(saturation,contrast) → colorbalance → curves → [colored_base][colored_base] → [tvnoise0] overlay → [tvnoise1] overlay → [waveform] overlay → format=yuv420p
+Ưu điểm:
+
+✅ 1 pass duy nhất - không tăng thời gian render
+✅ Không file trung gian - không tốn disk
+✅ Dễ tùy chỉnh - thêm/bớt filter trong chain
+✅ Tương thích NVENC - vẫn dùng GPU encode
+
+Nhược điểm:
+
+⚠️ Filter chain dài hơn → CPU decode load tăng ~5-10%
+⚠️ Cần sửa _apply_story_overlays() trong pipeline
+
+Hiệu suất: ~5% tăng thời gian so với hiện tại
+
+Option B: Semi-transparent color overlay layer
+Ý tưởng: Tạo một lớp màu bán trong suốt (sepia/amber) overlay lên video gốc cùng với noise.
+[0:v] → [base]color=c=#8B7355:s=1920x1080,format=rgba,colorchannelmixer=aa=0.12 → [tint_layer][base][tint_layer] overlay=0:0 → [tinted][tinted] → [tvnoise0] overlay → ...
+Ưu điểm:
+
+✅ Có thể tạo thành overlay file riêng (dùng lại)
+✅ Opacity dễ điều chỉnh
+
+Nhược điểm:
+
+❌ Chỉ thêm tint, không giảm saturation hay contrast
+❌ Không authentic - TV cũ không chỉ đơn thuần là tint màu
+❌ Cần thêm 1 input stream → phức tạp hơn
+
+
+Option C: Kết hợp color grade + noise vào 1 lớp preprocess
+Ý tưởng: Sửa lại preprocess bước alpha MOV để bake color tint vào noise overlay.
+Preprocess: source → lumakey → alpha MOV (có sẵn color tint overlay)Pipeline: [0:v] eq+colorbalance → [noise_with_tint] overlay → done
+Ưu điểm:
+
+✅ Noise + color tint = 1 lớp duy nhất
+✅ Pipeline overlay đơn giản
+
+Nhược điểm:
+
+❌ Không thể tách rời color grade và noise
+❌ Mỗi thay đổi color → phải regenerate alpha MOV
+❌ Vẫn cần eq/colorbalance cho video base (không thể chỉ overlay)
+
+
+Đề xuất: Option A + thêm color grade presets vào Settings UI
+Proposed Changes
+
+Backend: FFmpeg Color Grading
+[MODIFY] story_video_pipeline.py
+Sửa _apply_story_overlays() để thêm color grading filters vào filter chain:
+python# Thêm color grading presetsCOLOR_GRADE_PRESETS = {    "none": "",    "90s_broadcast": (        "eq=saturation=0.62:contrast=0.88:brightness=0.03:gamma=1.05,"        "colorbalance=rs=0.08:gs=0.04:bs=-0.08:rm=0.04:gm=0.02:bm=-0.05,"        "curves=m='0/0.06|0.5/0.48|1/0.92',"        "unsharp=3:3:-0.4:3:3:-0.4"    ),    "vhs_warm": (        "eq=saturation=0.55:contrast=0.82:brightness=0.05:gamma=1.08,"        "colorbalance=rs=0.12:gs=0.06:bs=-0.12:rm=0.06:gm=0.02:bm=-0.08,"        "curves=m='0/0.10|0.5/0.50|1/0.88',"        "unsharp=3:3:-0.6:3:3:-0.6"    ),    "faded_film": (        "eq=saturation=0.50:contrast=0.80:brightness=0.04,"        "colorbalance=rs=0.05:gs=0.05:bs=0.02:rm=0.03:gm=0.03:bm=0.01,"        "curves=m='0/0.08|0.25/0.22|0.75/0.72|1/0.90'"    ),}
+Trong filter chain, insert trước overlay:
+[0:v] → {color_grade_filters} → [base] → overlay noise layers...
+
+[NEW] Test script nhanh
+Tạo script Python test 10s video với 3 presets, export ra storage/output/story-video/.
+
+Frontend: Settings UI (Phase 2 - optional)
+[MODIFY] StoryVideoSettingsPage.tsx
+Thêm dropdown chọn color grade preset + preview.
+
+Verification Plan
+Test nhanh
+
+Tạo script test FFmpeg chạy 3 presets trên clip 10s từ story library
+Export 3 file: 90s_broadcast_10s.mp4, vhs_warm_10s.mp4, faded_film_10s.mp4
+So sánh file size, thời gian encode, chất lượng visual
+
+Automated Tests
+bashpython test_color_grade.py
+
+Open Questions
+
+IMPORTANT
+Preset mặc định: Nên set 90s_broadcast làm default cho tất cả story video, hay để user chọn qua Settings?
+
+
+IMPORTANT
+Tích hợp depth: Bạn muốn tôi chỉ tạo test nhanh các option color grading FFmpeg trước (export video ra xem), hay muốn tích hợp luôn vào pipeline + Settings UI?
+
+
+NOTE
+Video test: Tôi sẽ lấy 1 clip 5s từ story library, loop thành 10s hoặc dùng clip có sẵn để test. Nếu bạn muốn test trên video cụ thể khác, hãy cho biết path.

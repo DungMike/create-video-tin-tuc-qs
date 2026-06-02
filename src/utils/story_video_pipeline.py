@@ -87,6 +87,7 @@ class StoryVideoPipelineRunner:
         self.output_name = config_dict.get("output_name", "")
         self.clip_tags = config_dict.get("clip_tags", [])
         self.voice_id = config_dict.get("voice_id", "")
+        self.waveform_overlay_id = str(config_dict.get("waveform_overlay_id", "") or "").strip()
 
         self._lock = threading.Lock()
         self.progress = {
@@ -179,8 +180,8 @@ class StoryVideoPipelineRunner:
                 )
                 return None
 
-            self._update_progress("waveform_overlay", 90, "Dang ap dung song am...")
-            output_video = self._apply_default_waveform_overlay(rendered_video, audio_duration)
+            self._update_progress("story_overlays", 90, "Dang ap dung TV noise va song am...")
+            output_video = self._apply_story_overlays(rendered_video, audio_duration)
             if not output_video:
                 return None
 
@@ -466,6 +467,127 @@ class StoryVideoPipelineRunner:
             "Ap dung song am that bai.",
             status="failed",
             error="Waveform overlay failed.",
+        )
+        return None
+
+    def _apply_story_overlays(self, current_video: str, audio_duration: float) -> str | None:
+        """Overlay TV noise layers and the configured waveform in a single FFmpeg pass."""
+        from src.utils.story_tv_noise_overlays import (
+            get_active_tv_noise_overlays,
+            processed_abs_path as tv_noise_processed_abs_path,
+        )
+        from src.utils.waveform_overlays import (
+            get_default_waveform_overlay,
+            load_waveform_index,
+            overlay_position_expr,
+            processed_abs_path as waveform_processed_abs_path,
+        )
+
+        tv_noise_records = get_active_tv_noise_overlays()
+
+        waveform_record = None
+        if self.waveform_overlay_id:
+            waveform_records = load_waveform_index().get("overlays", [])
+            waveform_record = next(
+                (item for item in waveform_records if item.get("id") == self.waveform_overlay_id),
+                None,
+            )
+        if not waveform_record:
+            waveform_record = get_default_waveform_overlay()
+
+        waveform_path = waveform_processed_abs_path(waveform_record) if waveform_record else None
+        if waveform_record and not waveform_path:
+            logger.warning(f"[StoryPipeline:{self.story_id}] Waveform processed file is missing.")
+            waveform_record = None
+
+        tv_noise_paths: list[tuple[dict, str]] = []
+        for record in tv_noise_records:
+            processed_path = tv_noise_processed_abs_path(record)
+            if processed_path:
+                tv_noise_paths.append((record, processed_path))
+
+        if not tv_noise_paths and not waveform_path:
+            logger.info(f"[StoryPipeline:{self.story_id}] No story overlays configured.")
+            return current_video
+
+        temp = _temp_dir(self.story_id)
+        output_path = os.path.join(temp, f"story_overlays_{self.story_id}.mp4")
+        cmd = ["ffmpeg", "-y", "-i", current_video]
+
+        for _record, overlay_path in tv_noise_paths:
+            cmd.extend(["-stream_loop", "-1", "-i", overlay_path])
+
+        waveform_input_index = None
+        if waveform_path:
+            waveform_input_index = 1 + len(tv_noise_paths)
+            cmd.extend(["-stream_loop", "-1", "-i", waveform_path])
+
+        filter_parts: list[str] = []
+        chain_label = "[0:v]"
+        for index, (_record, _overlay_path) in enumerate(tv_noise_paths):
+            input_index = index + 1
+            noise_label = f"tvnoise{index}"
+            out_label = f"tvnoiseout{index}"
+            filter_parts.append(f"[{input_index}:v]setpts=PTS-STARTPTS[{noise_label}]")
+            filter_parts.append(
+                f"{chain_label}[{noise_label}]overlay=0:0:format=auto:eof_action=repeat:eval=init[{out_label}]"
+            )
+            chain_label = f"[{out_label}]"
+
+        if waveform_path and waveform_record and waveform_input_index is not None:
+            x_expr, y_expr = overlay_position_expr(waveform_record)
+            filter_parts.append(f"[{waveform_input_index}:v]setpts=PTS-STARTPTS[wave]")
+            filter_parts.append(
+                f"{chain_label}[wave]overlay={x_expr}:{y_expr}:format=auto:eof_action=repeat:eval=init[waveout]"
+            )
+            chain_label = "[waveout]"
+
+        filter_parts.append(f"{chain_label}format=yuv420p[v]")
+
+        cmd.extend([
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[v]",
+            "-map",
+            "0:a?",
+            "-t",
+            str(audio_duration),
+        ])
+        cmd.extend(FFmpegHelper.get_nvenc_flags())
+        cmd.extend([
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ])
+
+        def _progress(payload: dict):
+            ffmpeg_percent = payload.get("ffmpegPercent")
+            if ffmpeg_percent is None:
+                return
+            self._update_progress(
+                "story_overlays",
+                90 + (float(ffmpeg_percent) * 0.08),
+                "Dang ap dung TV noise va song am...",
+            )
+
+        ok = FFmpegHelper.run_command(
+            cmd,
+            progress_callback=_progress,
+            progress_total_seconds=audio_duration,
+        )
+        if ok and os.path.isfile(output_path):
+            return output_path
+
+        logger.error(f"[StoryPipeline:{self.story_id}] Failed to apply story overlays.")
+        self._update_progress(
+            "story_overlays",
+            90,
+            "Ap dung TV noise/song am that bai.",
+            status="failed",
+            error="Story overlay pass failed.",
         )
         return None
 

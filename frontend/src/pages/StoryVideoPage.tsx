@@ -68,6 +68,7 @@ function stageLabel(stage: string): string {
     prepare_clips: "Tao clip 5 giay",
     render_video: "Render video",
     waveform_overlay: "Song am",
+    story_overlays: "TV noise / song am",
     finalize: "Hoan thien",
     completed: "Hoan tat",
     failed: "That bai",
@@ -326,11 +327,11 @@ export function StoryVideoPage() {
       <HeroCard
         eyebrow="Story Video"
         title="Video Ke Chuyen"
-        description="Render tu audio/script voi clip 5 giay va song am mac dinh."
+        description="Render tu audio/script voi clip 5 giay, TV noise va song am mac dinh."
         stats={[
           { label: "Mode", value: mode === "single" ? "Single" : "Batch" },
           { label: "Clips", value: "Default library" },
-          { label: "Waveform", value: "Default overlay" },
+          { label: "Overlays", value: "Global settings" },
         ]}
       />
 
@@ -349,7 +350,7 @@ export function StoryVideoPage() {
           <Button asChild variant="outline">
             <Link to="/story-video/settings">
               <Settings className="mr-2 size-4" />
-              Cau hinh song am
+              Cau hinh overlay
             </Link>
           </Button>
         </div>

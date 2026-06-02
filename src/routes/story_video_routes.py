@@ -25,6 +25,8 @@ story_video_bp = Blueprint("story_video", __name__)
 # In-memory tracking for download/upload sessions
 _download_sessions: dict[str, dict] = {}
 _download_sessions_lock = threading.Lock()
+_tv_noise_jobs: dict[str, dict] = {}
+_tv_noise_jobs_lock = threading.Lock()
 
 
 def _error(message: str, code: str = "bad_request", status: int = 400):
@@ -48,6 +50,112 @@ def _save_library_index(data: dict):
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     shutil.move(tmp_path, index_path)
+
+
+def _new_tv_noise_job(action: str, overlay_id: str = "") -> str:
+    session_id = f"tvn-{str(uuid.uuid4())[:8]}"
+    with _tv_noise_jobs_lock:
+        _tv_noise_jobs[session_id] = {
+            "sessionId": session_id,
+            "status": "processing",
+            "action": action,
+            "current": 0,
+            "total": 1,
+            "message": "Dang xu ly TV noise overlay...",
+            "overlayId": overlay_id,
+            "error": None,
+        }
+    return session_id
+
+
+def _update_tv_noise_job(session_id: str, **updates):
+    with _tv_noise_jobs_lock:
+        if session_id in _tv_noise_jobs:
+            _tv_noise_jobs[session_id].update(updates)
+
+
+def _download_tv_noise_youtube(link: str, overlay_id: str) -> str:
+    import yt_dlp
+
+    os.makedirs(Config.STORY_TV_NOISE_OVERLAY_DIR, exist_ok=True)
+    before_files = set(os.listdir(Config.STORY_TV_NOISE_OVERLAY_DIR))
+    output_template = os.path.join(Config.STORY_TV_NOISE_OVERLAY_DIR, f"{overlay_id}_youtube_%(id)s.%(ext)s")
+    options = {
+        "format": (
+            "bestvideo[vcodec^=avc1][ext=mp4][height>=720]+bestaudio[ext=m4a]/"
+            "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[ext=mp4]+bestaudio/"
+            "best[ext=mp4]/best"
+        ),
+        "merge_output_format": "mp4",
+        "outtmpl": output_template,
+        "quiet": True,
+        "no_warnings": True,
+        "no_color": True,
+        "retries": 5,
+        "fragment_retries": 5,
+        "socket_timeout": 30,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
+        },
+    }
+
+    with yt_dlp.YoutubeDL(options) as downloader:
+        downloader.download([link])
+
+    after_files = set(os.listdir(Config.STORY_TV_NOISE_OVERLAY_DIR))
+    new_files = sorted(after_files - before_files)
+    for filename in new_files:
+        if filename.lower().endswith(".mp4"):
+            return os.path.join(Config.STORY_TV_NOISE_OVERLAY_DIR, filename)
+    raise RuntimeError("Khong tim thay file MP4 sau khi tai YouTube.")
+
+
+def _run_tv_noise_preprocess_async(overlay_id: str, session_id: str | None = None):
+    from src.utils.story_tv_noise_overlays import run_tv_noise_preprocess
+
+    def _worker():
+        try:
+            if session_id:
+                _update_tv_noise_job(session_id, status="processing", current=0, message="Dang tao alpha MOV...")
+            record = run_tv_noise_preprocess(overlay_id)
+            if record and record.get("status") == "ready":
+                if session_id:
+                    _update_tv_noise_job(
+                        session_id,
+                        status="completed",
+                        current=1,
+                        message="TV noise overlay da san sang.",
+                        overlayId=overlay_id,
+                    )
+            else:
+                error = (record or {}).get("error") or "TV noise preprocess failed."
+                if session_id:
+                    _update_tv_noise_job(
+                        session_id,
+                        status="failed",
+                        current=1,
+                        message=error,
+                        error=error,
+                        overlayId=overlay_id,
+                    )
+        except Exception as exc:
+            logger.error(f"[StoryVideo] TV noise preprocess job failed: {exc}", exc_info=True)
+            if session_id:
+                _update_tv_noise_job(
+                    session_id,
+                    status="failed",
+                    current=1,
+                    message=str(exc),
+                    error=str(exc),
+                    overlayId=overlay_id,
+                )
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -934,29 +1042,227 @@ def delete_waveform_overlay(overlay_id: str):
     logger.info(f"[StoryVideo] Waveform overlay deleted: {overlay_id}")
     return jsonify({"deleted": True, "overlayId": overlay_id})
 
-    index_path = os.path.join(Config.WAVEFORM_OVERLAY_DIR, "index.json")
-    if not os.path.isfile(index_path):
-        return _error("Không tìm thấy overlay.", code="not_found", status=404)
 
-    with open(index_path, "r", encoding="utf-8") as f:
-        index = json.load(f)
+# ---------------------------------------------------------------------------
+# 20. TV noise overlay management
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/tv-noise-overlays", methods=["GET"])
+def get_tv_noise_overlays():
+    from src.utils.story_tv_noise_overlays import load_tv_noise_index
 
-    overlays = index.get("overlays", [])
-    overlay = next((o for o in overlays if o.get("id") == overlay_id), None)
+    data = load_tv_noise_index()
+    overlays = data.get("overlays", [])
+    overlays.sort(key=lambda item: (int(item.get("order") or 0), str(item.get("createdAt") or "")))
+    return jsonify({"overlays": overlays})
+
+
+@story_video_bp.route("/api/story-video/tv-noise-overlays", methods=["POST"])
+def upload_tv_noise_overlay():
+    from src.utils.story_tv_noise_overlays import create_tv_noise_overlay
+
+    upload_file = request.files.get("file")
+    if not upload_file or not upload_file.filename:
+        return _error("Chua chon file.", code="no_file")
+
+    ext = upload_file.filename.rsplit(".", 1)[-1].lower() if "." in upload_file.filename else ""
+    if ext not in Config.ALLOWED_VIDEO_EXTENSIONS:
+        return _error("Dinh dang video khong ho tro.", code="invalid_format")
+
+    try:
+        overlay = create_tv_noise_overlay(upload_file)
+    except Exception as exc:
+        logger.error(f"[StoryVideo] TV noise upload error: {exc}", exc_info=True)
+        return _error(f"Khong the luu TV noise overlay: {exc}", code="tv_noise_upload_failed", status=500)
+
+    session_id = _new_tv_noise_job("upload", overlay.get("id", ""))
+    _run_tv_noise_preprocess_async(str(overlay["id"]), session_id)
+    return jsonify({"sessionId": session_id, "overlay": overlay}), 202
+
+
+@story_video_bp.route("/api/story-video/tv-noise-overlays/import-youtube", methods=["POST"])
+def import_tv_noise_from_youtube():
+    from src.utils.story_tv_noise_overlays import (
+        attach_tv_noise_source_file,
+        create_tv_noise_placeholder,
+        mark_tv_noise_failed,
+        run_tv_noise_preprocess,
+    )
+
+    data = request.get_json(silent=True) or {}
+    link = str(data.get("url") or "").strip()
+    display_name = str(data.get("name") or "").strip()
+    if not link:
+        return _error("Can nhap YouTube URL.", code="missing_url")
+
+    overlay = create_tv_noise_placeholder(display_name or "youtube_tv_noise", link)
+    overlay_id = str(overlay["id"])
+    session_id = _new_tv_noise_job("import_youtube", overlay_id)
+
+    def _worker():
+        try:
+            _update_tv_noise_job(session_id, status="downloading", current=0, message="Dang tai TV noise tu YouTube...")
+            downloaded_path = _download_tv_noise_youtube(link, overlay_id)
+            filename = os.path.basename(downloaded_path)
+            attach_tv_noise_source_file(
+                overlay_id,
+                downloaded_path,
+                display_name or os.path.splitext(filename)[0],
+            )
+            _update_tv_noise_job(session_id, status="processing", current=0, message="Dang tao alpha MOV...")
+            record = run_tv_noise_preprocess(overlay_id)
+            if record and record.get("status") == "ready":
+                _update_tv_noise_job(
+                    session_id,
+                    status="completed",
+                    current=1,
+                    message="TV noise overlay da san sang.",
+                    overlayId=overlay_id,
+                )
+            else:
+                error = (record or {}).get("error") or "TV noise preprocess failed."
+                _update_tv_noise_job(
+                    session_id,
+                    status="failed",
+                    current=1,
+                    message=error,
+                    error=error,
+                    overlayId=overlay_id,
+                )
+        except Exception as exc:
+            logger.error(f"[StoryVideo] TV noise YouTube import error: {exc}", exc_info=True)
+            mark_tv_noise_failed(overlay_id, str(exc))
+            _update_tv_noise_job(
+                session_id,
+                status="failed",
+                current=1,
+                message=str(exc),
+                error=str(exc),
+                overlayId=overlay_id,
+            )
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({"sessionId": session_id, "overlay": overlay}), 202
+
+
+@story_video_bp.route("/api/story-video/tv-noise-overlays/jobs/<session_id>", methods=["GET"])
+def get_tv_noise_job(session_id: str):
+    with _tv_noise_jobs_lock:
+        job = _tv_noise_jobs.get(session_id)
+    if not job:
+        return _error("TV noise job khong ton tai.", code="job_not_found", status=404)
+    return jsonify(job)
+
+
+@story_video_bp.route("/api/story-video/tv-noise-overlays/<overlay_id>", methods=["PATCH"])
+def update_tv_noise_overlay_config(overlay_id: str):
+    from src.utils.story_tv_noise_overlays import update_tv_noise_overlay
+
+    data = request.get_json(silent=True) or {}
+    updates = {}
+    try:
+        for key in ("enabled", "name", "order", "opacity", "tolerance", "softness"):
+            if key in data:
+                updates[key] = data.get(key)
+        overlay, should_regenerate = update_tv_noise_overlay(overlay_id, updates)
+    except (TypeError, ValueError):
+        return _error("Cau hinh TV noise khong hop le.", code="invalid_tv_noise_config")
+    except Exception as exc:
+        logger.error(f"[StoryVideo] TV noise update error: {exc}", exc_info=True)
+        return _error(f"Khong the cap nhat TV noise overlay: {exc}", code="tv_noise_update_failed", status=500)
+
     if not overlay:
-        return _error("Overlay không tồn tại.", code="overlay_not_found", status=404)
+        return _error("TV noise overlay khong ton tai.", code="overlay_not_found", status=404)
+    if should_regenerate:
+        _run_tv_noise_preprocess_async(overlay_id)
+    return jsonify({"overlay": overlay})
 
-    # Remove file
-    filepath = os.path.join(Config.WAVEFORM_OVERLAY_DIR, overlay.get("filename", ""))
-    if os.path.isfile(filepath):
-        os.remove(filepath)
 
-    # Update index
-    index["overlays"] = [o for o in overlays if o.get("id") != overlay_id]
-    tmp = index_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(index, f, indent=2, ensure_ascii=False)
-    shutil.move(tmp, index_path)
+@story_video_bp.route("/api/story-video/tv-noise-overlays/<overlay_id>", methods=["DELETE"])
+def delete_tv_noise_overlay(overlay_id: str):
+    from src.utils.story_tv_noise_overlays import delete_tv_noise_overlay_record
 
-    logger.info(f"[StoryVideo] Waveform overlay deleted: {overlay_id}")
+    if not delete_tv_noise_overlay_record(overlay_id):
+        return _error("TV noise overlay khong ton tai.", code="overlay_not_found", status=404)
+
+    logger.info(f"[StoryVideo] TV noise overlay deleted: {overlay_id}")
     return jsonify({"deleted": True, "overlayId": overlay_id})
+
+
+@story_video_bp.route("/api/story-video/tv-noise-demo", methods=["POST"])
+def generate_tv_noise_demo():
+    from src.utils.ffmpeg_helper import FFmpegHelper
+    from src.utils.story_tv_noise_overlays import get_active_tv_noise_overlays, get_tv_noise_overlay, processed_abs_path
+
+    data = request.get_json(silent=True) or {}
+    overlay_id = str(data.get("overlayId") or "").strip()
+    sample_clip_id = str(data.get("sampleClipId") or "").strip()
+
+    if overlay_id:
+        record = get_tv_noise_overlay(overlay_id)
+        overlays = [record] if record else []
+    else:
+        overlays = get_active_tv_noise_overlays()
+
+    ready_overlays = [item for item in overlays if item and item.get("status") == "ready" and processed_abs_path(item)]
+    if not ready_overlays:
+        return _error("Chua co TV noise overlay san sang de tao demo.", code="no_ready_tv_noise", status=404)
+
+    sample_path = None
+    if sample_clip_id:
+        index = _load_library_index()
+        clip = next((a for a in index.get("assets", []) if a.get("id") == sample_clip_id), None)
+        if clip:
+            sample_path = os.path.join(Config.STORY_LIBRARY_DIR, clip.get("relative_path", ""))
+
+    if not sample_path or not os.path.isfile(sample_path):
+        index = _load_library_index()
+        for asset in index.get("assets", []):
+            candidate = os.path.join(Config.STORY_LIBRARY_DIR, asset.get("relative_path", ""))
+            if os.path.isfile(candidate):
+                sample_path = candidate
+                break
+
+    if not sample_path or not os.path.isfile(sample_path):
+        return _error("Khong co clip mau trong thu vien Story Video.", code="no_sample", status=404)
+
+    os.makedirs(Config.STORY_TV_NOISE_OVERLAY_DIR, exist_ok=True)
+    demo_id = str(uuid.uuid4())[:8]
+    output_path = os.path.join(Config.STORY_TV_NOISE_OVERLAY_DIR, f"demo_{demo_id}.mp4")
+    width, height = Config.TARGET_RESOLUTION.split("x", 1)
+
+    cmd = ["ffmpeg", "-y", "-i", sample_path]
+    for item in ready_overlays:
+        cmd.extend(["-stream_loop", "-1", "-i", processed_abs_path(item)])
+
+    filter_parts = [
+        f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},fps={Config.TARGET_FPS},setsar=1[base]"
+    ]
+    chain_label = "[base]"
+    for index, _item in enumerate(ready_overlays):
+        input_idx = index + 1
+        noise_label = f"noise{index}"
+        out_label = f"tvn{index}"
+        filter_parts.append(f"[{input_idx}:v]setpts=PTS-STARTPTS[{noise_label}]")
+        filter_parts.append(
+            f"{chain_label}[{noise_label}]overlay=0:0:format=auto:eof_action=repeat:eval=init[{out_label}]"
+        )
+        chain_label = f"[{out_label}]"
+    filter_parts.append(f"{chain_label}format=yuv420p[v]")
+
+    cmd.extend([
+        "-filter_complex",
+        ";".join(filter_parts),
+        "-map",
+        "[v]",
+        "-an",
+        "-t",
+        str(Config.STORY_TV_NOISE_DEMO_SECONDS),
+    ])
+    cmd.extend(FFmpegHelper.get_nvenc_flags())
+    cmd.extend(["-movflags", "+faststart", output_path])
+
+    if not FFmpegHelper.run_command(cmd):
+        return _error("Khong the tao demo TV noise.", code="demo_failed", status=500)
+    rel = os.path.relpath(output_path, Config.STORAGE_DIR).replace("\\", "/")
+    return jsonify({"demoPath": rel})
