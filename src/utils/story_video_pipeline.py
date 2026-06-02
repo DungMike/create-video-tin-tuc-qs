@@ -53,6 +53,21 @@ def _progress_path(story_id: str) -> str:
     return os.path.join(_story_dir(story_id), "progress.json")
 
 
+def _cancel_path(story_id: str) -> str:
+    return os.path.join(_story_dir(story_id), "cancel.requested")
+
+
+def request_story_cancel(story_id: str):
+    """Persist a cancellation request so active and queued runners can observe it."""
+    cancel_path = _cancel_path(story_id)
+    with open(cancel_path, "w", encoding="utf-8") as file_obj:
+        file_obj.write(_utc_now())
+
+
+def is_story_cancel_requested(story_id: str) -> bool:
+    return os.path.isfile(_cancel_path(story_id))
+
+
 def _temp_dir(story_id: str) -> str:
     path = os.path.join(_story_dir(story_id), "temp")
     os.makedirs(path, exist_ok=True)
@@ -104,6 +119,10 @@ class StoryVideoPipelineRunner:
         }
         self._save_progress()
 
+    def _raise_if_cancel_requested(self):
+        if is_story_cancel_requested(self.story_id):
+            raise StoryVideoCancelled()
+
     def _save_progress(self):
         with self._lock:
             self.progress["updatedAt"] = _utc_now()
@@ -132,9 +151,11 @@ class StoryVideoPipelineRunner:
     def run(self) -> str | None:
         """Main pipeline entry. Returns output video path or None on failure."""
         try:
+            self._raise_if_cancel_requested()
             self._update_progress("prepare_audio", 5, "Dang chuan bi audio...")
 
             audio_path = self._prepare_audio()
+            self._raise_if_cancel_requested()
             if not audio_path:
                 self._update_progress(
                     "prepare_audio",
@@ -146,6 +167,7 @@ class StoryVideoPipelineRunner:
                 return None
 
             audio_duration = get_audio_duration(audio_path)
+            self._raise_if_cancel_requested()
             if audio_duration <= 0:
                 self._update_progress(
                     "prepare_audio",
@@ -158,6 +180,7 @@ class StoryVideoPipelineRunner:
 
             self._update_progress("select_clips", 15, "Dang chon clip ngau nhien tu thu vien...")
             clips = self._select_clips(audio_duration)
+            self._raise_if_cancel_requested()
             if not clips:
                 self._update_progress(
                     "select_clips",
@@ -170,6 +193,7 @@ class StoryVideoPipelineRunner:
 
             self._update_progress("render_video", 35, "Dang ghep clip voi audio...")
             rendered_video = self._render_simple_video(clips, audio_path, audio_duration)
+            self._raise_if_cancel_requested()
             if not rendered_video:
                 self._update_progress(
                     "render_video",
@@ -182,10 +206,12 @@ class StoryVideoPipelineRunner:
 
             self._update_progress("story_overlays", 90, "Dang ap dung TV noise va song am...")
             output_video = self._apply_story_overlays(rendered_video, audio_duration)
+            self._raise_if_cancel_requested()
             if not output_video:
                 return None
 
             self._update_progress("finalize", 98, "Dang hoan tat...")
+            self._raise_if_cancel_requested()
             final_path = self._finalize(output_video)
             final_rel_path = storage_relative_path(final_path)
 
@@ -199,6 +225,15 @@ class StoryVideoPipelineRunner:
             logger.info(f"[StoryPipeline:{self.story_id}] Pipeline completed: {final_path}")
             return final_path
 
+        except StoryVideoCancelled:
+            logger.info(f"[StoryPipeline:{self.story_id}] Pipeline cancelled.")
+            self._update_progress(
+                "cancelled",
+                self.progress.get("percent", 0),
+                "Da huy xu ly.",
+                status="cancelled",
+            )
+            return None
         except Exception as exc:
             logger.error(f"[StoryPipeline:{self.story_id}] Pipeline failed: {exc}", exc_info=True)
             self._update_progress(
@@ -313,6 +348,7 @@ class StoryVideoPipelineRunner:
         selected_duration = 0.0
 
         while selected_duration < target_duration:
+            self._raise_if_cancel_requested()
             shuffled = list(pool)
             random.shuffle(shuffled)
             for clip_path, duration in shuffled:
@@ -384,6 +420,7 @@ class StoryVideoPipelineRunner:
             cmd,
             progress_callback=_progress,
             progress_total_seconds=audio_duration,
+            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
         )
         if ok and os.path.isfile(output_path):
             return output_path
@@ -456,10 +493,12 @@ class StoryVideoPipelineRunner:
             cmd,
             progress_callback=_progress,
             progress_total_seconds=audio_duration,
+            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
         )
         if ok and os.path.isfile(output_path):
             return output_path
 
+        self._raise_if_cancel_requested()
         logger.error(f"[StoryPipeline:{self.story_id}] Failed to apply waveform overlay.")
         self._update_progress(
             "waveform_overlay",
@@ -577,10 +616,12 @@ class StoryVideoPipelineRunner:
             cmd,
             progress_callback=_progress,
             progress_total_seconds=audio_duration,
+            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
         )
         if ok and os.path.isfile(output_path):
             return output_path
 
+        self._raise_if_cancel_requested()
         logger.error(f"[StoryPipeline:{self.story_id}] Failed to apply story overlays.")
         self._update_progress(
             "story_overlays",
@@ -615,3 +656,7 @@ class StoryVideoPipelineRunner:
             pass
 
         return final_path
+
+
+class StoryVideoCancelled(RuntimeError):
+    """Raised when a Story Video cancellation marker is observed."""

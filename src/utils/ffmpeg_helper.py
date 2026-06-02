@@ -11,6 +11,7 @@ class FFmpegHelper:
         timeout_seconds: int | None = None,
         progress_callback=None,
         progress_total_seconds: float | None = None,
+        cancel_callback=None,
     ) -> bool:
         """Execute an ffmpeg command synchronously."""
         cmd_str = ' '.join(cmd_list)
@@ -24,6 +25,7 @@ class FFmpegHelper:
                 timeout,
                 progress_callback,
                 progress_total_seconds,
+                cancel_callback,
             )
         try:
             result = subprocess.run(
@@ -53,6 +55,7 @@ class FFmpegHelper:
         timeout: int | None,
         progress_callback,
         progress_total_seconds: float | None,
+        cancel_callback=None,
     ) -> bool:
         progress_cmd = list(cmd_list)
         if progress_cmd and "ffmpeg" in progress_cmd[0].lower():
@@ -63,6 +66,10 @@ class FFmpegHelper:
         process = None
 
         try:
+            if cancel_callback and cancel_callback():
+                logger.info(f"FFmpeg cancelled before start: {' '.join(cmd_list)}")
+                return False
+
             process = subprocess.Popen(
                 progress_cmd,
                 stdout=subprocess.PIPE,
@@ -82,6 +89,11 @@ class FFmpegHelper:
 
             if process.stdout:
                 while True:
+                    if cancel_callback and cancel_callback():
+                        process.kill()
+                        logger.info(f"FFmpeg cancelled: {' '.join(cmd_list)}")
+                        return False
+
                     # Check timeout before each readline
                     if timeout and time.monotonic() - start_time > timeout:
                         process.kill()

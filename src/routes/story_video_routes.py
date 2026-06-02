@@ -727,11 +727,79 @@ def get_story_result(story_id: str):
 
 
 # ---------------------------------------------------------------------------
-# 13. POST /api/story-video/batch/create — batch of stories
+# 12b. POST /api/story-video/<story_id>/cancel
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/<story_id>/cancel", methods=["POST"])
+def cancel_story_video(story_id: str):
+    from src.utils.story_video_pipeline import load_story_progress, request_story_cancel
+
+    progress = load_story_progress(story_id)
+    if not progress:
+        return _error("Story khong tim thay.", code="story_not_found", status=404)
+    if progress.get("status") not in {"completed", "failed", "cancelled"}:
+        request_story_cancel(story_id)
+    return jsonify({"storyId": story_id, "status": progress.get("status", "pending")})
+
+
+# ---------------------------------------------------------------------------
+# 13. POST/GET /api/story-video/batch/drive-audio-imports - stage Drive folder audio
+# ---------------------------------------------------------------------------
+# Stage public Google Drive folder audio before adding items to a story batch.
+@story_video_bp.route("/api/story-video/batch/drive-audio-imports", methods=["POST"])
+def create_drive_audio_import():
+    from src.utils.google_drive_audio import (
+        DriveAudioImportError,
+        cleanup_expired_drive_audio_imports,
+        create_drive_audio_import_session,
+        run_drive_audio_import,
+    )
+
+    data = request.get_json(silent=True) or {}
+    folder_url = str(data.get("folderUrl", "")).strip()
+    if not folder_url:
+        return _error("folderUrl khong duoc de trong.", code="missing_folder_url")
+
+    cleanup_expired_drive_audio_imports()
+    try:
+        manifest = create_drive_audio_import_session(folder_url)
+    except DriveAudioImportError as exc:
+        return _error(str(exc), code=exc.code)
+
+    session_id = manifest["sessionId"]
+
+    def _run_import():
+        try:
+            run_drive_audio_import(session_id, folder_url)
+        except Exception as exc:
+            logger.error(f"[StoryVideo] Drive audio import failed: session_id={session_id}, error={exc}")
+
+    threading.Thread(target=_run_import, daemon=True).start()
+    return jsonify({"sessionId": session_id}), 202
+
+
+@story_video_bp.route("/api/story-video/batch/drive-audio-imports/<session_id>", methods=["GET"])
+def get_drive_audio_import(session_id: str):
+    from src.utils.google_drive_audio import load_drive_audio_import, public_drive_audio_import
+
+    manifest = load_drive_audio_import(session_id)
+    if not manifest:
+        return _error("Drive audio import khong tim thay.", code="drive_audio_session_not_found", status=404)
+    return jsonify(public_drive_audio_import(manifest))
+
+
+# ---------------------------------------------------------------------------
+# 14. POST /api/story-video/batch/create - batch of stories
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/batch/create", methods=["POST"])
 def create_story_batch():
+    from src.utils.google_drive_audio import (
+        DriveAudioImportError,
+        cleanup_expired_drive_audio_imports,
+        copy_staged_audio_to_batch,
+    )
     from src.utils.story_video_batch import StoryVideoBatchRunner
+
+    cleanup_expired_drive_audio_imports()
 
     # Handle multipart/form-data
     payload_str = request.form.get("payload", "{}")
@@ -770,7 +838,7 @@ def create_story_batch():
         input_value = str(item.get("inputValue", "")).strip()
         output_name = str(item.get("outputName", f"story_{idx + 1}")).strip()
 
-        # Map audio file index to saved path
+        # Map local upload indexes or Drive staging tokens to durable batch files.
         if input_type == "audio_file":
             if input_value.isdigit():
                 file_idx = int(input_value)
@@ -780,6 +848,13 @@ def create_story_batch():
                 input_value = audio_name_map[input_value]
             elif secure_filename(input_value) in audio_name_map:
                 input_value = audio_name_map[secure_filename(input_value)]
+        elif input_type == "drive_audio":
+            try:
+                input_value, _original_name = copy_staged_audio_to_batch(input_value, batch_dir, idx)
+                input_type = "audio_file"
+            except DriveAudioImportError as exc:
+                shutil.rmtree(batch_dir, ignore_errors=True)
+                return _error(str(exc), code=exc.code)
 
         story_configs.append({
             "story_id": f"sv-{str(uuid.uuid4())[:8]}",
@@ -800,7 +875,7 @@ def create_story_batch():
 
 
 # ---------------------------------------------------------------------------
-# 14. GET /api/story-video/batch/<batch_id>/progress
+# 15. GET /api/story-video/batch/<batch_id>/progress
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/batch/<batch_id>/progress", methods=["GET"])
 def get_batch_progress(batch_id: str):
@@ -842,13 +917,40 @@ def get_batch_progress(batch_id: str):
         "totalItems": progress.get("total", len(items)),
         "completedItems": progress.get("completed", 0),
         "failedItems": progress.get("failed", 0),
+        "cancelledItems": progress.get("cancelled", 0),
         "currentIndex": progress.get("current", 0),
         "items": items,
     })
 
 
 # ---------------------------------------------------------------------------
-# 15. POST /api/story-video/batch/<batch_id>/retry-failed
+# 16. POST /api/story-video/batch/<batch_id>/items/<story_id>/cancel
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/batch/<batch_id>/items/<story_id>/cancel", methods=["POST"])
+def cancel_story_batch_item(batch_id: str, story_id: str):
+    from src.utils.story_video_batch import request_batch_story_cancel
+
+    story = request_batch_story_cancel(batch_id, story_id)
+    if not story:
+        return _error("Batch item khong tim thay.", code="batch_item_not_found", status=404)
+    return jsonify({"batchId": batch_id, "storyId": story_id, "status": story.get("status", "pending")})
+
+
+# ---------------------------------------------------------------------------
+# 17. POST /api/story-video/batch/<batch_id>/cancel
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/batch/<batch_id>/cancel", methods=["POST"])
+def cancel_story_batch(batch_id: str):
+    from src.utils.story_video_batch import request_batch_cancel
+
+    progress = request_batch_cancel(batch_id)
+    if not progress:
+        return _error("Batch khong tim thay.", code="batch_not_found", status=404)
+    return jsonify({"batchId": batch_id, "status": progress.get("status", "pending")})
+
+
+# ---------------------------------------------------------------------------
+# 18. POST /api/story-video/batch/<batch_id>/retry-failed
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/batch/<batch_id>/retry-failed", methods=["POST"])
 def retry_batch_failed(batch_id: str):

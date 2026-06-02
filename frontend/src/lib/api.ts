@@ -247,6 +247,7 @@ import type {
   DecorImage,
   DecorImagesResponse,
   DecorImageUploadResponse,
+  DriveAudioImportProgress,
   DownloadProgress,
   ParseScriptResponse,
   StoryBatchProgress,
@@ -598,6 +599,10 @@ export async function getStoryVideoResult(storyId: string) {
   return requestJson<{ videoPath: string }>(`/api/story-video/${storyId}/result`);
 }
 
+export async function cancelStoryVideo(storyId: string) {
+  return requestJson<{ storyId: string; status: string }>(`/api/story-video/${storyId}/cancel`, { method: "POST" });
+}
+
 // === Story Video Batch ===
 
 export async function createStoryBatch(payload: CreateStoryBatchRequest, audioFiles?: File[]) {
@@ -609,8 +614,31 @@ export async function createStoryBatch(payload: CreateStoryBatchRequest, audioFi
   return requestJson<{ batchId: string }>("/api/story-video/batch/create", { method: "POST", body: fd });
 }
 
+export async function startStoryDriveAudioImport(folderUrl: string) {
+  return requestJson<{ sessionId: string }>("/api/story-video/batch/drive-audio-imports", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ folderUrl }),
+  });
+}
+
+export async function getStoryDriveAudioImport(sessionId: string) {
+  return requestJson<DriveAudioImportProgress>(`/api/story-video/batch/drive-audio-imports/${sessionId}`);
+}
+
 export async function getStoryBatchProgress(batchId: string) {
   return requestJson<StoryBatchProgress>(`/api/story-video/batch/${batchId}/progress`);
+}
+
+export async function cancelStoryBatchItem(batchId: string, storyId: string) {
+  return requestJson<{ batchId: string; storyId: string; status: string }>(
+    `/api/story-video/batch/${batchId}/items/${storyId}/cancel`,
+    { method: "POST" },
+  );
+}
+
+export async function cancelStoryBatch(batchId: string) {
+  return requestJson<{ batchId: string; status: string }>(`/api/story-video/batch/${batchId}/cancel`, { method: "POST" });
 }
 
 export async function retryStoryBatchFailed(batchId: string) {

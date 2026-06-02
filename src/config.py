@@ -145,6 +145,10 @@ class Config:
     STORY_VIDEO_DIR = os.path.join(STORAGE_DIR, "story_video")
     STORY_RAW_DIR = os.path.join(STORAGE_DIR, "story_raw_videos")
     STORY_LIBRARY_PAGE_SIZE = int(os.getenv("STORY_LIBRARY_PAGE_SIZE", "20"))
+    STORY_DRIVE_AUDIO_IMPORT_DIR = os.path.join(STORY_VIDEO_DIR, "drive_audio_imports")
+    STORY_DRIVE_AUDIO_IMPORT_TTL_SECONDS = int(os.getenv("STORY_DRIVE_AUDIO_IMPORT_TTL_SECONDS", "86400"))
+    STORY_DRIVE_AUDIO_MAX_FILES = int(os.getenv("STORY_DRIVE_AUDIO_MAX_FILES", "100"))
+    STORY_DRIVE_AUDIO_MAX_TOTAL_MB = int(os.getenv("STORY_DRIVE_AUDIO_MAX_TOTAL_MB", "4096"))
 
     # --- CRT Effect ---
     CRT_NOISE_STRENGTH = int(os.getenv("CRT_NOISE_STRENGTH", "15"))

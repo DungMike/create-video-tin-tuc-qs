@@ -2,7 +2,9 @@ node_modules
 storage
 .env
 logs
-tests
+tests/*
+!tests/test_google_drive_audio.py
+!tests/test_story_video_cancel.py
 
 # Python cache
 __pycache__/

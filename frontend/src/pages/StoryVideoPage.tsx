@@ -1,5 +1,5 @@
-import { Download, Loader2, Plus, RotateCcw, Settings, Trash2, Upload } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Download, Loader2, Plus, RotateCcw, Settings, Square, Trash2, Upload } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
@@ -8,21 +8,35 @@ import { StatusAlert } from "@/components/status-alert";
 import { TopNav } from "@/components/top-nav";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import {
   ApiError,
+  cancelStoryBatch,
+  cancelStoryBatchItem,
+  cancelStoryVideo,
   createStoryBatch,
   createStoryVideo,
   getStoryBatchProgress,
+  getStoryDriveAudioImport,
   getStoryVideoProgress,
   getVoices,
   retryStoryBatchFailed,
+  startStoryDriveAudioImport,
 } from "@/lib/api";
 import type {
   CreateStoryBatchItem,
   CreateStoryVideoRequest,
+  DriveAudioImportProgress,
   StoryBatchItemProgress,
   StoryBatchProgress,
   StoryVideoProgress,
@@ -30,10 +44,11 @@ import type {
 } from "@/types/api";
 
 type StoryMode = "single" | "batch";
-type InputType = "audio_file" | "script_url";
+type StoryInputType = "audio_file" | "script_url";
+type BatchInputType = StoryInputType | "drive_audio";
 
 interface SingleInput {
-  inputType: InputType;
+  inputType: StoryInputType;
   inputValue: string;
   outputName: string;
   audioFile: File | null;
@@ -41,10 +56,11 @@ interface SingleInput {
 
 interface BatchItem {
   id: string;
-  inputType: InputType;
+  inputType: BatchInputType;
   inputValue: string;
   outputName: string;
   audioFile: File | null;
+  sourceName: string;
 }
 
 let batchIdCounter = 0;
@@ -71,6 +87,8 @@ function stageLabel(stage: string): string {
     story_overlays: "TV noise / song am",
     finalize: "Hoan thien",
     completed: "Hoan tat",
+    cancelling: "Dang huy",
+    cancelled: "Da huy",
     failed: "That bai",
   };
   return labels[stage] ?? stage;
@@ -96,7 +114,60 @@ export function StoryVideoPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
+  const [isCancellingStory, setIsCancellingStory] = useState(false);
+  const [isCancellingBatch, setIsCancellingBatch] = useState(false);
+  const [cancellingItemIds, setCancellingItemIds] = useState<Set<string>>(new Set());
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [driveWarningMessage, setDriveWarningMessage] = useState<string | null>(null);
+  const [isDriveDialogOpen, setIsDriveDialogOpen] = useState(false);
+  const [driveFolderUrl, setDriveFolderUrl] = useState("");
+  const [isStartingDriveImport, setIsStartingDriveImport] = useState(false);
+  const [driveImportSessionId, setDriveImportSessionId] = useState<string | null>(null);
+  const [driveImportProgress, setDriveImportProgress] = useState<DriveAudioImportProgress | null>(null);
+  const isDriveImporting = isStartingDriveImport || Boolean(driveImportSessionId);
+
+  const resetProgress = useCallback(() => {
+    setStoryId(null);
+    setStoryProgress(null);
+    setBatchId(null);
+    setBatchProgress(null);
+  }, []);
+
+  const submitBatchItems = useCallback(async (itemsToSubmit: BatchItem[]) => {
+    setErrorMessage(null);
+    resetProgress();
+    setIsSubmitting(true);
+    try {
+      const audioFiles: File[] = [];
+      const items: CreateStoryBatchItem[] = itemsToSubmit.map((item) => {
+        let inputValue = item.inputValue;
+        if (item.inputType === "audio_file") {
+          inputValue = String(audioFiles.length);
+          if (item.audioFile) audioFiles.push(item.audioFile);
+        }
+        return {
+          id: item.id,
+          inputType: item.inputType,
+          inputValue,
+          outputName: item.outputName,
+        };
+      });
+      const response = await createStoryBatch(
+        {
+          items,
+          sharedConfig: {
+            clipTags: [],
+            voiceId: voiceId || undefined,
+          },
+        },
+        audioFiles.length ? audioFiles : undefined,
+      );
+      setBatchId(response.batchId);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the bat dau batch render.");
+      setIsSubmitting(false);
+    }
+  }, [resetProgress, voiceId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -126,7 +197,10 @@ export function StoryVideoPage() {
         .then((data) => {
           if (!cancelled) {
             setStoryProgress(data);
-            if (data.status === "completed" || data.status === "failed") setIsSubmitting(false);
+            if (data.status === "completed" || data.status === "failed" || data.status === "cancelled") {
+              setIsSubmitting(false);
+              setIsCancellingStory(false);
+            }
           }
         })
         .catch(() => undefined);
@@ -147,9 +221,17 @@ export function StoryVideoPage() {
         .then((data) => {
           if (!cancelled) {
             setBatchProgress(data);
-            if (data.status === "completed" || data.status === "failed") {
+            setCancellingItemIds((current) => {
+              const next = new Set(current);
+              data.items.forEach((item) => {
+                if (item.status === "completed" || item.status === "failed" || item.status === "cancelled") next.delete(item.id);
+              });
+              return next;
+            });
+            if (data.status === "completed" || data.status === "failed" || data.status === "cancelled") {
               setIsSubmitting(false);
               setIsRetrying(false);
+              setIsCancellingBatch(false);
             }
           }
         })
@@ -163,6 +245,56 @@ export function StoryVideoPage() {
     };
   }, [batchId]);
 
+  useEffect(() => {
+    if (!driveImportSessionId) return;
+    let cancelled = false;
+    let settled = false;
+    const poll = () => {
+      getStoryDriveAudioImport(driveImportSessionId)
+        .then((progress) => {
+          if (cancelled || settled) return;
+          setDriveImportProgress(progress);
+          if (progress.status === "completed") {
+            settled = true;
+            const importedItems: BatchItem[] = progress.items.map((item) => ({
+              id: nextBatchId(),
+              inputType: "drive_audio",
+              inputValue: item.token,
+              outputName: item.outputName,
+              audioFile: null,
+              sourceName: item.fileName,
+            }));
+            setBatchItems(importedItems);
+            setDriveWarningMessage(
+              progress.skipped.length
+                ? `Da bo qua ${progress.skipped.length} file: ${progress.skipped.map((item) => `${item.fileName} (${item.reason})`).join(" | ")}`
+                : null,
+            );
+            setDriveImportSessionId(null);
+            setDriveFolderUrl("");
+            setIsDriveDialogOpen(false);
+            void submitBatchItems(importedItems);
+          } else if (progress.status === "failed") {
+            settled = true;
+            setErrorMessage(progress.error || progress.message || "Khong the tai audio tu Google Drive folder.");
+            setDriveImportSessionId(null);
+          }
+        })
+        .catch((err) => {
+          if (cancelled || settled) return;
+          settled = true;
+          setErrorMessage(err instanceof ApiError ? err.message : "Khong the doc tien do import Google Drive.");
+          setDriveImportSessionId(null);
+        });
+    };
+    poll();
+    const interval = window.setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [driveImportSessionId, submitBatchItems]);
+
   const handleAddBatchAudio = (files: FileList | null) => {
     if (!files) return;
     const newItems: BatchItem[] = Array.from(files).map((file) => ({
@@ -171,6 +303,7 @@ export function StoryVideoPage() {
       inputValue: file.name,
       outputName: outputNameFromFileName(file.name),
       audioFile: file,
+      sourceName: file.name,
     }));
     setBatchItems((prev) => [...prev, ...newItems]);
     setAudioInputKey((key) => key + 1);
@@ -185,8 +318,29 @@ export function StoryVideoPage() {
         inputValue: "",
         outputName: "",
         audioFile: null,
+        sourceName: "",
       },
     ]);
+  };
+
+  const handleStartDriveImport = async () => {
+    const folderUrl = driveFolderUrl.trim();
+    if (!folderUrl) {
+      setErrorMessage("Nhap link Google Drive folder.");
+      return;
+    }
+    setErrorMessage(null);
+    setDriveWarningMessage(null);
+    setDriveImportProgress(null);
+    setIsStartingDriveImport(true);
+    try {
+      const response = await startStoryDriveAudioImport(folderUrl);
+      setDriveImportSessionId(response.sessionId);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the bat dau import Google Drive folder.");
+    } finally {
+      setIsStartingDriveImport(false);
+    }
   };
 
   const updateBatchItem = (id: string, field: keyof BatchItem, value: string) => {
@@ -195,13 +349,6 @@ export function StoryVideoPage() {
 
   const removeBatchItem = (id: string) => {
     setBatchItems((prev) => prev.filter((item) => item.id !== id));
-  };
-
-  const resetProgress = () => {
-    setStoryId(null);
-    setStoryProgress(null);
-    setBatchId(null);
-    setBatchProgress(null);
   };
 
   const handleSubmit = async () => {
@@ -244,6 +391,10 @@ export function StoryVideoPage() {
       setErrorMessage("Them it nhat 1 item vao batch.");
       return;
     }
+    if (isDriveImporting) {
+      setErrorMessage("Cho import Google Drive folder hoan tat truoc khi render.");
+      return;
+    }
     for (let i = 0; i < batchItems.length; i += 1) {
       const item = batchItems[i];
       if (item.inputType === "audio_file" && !item.audioFile) {
@@ -254,43 +405,17 @@ export function StoryVideoPage() {
         setErrorMessage(`Item #${i + 1}: Nhap URL script.`);
         return;
       }
+      if (item.inputType === "drive_audio" && !item.inputValue.trim()) {
+        setErrorMessage(`Item #${i + 1}: Drive audio token khong hop le.`);
+        return;
+      }
       if (!item.outputName.trim()) {
         setErrorMessage(`Item #${i + 1}: Nhap ten output.`);
         return;
       }
     }
 
-    setIsSubmitting(true);
-    try {
-      const audioFiles: File[] = [];
-      const items: CreateStoryBatchItem[] = batchItems.map((item) => {
-        let inputValue = item.inputValue;
-        if (item.inputType === "audio_file") {
-          inputValue = String(audioFiles.length);
-          if (item.audioFile) audioFiles.push(item.audioFile);
-        }
-        return {
-          id: item.id,
-          inputType: item.inputType,
-          inputValue,
-          outputName: item.outputName,
-        };
-      });
-      const res = await createStoryBatch(
-        {
-          items,
-          sharedConfig: {
-            clipTags: [],
-            voiceId: voiceId || undefined,
-          },
-        },
-        audioFiles.length ? audioFiles : undefined,
-      );
-      setBatchId(res.batchId);
-    } catch (err) {
-      setErrorMessage(err instanceof ApiError ? err.message : "Khong the bat dau batch render.");
-      setIsSubmitting(false);
-    }
+    await submitBatchItems(batchItems);
   };
 
   const handleRetryFailed = async () => {
@@ -304,6 +429,46 @@ export function StoryVideoPage() {
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the retry cac item that bai.");
       setIsRetrying(false);
+    }
+  };
+
+  const handleCancelStory = async () => {
+    if (!storyId) return;
+    setIsCancellingStory(true);
+    setErrorMessage(null);
+    try {
+      await cancelStoryVideo(storyId);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the huy process.");
+      setIsCancellingStory(false);
+    }
+  };
+
+  const handleCancelBatch = async () => {
+    if (!batchId) return;
+    setIsCancellingBatch(true);
+    setErrorMessage(null);
+    try {
+      await cancelStoryBatch(batchId);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the huy batch.");
+      setIsCancellingBatch(false);
+    }
+  };
+
+  const handleCancelBatchItem = async (storyItemId: string) => {
+    if (!batchId) return;
+    setCancellingItemIds((current) => new Set(current).add(storyItemId));
+    setErrorMessage(null);
+    try {
+      await cancelStoryBatchItem(batchId, storyItemId);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the huy item.");
+      setCancellingItemIds((current) => {
+        const next = new Set(current);
+        next.delete(storyItemId);
+        return next;
+      });
     }
   };
 
@@ -336,6 +501,7 @@ export function StoryVideoPage() {
       />
 
       {errorMessage ? <StatusAlert title="Co loi xay ra" message={errorMessage} variant="destructive" /> : null}
+      {driveWarningMessage ? <StatusAlert title="Import Drive co canh bao" message={driveWarningMessage} /> : null}
 
       <PageSection>
         <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
@@ -388,13 +554,15 @@ export function StoryVideoPage() {
               audioInputKey={audioInputKey}
               onAddAudio={handleAddBatchAudio}
               onAddScript={handleAddBatchScript}
+              onAddDriveFolder={() => setIsDriveDialogOpen(true)}
               onUpdate={updateBatchItem}
               onRemove={removeBatchItem}
+              isDriveImporting={isDriveImporting}
             />
           )}
 
           <div className="flex flex-wrap gap-3">
-            <Button type="button" onClick={() => void handleSubmit()} disabled={isSubmitting}>
+            <Button type="button" onClick={() => void handleSubmit()} disabled={isSubmitting || isDriveImporting}>
               {isSubmitting ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Upload className="mr-2 size-4" />}
               Bat dau render
             </Button>
@@ -405,18 +573,71 @@ export function StoryVideoPage() {
       {(isSubmitting || storyProgress || batchProgress) ? (
         <PageSection>
           {mode === "single" ? (
-            <SingleProgress progress={storyProgress} percent={singleProgressPercent} isSubmitting={isSubmitting} />
+            <SingleProgress
+              progress={storyProgress}
+              percent={singleProgressPercent}
+              isSubmitting={isSubmitting}
+              isCancelling={isCancellingStory}
+              onCancel={() => void handleCancelStory()}
+            />
           ) : (
             <BatchProgressView
               progress={batchProgress}
               percent={batchOverallPercent}
               isSubmitting={isSubmitting}
               isRetrying={isRetrying}
+              isCancellingBatch={isCancellingBatch}
+              cancellingItemIds={cancellingItemIds}
               onRetry={() => void handleRetryFailed()}
+              onCancelBatch={() => void handleCancelBatch()}
+              onCancelItem={(storyItemId) => void handleCancelBatchItem(storyItemId)}
             />
           )}
         </PageSection>
       ) : null}
+
+      <Dialog
+        open={isDriveDialogOpen}
+        onOpenChange={(open) => {
+          if (!isDriveImporting) setIsDriveDialogOpen(open);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Import audio tu Google Drive folder</DialogTitle>
+            <DialogDescription>
+              Folder phai public. Tai xong audio trong folder goc, he thong se tu dong bat dau render batch.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <Label htmlFor="driveFolderUrl">Google Drive folder URL</Label>
+            <Input
+              id="driveFolderUrl"
+              placeholder="https://drive.google.com/drive/folders/..."
+              value={driveFolderUrl}
+              onChange={(event) => setDriveFolderUrl(event.target.value)}
+              disabled={isDriveImporting}
+            />
+            {driveImportProgress ? (
+              <div className="grid gap-2 rounded-md border border-border/70 bg-muted/30 p-3 text-sm">
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  {isDriveImporting ? <Loader2 className="size-4 animate-spin text-primary" /> : null}
+                  <span>{driveImportProgress.message}</span>
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  Da xu ly: {driveImportProgress.current}/{driveImportProgress.total}
+                </span>
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button type="button" onClick={() => void handleStartDriveImport()} disabled={isDriveImporting}>
+              {isDriveImporting ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Download className="mr-2 size-4" />}
+              {isDriveImporting ? "Dang import..." : "Tai audio va render"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </AppShell>
   );
 }
@@ -502,21 +723,25 @@ function BatchInputForm({
   audioInputKey,
   onAddAudio,
   onAddScript,
+  onAddDriveFolder,
   onUpdate,
   onRemove,
+  isDriveImporting,
 }: {
   items: BatchItem[];
   audioInputKey: number;
   onAddAudio: (files: FileList | null) => void;
   onAddScript: () => void;
+  onAddDriveFolder: () => void;
   onUpdate: (id: string, field: keyof BatchItem, value: string) => void;
   onRemove: (id: string) => void;
+  isDriveImporting: boolean;
 }) {
   return (
     <div className="grid gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h3 className="text-sm font-semibold text-foreground">Batch items ({items.length})</h3>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <label className="cursor-pointer">
             <Input
               key={audioInputKey}
@@ -537,6 +762,10 @@ function BatchInputForm({
             <Plus className="mr-2 size-4" />
             Script URL
           </Button>
+          <Button type="button" variant="outline" size="sm" onClick={onAddDriveFolder} disabled={isDriveImporting}>
+            {isDriveImporting ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Download className="mr-2 size-4" />}
+            Drive Folder
+          </Button>
         </div>
       </div>
 
@@ -550,7 +779,7 @@ function BatchInputForm({
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-semibold text-muted-foreground">#{index + 1}</span>
                   <Badge variant="secondary" className="rounded-full text-[10px]">
-                    {item.inputType === "audio_file" ? "Audio" : "Script"}
+                    {item.inputType === "audio_file" ? "Audio" : item.inputType === "drive_audio" ? "Drive Audio" : "Script"}
                   </Badge>
                 </div>
                 <Button
@@ -566,15 +795,15 @@ function BatchInputForm({
               </div>
               <div className="grid gap-3 md:grid-cols-2">
                 <div className="grid gap-1.5">
-                  <Label className="text-xs">{item.inputType === "audio_file" ? "File audio" : "Script URL"}</Label>
-                  {item.inputType === "audio_file" ? (
-                    <Input value={item.audioFile?.name ?? ""} readOnly />
-                  ) : (
+                  <Label className="text-xs">{item.inputType === "script_url" ? "Script URL" : "File audio"}</Label>
+                  {item.inputType === "script_url" ? (
                     <Input
                       placeholder="https://docs.google.com/document/d/..."
                       value={item.inputValue}
                       onChange={(event) => onUpdate(item.id, "inputValue", event.target.value)}
                     />
+                  ) : (
+                    <Input value={item.sourceName} readOnly />
                   )}
                 </div>
                 <div className="grid gap-1.5">
@@ -598,10 +827,14 @@ function SingleProgress({
   progress,
   percent,
   isSubmitting,
+  isCancelling,
+  onCancel,
 }: {
   progress: StoryVideoProgress | null;
   percent: number;
   isSubmitting: boolean;
+  isCancelling: boolean;
+  onCancel: () => void;
 }) {
   if (!progress && isSubmitting) {
     return (
@@ -625,7 +858,7 @@ function SingleProgress({
       <div className="h-3 w-full overflow-hidden rounded-full bg-muted">
         <div
           className={`h-full rounded-full transition-all duration-500 ${
-            progress.status === "completed" ? "bg-green-500" : progress.status === "failed" ? "bg-destructive" : "bg-primary"
+            progress.status === "completed" ? "bg-green-500" : progress.status === "failed" ? "bg-destructive" : progress.status === "cancelled" ? "bg-muted-foreground" : "bg-primary"
           }`}
           style={{ width: `${percent}%` }}
         />
@@ -635,6 +868,14 @@ function SingleProgress({
         <span className="whitespace-nowrap">{stageLabel(progress.stage)}</span>
       </div>
       {progress.error ? <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{progress.error}</div> : null}
+      {progress.status === "pending" || progress.status === "running" || progress.status === "processing" || progress.status === "cancelling" ? (
+        <div>
+          <Button type="button" variant="destructive" onClick={onCancel} disabled={isCancelling || progress.status === "cancelling"}>
+            {isCancelling || progress.status === "cancelling" ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Square className="mr-2 size-4" />}
+            {isCancelling || progress.status === "cancelling" ? "Dang huy..." : "Huy process"}
+          </Button>
+        </div>
+      ) : null}
       {progress.status === "completed" && progress.result?.videoPath ? (
         <div className="flex gap-2">
           <Button asChild variant="outline">
@@ -659,13 +900,21 @@ function BatchProgressView({
   percent,
   isSubmitting,
   isRetrying,
+  isCancellingBatch,
+  cancellingItemIds,
   onRetry,
+  onCancelBatch,
+  onCancelItem,
 }: {
   progress: StoryBatchProgress | null;
   percent: number;
   isSubmitting: boolean;
   isRetrying: boolean;
+  isCancellingBatch: boolean;
+  cancellingItemIds: Set<string>;
   onRetry: () => void;
+  onCancelBatch: () => void;
+  onCancelItem: (storyItemId: string) => void;
 }) {
   if (!progress && isSubmitting) {
     return (
@@ -684,19 +933,32 @@ function BatchProgressView({
           <h3 className="text-base font-semibold text-foreground">Batch: {progress.batchId}</h3>
           <p className="mt-0.5 text-sm text-muted-foreground">
             Trang thai: <span className="font-medium text-foreground">{progress.status}</span> | Hoan tat:{" "}
-            {progress.completedItems}/{progress.totalItems}
+            {progress.completedItems}/{progress.totalItems} | Da huy: {progress.cancelledItems}
           </p>
         </div>
-        <div className="text-2xl font-semibold text-foreground">{percent}%</div>
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          {progress.status === "pending" || progress.status === "processing" || progress.status === "cancelling" ? (
+            <Button type="button" variant="destructive" size="sm" onClick={onCancelBatch} disabled={isCancellingBatch || progress.status === "cancelling"}>
+              {isCancellingBatch || progress.status === "cancelling" ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Square className="mr-2 size-4" />}
+              {isCancellingBatch || progress.status === "cancelling" ? "Dang huy batch..." : "Huy batch"}
+            </Button>
+          ) : null}
+          <div className="text-2xl font-semibold text-foreground">{percent}%</div>
+        </div>
       </div>
 
       <div className="h-3 w-full overflow-hidden rounded-full bg-muted">
-        <div className="h-full rounded-full bg-primary transition-all duration-500" style={{ width: `${percent}%` }} />
+        <div className={`h-full rounded-full transition-all duration-500 ${progress.status === "cancelled" ? "bg-muted-foreground" : "bg-primary"}`} style={{ width: `${percent}%` }} />
       </div>
 
       <div className="grid gap-3">
         {progress.items.map((item) => (
-          <BatchItemProgressCard key={item.id} item={item} />
+          <BatchItemProgressCard
+            key={item.id}
+            item={item}
+            isCancelling={cancellingItemIds.has(item.id)}
+            onCancel={() => onCancelItem(item.id)}
+          />
         ))}
       </div>
 
@@ -735,20 +997,47 @@ function BatchProgressView({
   );
 }
 
-function BatchItemProgressCard({ item }: { item: StoryBatchItemProgress }) {
+function BatchItemProgressCard({
+  item,
+  isCancelling,
+  onCancel,
+}: {
+  item: StoryBatchItemProgress;
+  isCancelling: boolean;
+  onCancel: () => void;
+}) {
   const pct = Math.round(Math.max(0, Math.min(100, item.percent ?? 0)));
-  const barColorClass = item.status === "completed" ? "bg-green-500" : item.status === "failed" ? "bg-destructive" : "bg-primary";
+  const barColorClass =
+    item.status === "completed" ? "bg-green-500" : item.status === "failed" ? "bg-destructive" : item.status === "cancelled" ? "bg-muted-foreground" : "bg-primary";
 
   return (
     <div className="rounded-lg border border-border/70 bg-background/70 p-3">
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <span className="w-20 text-xs font-semibold text-muted-foreground">
-            {item.status === "completed" ? "Done" : item.status === "failed" ? "Failed" : item.status === "processing" ? "Running" : "Waiting"}
+            {item.status === "completed"
+              ? "Done"
+              : item.status === "failed"
+                ? "Failed"
+                : item.status === "cancelled"
+                  ? "Cancelled"
+                  : item.status === "cancelling"
+                    ? "Cancelling"
+                    : item.status === "processing"
+                      ? "Running"
+                      : "Waiting"}
           </span>
           <span className="truncate text-sm font-semibold text-foreground">{item.outputName}</span>
         </div>
-        <span className="whitespace-nowrap text-sm font-semibold text-foreground">{pct}%</span>
+        <div className="flex items-center gap-2">
+          {item.status === "pending" || item.status === "processing" || item.status === "cancelling" ? (
+            <Button type="button" variant="destructive" size="sm" className="h-7 text-xs" onClick={onCancel} disabled={isCancelling || item.status === "cancelling"}>
+              {isCancelling || item.status === "cancelling" ? <Loader2 className="mr-1 size-3 animate-spin" /> : <Square className="mr-1 size-3" />}
+              {isCancelling || item.status === "cancelling" ? "Dang huy" : "Huy item"}
+            </Button>
+          ) : null}
+          <span className="whitespace-nowrap text-sm font-semibold text-foreground">{pct}%</span>
+        </div>
       </div>
       <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-muted">
         <div className={`h-full rounded-full transition-all duration-300 ${barColorClass}`} style={{ width: `${pct}%` }} />

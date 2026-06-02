@@ -668,6 +668,30 @@ export interface TVNoiseOverlayUploadResponse {
   overlay: TVNoiseOverlay;
 }
 
+export interface DriveAudioImportItem {
+  token: string;
+  fileName: string;
+  outputName: string;
+  durationSeconds: number;
+  sizeBytes: number;
+}
+
+export interface DriveAudioImportSkippedItem {
+  fileName: string;
+  reason: string;
+}
+
+export interface DriveAudioImportProgress {
+  sessionId: string;
+  status: "listing" | "downloading" | "completed" | "failed";
+  current: number;
+  total: number;
+  message: string;
+  items: DriveAudioImportItem[];
+  skipped: DriveAudioImportSkippedItem[];
+  error?: string | null;
+}
+
 export interface CreateStoryVideoRequest {
   inputType: "audio_file" | "script_url";
   inputValue: string;
@@ -680,7 +704,7 @@ export interface CreateStoryVideoRequest {
 
 export interface StoryVideoProgress {
   storyId: string;
-  status: "pending" | "running" | "processing" | "completed" | "failed";
+  status: "pending" | "running" | "processing" | "cancelling" | "cancelled" | "completed" | "failed";
   stage: string;
   percent: number;
   message: string;
@@ -691,7 +715,7 @@ export interface StoryVideoProgress {
 
 export interface CreateStoryBatchItem {
   id: string;
-  inputType: "audio_file" | "script_url";
+  inputType: "audio_file" | "script_url" | "drive_audio";
   inputValue: string;
   outputName: string;
 }
@@ -709,7 +733,7 @@ export interface CreateStoryBatchRequest {
 export interface StoryBatchItemProgress {
   id: string;
   outputName: string;
-  status: "pending" | "processing" | "completed" | "failed";
+  status: "pending" | "processing" | "cancelling" | "cancelled" | "completed" | "failed";
   stage?: string;
   percent?: number;
   message?: string;
@@ -719,10 +743,11 @@ export interface StoryBatchItemProgress {
 
 export interface StoryBatchProgress {
   batchId: string;
-  status: "pending" | "processing" | "completed" | "failed";
+  status: "pending" | "processing" | "cancelling" | "cancelled" | "completed" | "failed";
   totalItems: number;
   completedItems: number;
   failedItems: number;
+  cancelledItems: number;
   currentIndex: number;
   items: StoryBatchItemProgress[];
 }
