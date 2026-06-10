@@ -143,6 +143,9 @@ class Config:
     STORY_CLIP_DURATION = int(os.getenv("STORY_CLIP_DURATION", "5"))
     STORY_LIBRARY_DIR = os.path.join(STORAGE_DIR, "story_library")
     STORY_VIDEO_DIR = os.path.join(STORAGE_DIR, "story_video")
+    STORY_OVERLAY_PACK_DIR = os.path.join(STORAGE_DIR, "story_overlay_packs")
+    STORY_OVERLAY_PRECOMPOSE_ENABLED = os.getenv("STORY_OVERLAY_PRECOMPOSE_ENABLED", "true").lower() == "true"
+    STORY_OVERLAY_PACK_DURATION_SECONDS = int(os.getenv("STORY_OVERLAY_PACK_DURATION_SECONDS", "80"))
     STORY_RAW_DIR = os.path.join(STORAGE_DIR, "story_raw_videos")
     STORY_LIBRARY_PAGE_SIZE = int(os.getenv("STORY_LIBRARY_PAGE_SIZE", "20"))
     STORY_DRIVE_AUDIO_IMPORT_DIR = os.path.join(STORY_VIDEO_DIR, "drive_audio_imports")

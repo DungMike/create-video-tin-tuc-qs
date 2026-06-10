@@ -600,6 +600,20 @@ export interface StoryLibraryStats {
   bySource: Record<string, number>;
 }
 
+export type StoryLibraryBulkDeleteRequest =
+  | { scope: "ids"; clipIds: string[] }
+  | { scope: "all" };
+
+export interface StoryLibraryBulkDeleteResponse {
+  scope: "ids" | "all";
+  requestedCount: number;
+  deletedCount: number;
+  remainingCount: number;
+  missingClipIds: string[];
+  failedClipIds: string[];
+  failedFiles: string[];
+}
+
 export interface DownloadProgress {
   sessionId: string;
   status: "downloading" | "splitting" | "completed" | "failed";

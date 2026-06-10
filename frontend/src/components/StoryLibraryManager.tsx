@@ -3,6 +3,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { EmptyCard } from "@/components/empty-card";
 import { PaginationBar } from "@/components/pagination-bar";
+import { StatusAlert } from "@/components/status-alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -13,6 +24,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   ApiError,
   deleteStoryClip,
+  deleteStoryClipsBulk,
   getStoryDownloadProgress,
   getStoryLibrary,
   getStoryLibraryStats,
@@ -32,6 +44,10 @@ const PAGE_SIZE = 20;
 const PROVIDER_PAGE_SIZE = 12;
 const PROVIDERS: StoryVideoProvider[] = ["pixabay", "pexels"];
 
+type BulkDeleteTarget =
+  | { scope: "page"; page: number; clipIds: string[] }
+  | { scope: "all"; totalClips: number };
+
 export interface StoryLibraryManagerProps {
   selectionMode?: boolean;
   selectedClipIds?: string[];
@@ -39,6 +55,7 @@ export interface StoryLibraryManagerProps {
   allSelected?: boolean;
   onAllSelectedChange?: (enabled: boolean) => void;
   filterTags?: string[];
+  showBulkDeleteActions?: boolean;
 }
 
 function providerVideoKey(item: Pick<StoryProviderVideo, "provider" | "id">) {
@@ -64,6 +81,7 @@ function ProviderSearchPanel({
   onSearch,
   onPageChange,
   onToggleSelected,
+  onTogglePageSelected,
 }: {
   provider: StoryVideoProvider;
   query: string;
@@ -76,8 +94,11 @@ function ProviderSearchPanel({
   onSearch: () => void;
   onPageChange: (page: number) => void;
   onToggleSelected: (item: StoryProviderVideo) => void;
+  onTogglePageSelected: (items: StoryProviderVideo[], selected: boolean) => void;
 }) {
   const providerLabel = provider === "pixabay" ? "Pixabay" : "Pexels";
+  const selectedPageCount = results.filter((item) => selectedItems[providerVideoKey(item)]).length;
+  const allPageSelected = results.length > 0 && selectedPageCount === results.length;
 
   return (
     <div className="grid min-w-0 gap-4">
@@ -101,6 +122,21 @@ function ProviderSearchPanel({
 
       {results.length ? (
         <>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs text-muted-foreground">
+              Da chon {selectedPageCount}/{results.length} video cua trang nay
+            </span>
+            <Button
+              type="button"
+              variant={allPageSelected ? "secondary" : "outline"}
+              size="sm"
+              onClick={() => onTogglePageSelected(results, !allPageSelected)}
+              disabled={isSearching}
+            >
+              {allPageSelected ? <X className="mr-2 size-4" /> : <Check className="mr-2 size-4" />}
+              {allPageSelected ? "Bo chon toan bo trang" : "Chon toan bo trang"}
+            </Button>
+          </div>
           <section className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {results.map((item) => {
               const itemKey = providerVideoKey(item);
@@ -175,6 +211,7 @@ export function StoryLibraryManager({
   allSelected = false,
   onAllSelectedChange,
   filterTags,
+  showBulkDeleteActions = false,
 }: StoryLibraryManagerProps) {
   const [clips, setClips] = useState<StoryClip[]>([]);
   const [page, setPage] = useState(1);
@@ -183,6 +220,9 @@ export function StoryLibraryManager({
   const [stats, setStats] = useState<StoryLibraryStats | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [bulkDeleteTarget, setBulkDeleteTarget] = useState<BulkDeleteTarget | null>(null);
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
 
   const [providerQueries, setProviderQueries] = useState<Record<StoryVideoProvider, string>>({ pixabay: "", pexels: "" });
   const [providerResults, setProviderResults] = useState<Record<StoryVideoProvider, StoryProviderVideo[]>>({ pixabay: [], pexels: [] });
@@ -218,12 +258,21 @@ export function StoryLibraryManager({
       setTotalPages(libResponse.totalPages);
       setTotalClips(libResponse.total);
       setStats(statsResponse);
+      return libResponse;
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai thu vien clip.");
+      return null;
     } finally {
       setIsLoading(false);
     }
   }, [selectedTagFilter]);
+
+  const refreshLibraryAfterDelete = useCallback(async (targetPage: number) => {
+    const response = await loadLibrary(targetPage);
+    if (response && targetPage > response.totalPages) {
+      setPage(response.totalPages);
+    }
+  }, [loadLibrary]);
 
   useEffect(() => {
     loadLibrary(page);
@@ -308,12 +357,28 @@ export function StoryLibraryManager({
     });
   };
 
+  const handleToggleProviderPage = (items: StoryProviderVideo[], selected: boolean) => {
+    setSelectedProviderVideos((current) => {
+      const next = { ...current };
+      items.forEach((item) => {
+        const itemKey = providerVideoKey(item);
+        if (selected) {
+          next[itemKey] = item;
+        } else {
+          delete next[itemKey];
+        }
+      });
+      return next;
+    });
+  };
+
   const handleImportSelected = async () => {
     if (!selectedProviderList.length) {
       setErrorMessage("Chon it nhat 1 video de import.");
       return;
     }
     setErrorMessage(null);
+    setSuccessMessage(null);
     setIsImporting(true);
     setImportProgress(null);
     try {
@@ -331,6 +396,7 @@ export function StoryLibraryManager({
       return;
     }
     setErrorMessage(null);
+    setSuccessMessage(null);
     setIsUploading(true);
     setUploadProgress(null);
     try {
@@ -344,14 +410,59 @@ export function StoryLibraryManager({
 
   const handleDeleteClip = async (clipId: string) => {
     setErrorMessage(null);
+    setSuccessMessage(null);
     try {
       await deleteStoryClip(clipId);
       if (selectionMode && onSelectionChange) {
         onSelectionChange(selectedClipIds.filter((id) => id !== clipId));
       }
-      loadLibrary(page);
+      await refreshLibraryAfterDelete(page);
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Xoa clip that bai.");
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (!bulkDeleteTarget) return;
+
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    setIsBulkDeleting(true);
+    try {
+      const response = bulkDeleteTarget.scope === "page"
+        ? await deleteStoryClipsBulk({ scope: "ids", clipIds: bulkDeleteTarget.clipIds })
+        : await deleteStoryClipsBulk({ scope: "all" });
+      const failedCount = response.failedClipIds.length + response.failedFiles.length;
+
+      if (bulkDeleteTarget.scope === "page") {
+        const failedIds = new Set(response.failedClipIds);
+        const removedIds = new Set(bulkDeleteTarget.clipIds.filter((id) => !failedIds.has(id)));
+        if (selectionMode && onSelectionChange) {
+          onSelectionChange(selectedClipIds.filter((id) => !removedIds.has(id)));
+        }
+        await refreshLibraryAfterDelete(bulkDeleteTarget.page);
+      } else {
+        onSelectionChange?.([]);
+        onAllSelectedChange?.(false);
+        setSelectedTagFilter([]);
+        setPage(1);
+        await loadLibrary(1);
+      }
+
+      if (failedCount > 0) {
+        setErrorMessage(
+          `Da xoa ${response.deletedCount} clip, nhung ${failedCount} file khong the xoa. Thu vien con ${response.remainingCount} clip.`,
+        );
+      } else if (bulkDeleteTarget.scope === "page") {
+        setSuccessMessage(`Da xoa ${response.deletedCount} clip cua trang ${bulkDeleteTarget.page}.`);
+      } else {
+        setSuccessMessage(`Da xoa ${response.deletedCount} clip trong toan bo thu vien.`);
+      }
+      setBulkDeleteTarget(null);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Xoa clip hang loat that bai.");
+    } finally {
+      setIsBulkDeleting(false);
     }
   };
 
@@ -389,6 +500,8 @@ export function StoryLibraryManager({
   const selectedCountLabel = allSelected ? `Tat ca ${totalClips} clip` : `${selectedClipIds.length} clip`;
   const activeImportPercent = importProgress ? Math.round((importProgress.current / Math.max(importProgress.total, 1)) * 100) : 0;
   const activeUploadPercent = uploadProgress ? Math.round((uploadProgress.current / Math.max(uploadProgress.total, 1)) * 100) : 0;
+  const bulkActionsDisabled = isLoading || isBulkDeleting || isImporting || isUploading;
+  const isDeleteAllTarget = bulkDeleteTarget?.scope === "all";
 
   return (
     <div className="space-y-4">
@@ -439,6 +552,39 @@ export function StoryLibraryManager({
           {errorMessage}
         </div>
       ) : null}
+      {successMessage ? <StatusAlert title="Thanh cong" message={successMessage} /> : null}
+
+      <AlertDialog
+        open={bulkDeleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !isBulkDeleting) setBulkDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{isDeleteAllTarget ? "Xoa toan bo thu vien clip?" : "Xoa clip cua trang hien tai?"}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {bulkDeleteTarget?.scope === "page"
+                ? `Thao tac se xoa ${bulkDeleteTarget.clipIds.length} clip dang hien thi o trang ${bulkDeleteTarget.page}. Khong the hoan tac.`
+                : `Thao tac se xoa ${bulkDeleteTarget?.totalClips ?? 0} clip trong toan bo thu vien Story Video. Story Video dang render co the bi anh huong va thao tac khong the hoan tac.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isBulkDeleting}>Huy</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={isBulkDeleting}
+              onClick={(event) => {
+                event.preventDefault();
+                void handleBulkDelete();
+              }}
+            >
+              {isBulkDeleting ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Trash2 className="mr-2 size-4" />}
+              {isDeleteAllTarget ? "Xoa toan bo" : "Xoa trang nay"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Tabs defaultValue="pixabay" className="grid min-w-0 gap-3">
         <TabsList className="w-fit">
@@ -463,6 +609,7 @@ export function StoryLibraryManager({
                   onSearch={() => void handleProviderSearch(provider, 1)}
                   onPageChange={(nextPage) => void handleProviderSearch(provider, nextPage)}
                   onToggleSelected={handleToggleProviderVideo}
+                  onTogglePageSelected={handleToggleProviderPage}
                 />
 
                 <div className="grid min-w-0 gap-3 border-t border-border/70 pt-4 md:grid-cols-[minmax(0,1fr)_auto]">
@@ -479,12 +626,12 @@ export function StoryLibraryManager({
                       Da chon {selectedProviderList.length} video
                     </Badge>
                     {selectedProviderList.length ? (
-                      <Button type="button" variant="outline" onClick={() => setSelectedProviderVideos({})} disabled={isImporting}>
+                      <Button type="button" variant="outline" onClick={() => setSelectedProviderVideos({})} disabled={isImporting || isBulkDeleting}>
                         <X className="mr-2 size-4" />
                         Bo chon
                       </Button>
                     ) : null}
-                    <Button type="button" onClick={handleImportSelected} disabled={isImporting || !selectedProviderList.length}>
+                    <Button type="button" onClick={handleImportSelected} disabled={isImporting || isBulkDeleting || !selectedProviderList.length}>
                       {isImporting ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Check className="mr-2 size-4" />}
                       Submit tai & cat clip
                     </Button>
@@ -518,6 +665,7 @@ export function StoryLibraryManager({
                     type="file"
                     accept="video/*"
                     multiple
+                    disabled={isBulkDeleting}
                     onChange={(event) => setUploadFiles(Array.from(event.currentTarget.files ?? []))}
                   />
                   {uploadFiles.length > 0 ? (
@@ -547,11 +695,11 @@ export function StoryLibraryManager({
                       setUploadFiles([]);
                       setFileInputKey((current) => current + 1);
                     }}
-                    disabled={isUploading}
+                    disabled={isUploading || isBulkDeleting}
                   >
                     Xoa file da chon
                   </Button>
-                  <Button type="button" onClick={handleStartUpload} disabled={isUploading || !uploadFiles.length}>
+                  <Button type="button" onClick={handleStartUpload} disabled={isUploading || isBulkDeleting || !uploadFiles.length}>
                     {isUploading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Upload className="mr-2 size-4" />}
                     Upload & cat clip
                   </Button>
@@ -561,6 +709,32 @@ export function StoryLibraryManager({
           </Card>
         </TabsContent>
       </Tabs>
+
+      {showBulkDeleteActions ? (
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="border-destructive/50 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            onClick={() => setBulkDeleteTarget({ scope: "page", page, clipIds: clips.map((clip) => clip.id) })}
+            disabled={bulkActionsDisabled || clips.length === 0}
+          >
+            <Trash2 className="mr-2 size-4" />
+            Xoa clip trang nay ({clips.length})
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            onClick={() => setBulkDeleteTarget({ scope: "all", totalClips: stats?.totalClips ?? 0 })}
+            disabled={bulkActionsDisabled || !stats?.totalClips}
+          >
+            <Trash2 className="mr-2 size-4" />
+            Xoa toan bo thu vien ({stats?.totalClips ?? 0})
+          </Button>
+        </div>
+      ) : null}
 
       {isLoading ? (
         <div className="flex items-center gap-3 py-8 text-sm text-muted-foreground">
@@ -580,6 +754,7 @@ export function StoryLibraryManager({
                   size="sm"
                   className="absolute right-2 top-2 z-10 h-8 w-8 rounded-full bg-destructive/80 p-0 text-white shadow-md hover:bg-destructive hover:text-white"
                   onClick={() => handleDeleteClip(clip.id)}
+                  disabled={isBulkDeleting}
                   title="Xoa clip"
                 >
                   <Trash2 className="size-4" />

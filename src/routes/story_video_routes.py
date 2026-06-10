@@ -19,6 +19,12 @@ from werkzeug.utils import secure_filename
 
 from src.config import Config
 from src.utils.logger import logger
+from src.utils.story_library import (
+    delete_story_library_assets,
+    load_story_library_index as _load_library_index,
+    save_story_library_index as _save_library_index,
+    story_library_index_lock,
+)
 
 story_video_bp = Blueprint("story_video", __name__)
 
@@ -33,23 +39,12 @@ def _error(message: str, code: str = "bad_request", status: int = 400):
     return jsonify({"error": {"code": code, "message": message}}), status
 
 
-def _load_library_index() -> dict:
-    """Load story library index.json, creating if needed."""
-    index_path = os.path.join(Config.STORY_LIBRARY_DIR, "index.json")
-    if os.path.isfile(index_path):
-        with open(index_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"assets": []}
-
-
-def _save_library_index(data: dict):
-    """Save story library index.json atomically."""
-    os.makedirs(Config.STORY_LIBRARY_DIR, exist_ok=True)
-    index_path = os.path.join(Config.STORY_LIBRARY_DIR, "index.json")
-    tmp_path = index_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    shutil.move(tmp_path, index_path)
+def _has_active_library_session() -> bool:
+    with _download_sessions_lock:
+        return any(
+            session.get("status") not in {"completed", "failed"}
+            for session in _download_sessions.values()
+        )
 
 
 def _new_tv_noise_job(action: str, overlay_id: str = "") -> str:
@@ -458,23 +453,47 @@ def import_selected_story_videos():
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/library/<clip_id>", methods=["DELETE"])
 def delete_library_clip(clip_id: str):
-    index = _load_library_index()
-    assets = index.get("assets", [])
-    clip = next((a for a in assets if a.get("id") == clip_id), None)
+    result = delete_story_library_assets([clip_id])
 
-    if not clip:
+    if result["missingClipIds"]:
         return _error("Clip không tồn tại.", code="clip_not_found", status=404)
 
-    # Remove file
-    clip_path = os.path.join(Config.STORY_LIBRARY_DIR, clip.get("relative_path", ""))
-    if os.path.isfile(clip_path):
-        os.remove(clip_path)
-
-    # Update index
-    index["assets"] = [a for a in assets if a.get("id") != clip_id]
-    _save_library_index(index)
+    if result["failedClipIds"]:
+        return _error("Khong the xoa file clip.", code="clip_delete_failed", status=409)
 
     return jsonify({"deleted": True, "clipId": clip_id})
+
+
+# ---------------------------------------------------------------------------
+# 5b. POST /api/story-video/library/bulk-delete
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/library/bulk-delete", methods=["POST"])
+def bulk_delete_library_clips():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _error("Payload phai la JSON object.", code="invalid_payload")
+
+    scope = str(data.get("scope") or "").strip().lower()
+    if scope == "ids":
+        raw_clip_ids = data.get("clipIds")
+        if not isinstance(raw_clip_ids, list):
+            return _error("clipIds phai la array.", code="invalid_clip_ids")
+        clip_ids = [clip_id.strip() for clip_id in raw_clip_ids if isinstance(clip_id, str) and clip_id.strip()]
+        if not clip_ids:
+            return _error("Can it nhat 1 clipId de xoa.", code="invalid_clip_ids")
+        result = delete_story_library_assets(clip_ids)
+    elif scope == "all":
+        if _has_active_library_session():
+            return _error(
+                "Thu vien dang duoc import hoac upload. Hay doi tac vu hoan tat roi xoa lai.",
+                code="library_busy",
+                status=409,
+            )
+        result = delete_story_library_assets(delete_all=True, clean_orphans=True)
+    else:
+        return _error("scope phai la 'ids' hoac 'all'.", code="invalid_scope")
+
+    return jsonify({"scope": scope, **result})
 
 
 # ---------------------------------------------------------------------------
@@ -487,18 +506,19 @@ def update_clip_tags(clip_id: str):
     if not isinstance(new_tags, list):
         return _error("tags phải là array.", code="invalid_tags")
 
-    index = _load_library_index()
-    found = False
-    for asset in index.get("assets", []):
-        if asset.get("id") == clip_id:
-            asset["tags"] = new_tags
-            found = True
-            break
+    with story_library_index_lock:
+        index = _load_library_index()
+        found = False
+        for asset in index.get("assets", []):
+            if asset.get("id") == clip_id:
+                asset["tags"] = new_tags
+                found = True
+                break
 
-    if not found:
-        return _error("Clip không tồn tại.", code="clip_not_found", status=404)
+        if not found:
+            return _error("Clip không tồn tại.", code="clip_not_found", status=404)
 
-    _save_library_index(index)
+        _save_library_index(index)
     return jsonify({"updated": True, "clipId": clip_id, "tags": new_tags})
 
 

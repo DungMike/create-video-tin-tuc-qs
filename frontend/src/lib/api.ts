@@ -251,6 +251,8 @@ import type {
   DownloadProgress,
   ParseScriptResponse,
   StoryBatchProgress,
+  StoryLibraryBulkDeleteRequest,
+  StoryLibraryBulkDeleteResponse,
   StoryLibraryResponse,
   StoryLibraryStats,
   StoryProviderVideo,
@@ -503,6 +505,14 @@ export async function importSelectedStoryVideos(items: StoryProviderVideo[], tag
 
 export async function deleteStoryClip(clipId: string) {
   return requestJson<void>(`/api/story-video/library/${clipId}`, { method: "DELETE" });
+}
+
+export async function deleteStoryClipsBulk(payload: StoryLibraryBulkDeleteRequest) {
+  return requestJson<StoryLibraryBulkDeleteResponse>("/api/story-video/library/bulk-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function updateStoryClipTags(clipId: string, tags: string[]) {

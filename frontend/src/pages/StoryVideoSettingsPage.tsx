@@ -579,7 +579,7 @@ export function StoryVideoSettingsPage() {
             Upload video nguon hoac nhap link Pixabay/Pexels de he thong tai ve va cat thanh clip 5 giay dung chung cho Story Video.
           </p>
         </div>
-        <StoryLibraryManager />
+        <StoryLibraryManager showBulkDeleteActions />
       </PageSection>
     </AppShell>
   );

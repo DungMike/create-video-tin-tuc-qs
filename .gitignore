@@ -5,6 +5,11 @@ logs
 tests/*
 !tests/test_google_drive_audio.py
 !tests/test_story_video_cancel.py
+!tests/test_story_video_library_delete.py
+!tests/test_story_overlay_cuda_benchmark.py
+!tests/test_story_overlay_packs.py
+!tests/benchmarks/
+!tests/benchmarks/**
 
 # Python cache
 __pycache__/

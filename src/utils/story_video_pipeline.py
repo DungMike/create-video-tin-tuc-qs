@@ -16,6 +16,7 @@ from src.processors.audio_utils import get_audio_duration, validate_audio
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.file_manager import storage_absolute_path, storage_relative_path
 from src.utils.logger import logger
+from src.utils.story_library import load_story_library_index
 from src.utils.tts_audio import (
     TTSAudioError,
     create_audio_from_google_doc,
@@ -85,11 +86,7 @@ def load_story_progress(story_id: str) -> dict | None:
 
 
 def _load_story_library_index() -> dict:
-    index_path = os.path.join(Config.STORY_LIBRARY_DIR, "index.json")
-    data = _load_json(index_path)
-    if not data:
-        return {"assets": []}
-    return data
+    return load_story_library_index()
 
 
 class StoryVideoPipelineRunner:
@@ -511,6 +508,7 @@ class StoryVideoPipelineRunner:
 
     def _apply_story_overlays(self, current_video: str, audio_duration: float) -> str | None:
         """Overlay TV noise layers and the configured waveform in a single FFmpeg pass."""
+        from src.utils.story_overlay_packs import get_or_create_story_overlay_pack
         from src.utils.story_tv_noise_overlays import (
             get_active_tv_noise_overlays,
             processed_abs_path as tv_noise_processed_abs_path,
@@ -548,6 +546,22 @@ class StoryVideoPipelineRunner:
         if not tv_noise_paths and not waveform_path:
             logger.info(f"[StoryPipeline:{self.story_id}] No story overlays configured.")
             return current_video
+
+        pack_path = get_or_create_story_overlay_pack(
+            tv_noise_paths,
+            waveform_record if waveform_path else None,
+            waveform_path,
+            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+        )
+        self._raise_if_cancel_requested()
+        if pack_path:
+            packed_output = self._apply_precomposed_story_overlay(current_video, audio_duration, pack_path)
+            self._raise_if_cancel_requested()
+            if packed_output:
+                return packed_output
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] Precomposed overlay pack failed; falling back to direct overlays."
+            )
 
         temp = _temp_dir(self.story_id)
         output_path = os.path.join(temp, f"story_overlays_{self.story_id}.mp4")
@@ -630,6 +644,70 @@ class StoryVideoPipelineRunner:
             status="failed",
             error="Story overlay pass failed.",
         )
+        return None
+
+    def _apply_precomposed_story_overlay(
+        self,
+        current_video: str,
+        audio_duration: float,
+        pack_path: str,
+    ) -> str | None:
+        """Overlay a cached precomposed alpha pack in a single FFmpeg overlay layer."""
+        temp = _temp_dir(self.story_id)
+        output_path = os.path.join(temp, f"story_overlay_pack_{self.story_id}.mp4")
+        fps = max(1, int(Config.TARGET_FPS))
+        filter_str = (
+            "[0:v]setpts=PTS-STARTPTS,format=yuv420p[base];"
+            f"[1:v]setpts=N/{fps}/TB[pack];"
+            "[base][pack]overlay=0:0:format=auto:eof_action=repeat:eval=init[packed];"
+            "[packed]format=yuv420p[v]"
+        )
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            current_video,
+            "-stream_loop",
+            "-1",
+            "-i",
+            pack_path,
+            "-filter_complex",
+            filter_str,
+            "-map",
+            "[v]",
+            "-map",
+            "0:a?",
+            "-t",
+            str(audio_duration),
+        ]
+        cmd.extend(FFmpegHelper.get_nvenc_flags())
+        cmd.extend([
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ])
+
+        def _progress(payload: dict):
+            ffmpeg_percent = payload.get("ffmpegPercent")
+            if ffmpeg_percent is None:
+                return
+            self._update_progress(
+                "story_overlays",
+                90 + (float(ffmpeg_percent) * 0.08),
+                "Dang ap dung overlay pack...",
+            )
+
+        ok = FFmpegHelper.run_command(
+            cmd,
+            progress_callback=_progress,
+            progress_total_seconds=audio_duration,
+            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+        )
+        if ok and os.path.isfile(output_path):
+            logger.info(f"[StoryPipeline:{self.story_id}] Applied precomposed overlay pack: {pack_path}")
+            return output_path
         return None
 
     def _finalize(self, current_video: str) -> str:

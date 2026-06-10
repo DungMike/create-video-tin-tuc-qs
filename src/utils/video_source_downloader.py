@@ -1,8 +1,6 @@
-import json
 import os
 import re
 import shutil
-import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -13,33 +11,18 @@ import requests
 from src.config import Config
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.logger import logger
+from src.utils.story_library import (
+    load_story_library_index,
+    save_story_library_index,
+    story_library_index_lock,
+)
 
-_index_lock = threading.Lock()
 _TARGET_PROVIDER_VIDEO_HEIGHT = 1080
 
 
 def _ensure_dirs():
     os.makedirs(Config.STORY_RAW_DIR, exist_ok=True)
     os.makedirs(os.path.join(Config.STORY_LIBRARY_DIR, "clips"), exist_ok=True)
-
-
-def _load_index() -> dict:
-    index_path = os.path.join(Config.STORY_LIBRARY_DIR, "index.json")
-    if os.path.exists(index_path):
-        try:
-            with open(index_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning(f"Corrupted index.json, resetting: {exc}")
-    return {"assets": []}
-
-
-def _save_index(data: dict):
-    index_path = os.path.join(Config.STORY_LIBRARY_DIR, "index.json")
-    tmp_path = index_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    shutil.move(tmp_path, index_path)
 
 
 def _detect_source(url: str) -> str:
@@ -347,8 +330,8 @@ def add_clips_to_library(clips: list[str], source_type: str, tags: list[str] | N
     clips_dir = os.path.join(Config.STORY_LIBRARY_DIR, "clips")
     added = []
 
-    with _index_lock:
-        index = _load_index()
+    with story_library_index_lock:
+        index = load_story_library_index()
 
         for clip_path in clips:
             clip_id = str(uuid.uuid4())
@@ -377,7 +360,7 @@ def add_clips_to_library(clips: list[str], source_type: str, tags: list[str] | N
             index["assets"].append(asset)
             added.append(asset)
 
-        _save_index(index)
+        save_story_library_index(index)
 
     logger.info(f"Added {len(added)} clips to story library (source: {source_type})")
     return added
