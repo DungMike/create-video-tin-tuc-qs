@@ -650,6 +650,129 @@ def generate_crt_demo():
 
 
 # ---------------------------------------------------------------------------
+# 9b. TV effect styles (1990s looks) — list / select / preview
+# ---------------------------------------------------------------------------
+def _find_sample_clip(sample_clip_id: str | None = None) -> str | None:
+    """Resolve a sample clip path from the story library (specific id or first available)."""
+    index = _load_library_index()
+    assets = index.get("assets", [])
+    if sample_clip_id:
+        clip = next((a for a in assets if a.get("id") == sample_clip_id), None)
+        if clip:
+            path = os.path.join(Config.STORY_LIBRARY_DIR, clip.get("relative_path", ""))
+            if os.path.isfile(path):
+                return path
+    for asset in assets:
+        path = os.path.join(Config.STORY_LIBRARY_DIR, asset.get("relative_path", ""))
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _tv_effect_preview_rel(style_id: str) -> str | None:
+    from src.processors.crt_effect_processor import tv_effect_previews_dir
+
+    preview_path = os.path.join(tv_effect_previews_dir(), f"{style_id}.mp4")
+    if os.path.isfile(preview_path):
+        return os.path.relpath(preview_path, Config.STORAGE_DIR).replace("\\", "/")
+    return None
+
+
+@story_video_bp.route("/api/story-video/tv-effects", methods=["GET"])
+def get_tv_effect_styles():
+    from src.processors.crt_effect_processor import (
+        TV_EFFECT_PARAM_SPEC,
+        TV_EFFECT_STYLES,
+        get_custom_tv_effect_params,
+        get_selected_tv_effect_style_id,
+        sanitize_tv_effect_params,
+    )
+
+    styles = []
+    for style in TV_EFFECT_STYLES:
+        styles.append({
+            "id": style["id"],
+            "name": style["name"],
+            "description": style["description"],
+            "previewPath": _tv_effect_preview_rel(style["id"]),
+            "params": sanitize_tv_effect_params(style["params"]),
+        })
+    return jsonify({
+        "styles": styles,
+        "selectedId": get_selected_tv_effect_style_id(),
+        "customParams": get_custom_tv_effect_params(),
+        "customPreviewPath": _tv_effect_preview_rel("custom"),
+        "paramSpec": TV_EFFECT_PARAM_SPEC,
+    })
+
+
+@story_video_bp.route("/api/story-video/tv-effects/select", methods=["POST"])
+def select_tv_effect_style():
+    from src.processors.crt_effect_processor import set_selected_tv_effect_style_id
+
+    data = request.get_json(silent=True) or {}
+    style_id = str(data.get("styleId", "")).strip()
+    if not set_selected_tv_effect_style_id(style_id):
+        return _error("Style không hợp lệ.", code="invalid_style", status=404)
+    return jsonify({"selectedId": style_id})
+
+
+@story_video_bp.route("/api/story-video/tv-effects/custom", methods=["POST"])
+def save_custom_tv_effect():
+    """Save custom effect params and select the custom style."""
+    from src.processors.crt_effect_processor import (
+        CUSTOM_STYLE_ID,
+        set_custom_tv_effect_params,
+        set_selected_tv_effect_style_id,
+    )
+
+    data = request.get_json(silent=True) or {}
+    params = data.get("params")
+    if not isinstance(params, dict):
+        return _error("Thiếu params.", code="missing_params")
+    cleaned = set_custom_tv_effect_params(params)
+    set_selected_tv_effect_style_id(CUSTOM_STYLE_ID)
+    return jsonify({"selectedId": CUSTOM_STYLE_ID, "customParams": cleaned})
+
+
+@story_video_bp.route("/api/story-video/tv-effects/preview", methods=["POST"])
+def generate_tv_effect_style_preview():
+    """Render a 3-5s preview. Body: {styleId} for a builtin style, or {params} for custom."""
+    from src.processors.crt_effect_processor import (
+        generate_tv_effect_style_preview as render_style_preview,
+        get_tv_effect_style,
+        sanitize_tv_effect_params,
+    )
+
+    data = request.get_json(silent=True) or {}
+    custom_params = data.get("params")
+    style_id = str(data.get("styleId", "")).strip()
+    if custom_params is not None:
+        if not isinstance(custom_params, dict):
+            return _error("params không hợp lệ.", code="invalid_params")
+        custom_params = sanitize_tv_effect_params(custom_params)
+        style_id = "custom"
+    elif not get_tv_effect_style(style_id):
+        return _error("Style không hợp lệ.", code="invalid_style", status=404)
+
+    sample_path = _find_sample_clip(data.get("sampleClipId"))
+    if not sample_path:
+        return _error("Không có clip mẫu trong thư viện. Hãy thêm clip trước.", code="no_sample", status=404)
+
+    try:
+        duration = float(data.get("duration", 4.0))
+    except (TypeError, ValueError):
+        duration = 4.0
+
+    output_path = render_style_preview(style_id, sample_path, duration, custom_params=custom_params)
+    if not output_path:
+        return _error("Không thể render preview hiệu ứng.", code="preview_failed", status=500)
+
+    rel = os.path.relpath(output_path, Config.STORAGE_DIR).replace("\\", "/")
+    return jsonify({"previewPath": rel})
+
+
+# ---------------------------------------------------------------------------
 # 10. POST /api/story-video/create — single story video
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/create", methods=["POST"])
@@ -698,6 +821,7 @@ def create_story_video():
         "output_name": output_name,
         "clip_tags": data.get("clipTags", []),
         "crt_settings": data.get("crtSettings", {}),
+        "tv_effect_style_id": str(data.get("tvEffectStyleId", "")).strip(),
         "waveform_overlay_id": str(data.get("waveformOverlayId", "")).strip(),
         "voice_id": str(data.get("voiceId", "")).strip(),
     }
@@ -883,6 +1007,7 @@ def create_story_batch():
             "output_name": output_name,
             "clip_tags": shared_config.get("clipTags", []),
             "crt_settings": shared_config.get("crtSettings", {}),
+            "tv_effect_style_id": str(shared_config.get("tvEffectStyleId", "")).strip(),
             "waveform_overlay_id": str(shared_config.get("waveformOverlayId", "")).strip(),
             "voice_id": str(shared_config.get("voiceId", "")).strip(),
         })

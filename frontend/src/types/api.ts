@@ -646,6 +646,47 @@ export interface CRTDemoResponse {
   demoPath: string;
 }
 
+export type TVEffectTone = "none" | "warm" | "cool" | "vintage" | "sepia" | "bw" | "fade";
+
+export interface TVEffectParams {
+  tone: TVEffectTone;
+  saturation: number;
+  contrast: number;
+  brightness: number;
+  gamma: number;
+  noise: number;
+  chromaShift: number;
+  scanlines: number;
+  vignette: number;
+  flicker: number;
+  flickerSpeed: number;
+  soften: number;
+}
+
+export interface TVEffectStyle {
+  id: string;
+  name: string;
+  description: string;
+  previewPath: string | null;
+  params?: TVEffectParams;
+}
+
+export interface TVEffectStylesResponse {
+  styles: TVEffectStyle[];
+  selectedId: string;
+  customParams: TVEffectParams;
+  customPreviewPath: string | null;
+}
+
+export interface TVEffectPreviewResponse {
+  previewPath: string;
+}
+
+export interface TVEffectCustomSaveResponse {
+  selectedId: string;
+  customParams: TVEffectParams;
+}
+
 export interface TVNoiseOverlay {
   id: string;
   name: string;

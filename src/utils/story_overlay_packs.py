@@ -8,6 +8,7 @@ import math
 import os
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -16,7 +17,9 @@ from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.logger import logger
 
 _pack_lock = threading.Lock()
-_PACK_VERSION = 1
+# v2: prores_ks 4444 thay cho qtrle — qtrle decode don luong (~20fps voi noi dung
+# nhieu) la nut nghen cua pass overlay; ProRes decode da luong nhanh hon nhieu.
+_PACK_VERSION = 2
 
 
 def _target_size() -> tuple[int, int]:
@@ -147,11 +150,42 @@ def build_precompose_command(signature: dict, output_path: str) -> list[str]:
             str(duration),
             "-an",
             "-c:v",
-            "qtrle",
+            "prores_ks",
+            "-profile:v",
+            "4444",
+            "-pix_fmt",
+            "yuva444p10le",
             output_path,
         ]
     )
     return cmd
+
+
+def _replace_file_with_retry(src: str, dst: str, attempts: int = 5, delay_seconds: float = 2.0) -> bool:
+    """Move src over dst, retrying on PermissionError.
+
+    On Windows, antivirus/indexer can hold a freshly written file for a few
+    seconds, making os.replace fail with WinError 32.
+    """
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return True
+        except PermissionError:
+            logger.warning(
+                f"[StoryOverlayPack] File busy moving pack (attempt {attempt + 1}/{attempts}); retrying..."
+            )
+            time.sleep(delay_seconds)
+    try:
+        shutil.copy2(src, dst)
+    except OSError as exc:
+        logger.error(f"[StoryOverlayPack] Cannot finalize pack file: {exc}")
+        return False
+    try:
+        os.remove(src)
+    except OSError:
+        logger.warning(f"[StoryOverlayPack] Leftover temp pack not removed: {src}")
+    return True
 
 
 def _pack_is_valid(pack_path: str, expected_duration: int) -> bool:
@@ -206,7 +240,10 @@ def get_or_create_story_overlay_pack(
         if cancel_callback and cancel_callback():
             return None
 
-        tmp_path = pack_path + ".tmp.mov"
+        # PID-unique temp: the in-process lock cannot stop another process (web
+        # app vs. script) from building the same pack concurrently; a shared
+        # temp name makes the loser crash with WinError 32 on Windows.
+        tmp_path = f"{pack_path}.tmp.{os.getpid()}.mov"
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -231,12 +268,8 @@ def get_or_create_story_overlay_pack(
             logger.warning("[StoryOverlayPack] Failed to build overlay pack; falling back to direct overlays.")
             return None
 
-        try:
-            if os.path.exists(pack_path):
-                os.remove(pack_path)
-        except OSError:
-            pass
-        shutil.move(tmp_path, pack_path)
+        if not _replace_file_with_retry(tmp_path, pack_path):
+            return None
         with open(meta_path, "w", encoding="utf-8") as file_obj:
             json.dump(signature, file_obj, ensure_ascii=False, indent=2)
         return pack_path

@@ -1,4 +1,4 @@
-import { Eye, Link as LinkIcon, Loader2, Save, Star, Trash2, Upload } from "lucide-react";
+import { Check, Eye, Link as LinkIcon, Loader2, Save, Sparkles, Star, Trash2, Upload } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
@@ -15,17 +15,82 @@ import {
   ApiError,
   deleteTVNoiseOverlay,
   deleteWaveformOverlay,
+  generateCustomTVEffectPreview,
+  generateTVEffectStylePreview,
   generateTVNoiseDemo,
+  getTVEffectStyles,
   getTVNoiseOverlayJob,
   getTVNoiseOverlays,
   getWaveformOverlays,
   importTVNoiseOverlayFromYoutube,
+  saveCustomTVEffect,
+  selectTVEffectStyle,
   updateTVNoiseOverlay,
   updateWaveformOverlay,
   uploadTVNoiseOverlay,
   uploadWaveformOverlay,
 } from "@/lib/api";
-import type { TVNoiseOverlay, WaveformOverlay } from "@/types/api";
+import type { TVEffectParams, TVEffectStyle, TVEffectTone, TVNoiseOverlay, WaveformOverlay } from "@/types/api";
+
+const DEFAULT_EFFECT_PARAMS: TVEffectParams = {
+  tone: "none",
+  saturation: 1,
+  contrast: 1,
+  brightness: 0,
+  gamma: 1,
+  noise: 0,
+  chromaShift: 0,
+  scanlines: 0,
+  vignette: 0,
+  flicker: 0,
+  flickerSpeed: 3,
+  soften: 0,
+};
+
+const TONE_OPTIONS: { value: TVEffectTone; label: string }[] = [
+  { value: "none", label: "Giữ nguyên" },
+  { value: "warm", label: "Ấm (vàng)" },
+  { value: "cool", label: "Lạnh (xanh)" },
+  { value: "vintage", label: "Vintage" },
+  { value: "sepia", label: "Sepia (nâu cũ)" },
+  { value: "bw", label: "Đen trắng" },
+  { value: "fade", label: "Fade điện ảnh" },
+];
+
+type EffectNumericKey = Exclude<keyof TVEffectParams, "tone">;
+
+const EFFECT_PARAM_FIELDS: { key: EffectNumericKey; label: string; min: number; max: number; step: number }[] = [
+  { key: "saturation", label: "Bão hòa màu", min: 0, max: 2, step: 0.05 },
+  { key: "contrast", label: "Tương phản", min: 0.5, max: 1.5, step: 0.02 },
+  { key: "brightness", label: "Độ sáng", min: -0.3, max: 0.3, step: 0.01 },
+  { key: "gamma", label: "Gamma", min: 0.5, max: 1.5, step: 0.02 },
+  { key: "noise", label: "Độ nhiễu hạt", min: 0, max: 30, step: 1 },
+  { key: "chromaShift", label: "Lệch màu (px)", min: 0, max: 8, step: 1 },
+  { key: "scanlines", label: "Scanline", min: 0, max: 0.3, step: 0.01 },
+  { key: "vignette", label: "Viền tối", min: 0, max: 1, step: 0.05 },
+  { key: "flicker", label: "Độ nháy sáng", min: 0, max: 0.08, step: 0.005 },
+  { key: "flickerSpeed", label: "Tốc độ nháy (Hz)", min: 0.5, max: 15, step: 0.5 },
+  { key: "soften", label: "Làm mềm", min: 0, max: 1, step: 0.05 },
+];
+
+type EffectForm = Record<EffectNumericKey, string> & { tone: TVEffectTone };
+
+function effectFormFromParams(params: TVEffectParams): EffectForm {
+  const form = { tone: params.tone ?? "none" } as EffectForm;
+  for (const field of EFFECT_PARAM_FIELDS) {
+    form[field.key] = String(params[field.key] ?? DEFAULT_EFFECT_PARAMS[field.key]);
+  }
+  return form;
+}
+
+function effectParamsFromForm(form: EffectForm): TVEffectParams {
+  const params = { ...DEFAULT_EFFECT_PARAMS, tone: form.tone };
+  for (const field of EFFECT_PARAM_FIELDS) {
+    const value = Number(form[field.key]);
+    params[field.key] = Number.isFinite(value) ? value : DEFAULT_EFFECT_PARAMS[field.key];
+  }
+  return params;
+}
 
 type WaveformForm = {
   keyColor: string;
@@ -95,6 +160,16 @@ export function StoryVideoSettingsPage() {
   const [noiseJobId, setNoiseJobId] = useState<string | null>(null);
   const [noiseJobMessage, setNoiseJobMessage] = useState<string | null>(null);
   const [noiseDemoSrc, setNoiseDemoSrc] = useState<string | null>(null);
+  const [tvEffectStyles, setTvEffectStyles] = useState<TVEffectStyle[]>([]);
+  const [selectedEffectId, setSelectedEffectId] = useState("none");
+  const [previewingEffectId, setPreviewingEffectId] = useState<string | null>(null);
+  const [isSelectingEffect, setIsSelectingEffect] = useState(false);
+  const [effectPreviewBust, setEffectPreviewBust] = useState<Record<string, number>>({});
+  const [effectForm, setEffectForm] = useState<EffectForm>(effectFormFromParams(DEFAULT_EFFECT_PARAMS));
+  const [customPreviewPath, setCustomPreviewPath] = useState<string | null>(null);
+  const [customPreviewBust, setCustomPreviewBust] = useState(0);
+  const [isCustomPreviewing, setIsCustomPreviewing] = useState(false);
+  const [isCustomSaving, setIsCustomSaving] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isUploading, setIsUploading] = useState(false);
   const [isNoiseUploading, setIsNoiseUploading] = useState(false);
@@ -133,10 +208,85 @@ export function StoryVideoSettingsPage() {
       .catch((err) => setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai TV noise overlay."));
   };
 
+  const loadTVEffectStyles = () => {
+    return getTVEffectStyles()
+      .then((res) => {
+        setTvEffectStyles(res.styles);
+        setSelectedEffectId(res.selectedId);
+        setEffectForm(effectFormFromParams(res.customParams ?? DEFAULT_EFFECT_PARAMS));
+        setCustomPreviewPath(res.customPreviewPath ?? null);
+      })
+      .catch((err) => setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai hieu ung TV."));
+  };
+
   useEffect(() => {
     setIsLoading(true);
-    Promise.all([loadOverlays(), loadTVNoiseOverlays()]).finally(() => setIsLoading(false));
+    Promise.all([loadOverlays(), loadTVNoiseOverlays(), loadTVEffectStyles()]).finally(() => setIsLoading(false));
   }, []);
+
+  const handleSelectEffect = async (styleId: string) => {
+    setIsSelectingEffect(true);
+    setErrorMessage(null);
+    try {
+      const res = await selectTVEffectStyle(styleId);
+      setSelectedEffectId(res.selectedId);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the chon hieu ung TV.");
+    } finally {
+      setIsSelectingEffect(false);
+    }
+  };
+
+  const handleEffectPreview = async (styleId: string) => {
+    setPreviewingEffectId(styleId);
+    setErrorMessage(null);
+    try {
+      const res = await generateTVEffectStylePreview(styleId, undefined, 4);
+      setTvEffectStyles((current) =>
+        current.map((style) => (style.id === styleId ? { ...style, previewPath: res.previewPath } : style)),
+      );
+      setEffectPreviewBust((current) => ({ ...current, [styleId]: Date.now() }));
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the render preview hieu ung.");
+    } finally {
+      setPreviewingEffectId(null);
+    }
+  };
+
+  const handleCustomPreview = async () => {
+    setIsCustomPreviewing(true);
+    setErrorMessage(null);
+    try {
+      const res = await generateCustomTVEffectPreview(effectParamsFromForm(effectForm), undefined, 4);
+      setCustomPreviewPath(res.previewPath);
+      setCustomPreviewBust(Date.now());
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the render preview custom.");
+    } finally {
+      setIsCustomPreviewing(false);
+    }
+  };
+
+  const handleCustomSave = async () => {
+    setIsCustomSaving(true);
+    setErrorMessage(null);
+    try {
+      const res = await saveCustomTVEffect(effectParamsFromForm(effectForm));
+      setSelectedEffectId(res.selectedId);
+      setEffectForm(effectFormFromParams(res.customParams));
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the luu cau hinh custom.");
+    } finally {
+      setIsCustomSaving(false);
+    }
+  };
+
+  const handleLoadParamsFromPreset = (styleId: string) => {
+    const style = tvEffectStyles.find((item) => item.id === styleId);
+    if (style?.params) {
+      setEffectForm(effectFormFromParams(style.params));
+    }
+  };
 
   useEffect(() => {
     setForm(formFromOverlay(selected));
@@ -332,6 +482,183 @@ export function StoryVideoSettingsPage() {
       />
 
       {errorMessage ? <StatusAlert title="Co loi xay ra" message={errorMessage} variant="destructive" /> : null}
+
+      <PageSection>
+        <div className="mb-4 space-y-1">
+          <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+            <Sparkles className="size-4 text-primary" />
+            Hieu ung TV 1990s
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Cac hieu ung dung filter co san cua FFmpeg (mau sac, chroma bleed, scanline, flicker, vignette) — render GPU
+            (NVDEC + NVENC) trong cung 1 pass voi overlay. Bam Preview de render thu 4 giay tu clip mau trong thu vien.
+          </p>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {tvEffectStyles.map((style) => {
+            const isSelected = style.id === selectedEffectId;
+            const isPreviewing = previewingEffectId === style.id;
+            const bust = effectPreviewBust[style.id];
+            const previewSrc = style.previewPath ? `/media/${style.previewPath}${bust ? `?t=${bust}` : ""}` : null;
+            return (
+              <div
+                key={style.id}
+                className={`flex flex-col gap-3 rounded-lg border p-4 transition-colors ${
+                  isSelected ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate text-sm font-semibold text-foreground">{style.name}</span>
+                  {isSelected ? (
+                    <Badge className="rounded-full">
+                      <Check className="mr-1 size-3" />
+                      Dang dung
+                    </Badge>
+                  ) : null}
+                </div>
+                <p className="min-h-10 text-xs text-muted-foreground">{style.description}</p>
+
+                {previewSrc ? (
+                  <video src={previewSrc} controls loop muted className="aspect-video w-full rounded-md bg-black object-contain" />
+                ) : (
+                  <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-border bg-background/50 text-xs text-muted-foreground">
+                    Chua co preview
+                  </div>
+                )}
+
+                <div className="mt-auto flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void handleEffectPreview(style.id)}
+                    disabled={previewingEffectId !== null}
+                  >
+                    {isPreviewing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
+                    {isPreviewing ? "Dang render..." : "Preview 4s"}
+                  </Button>
+                  {!isSelected ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => void handleSelectEffect(style.id)}
+                      disabled={isSelectingEffect}
+                    >
+                      {isSelectingEffect ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Check className="mr-2 size-4" />}
+                      Dung hieu ung nay
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div
+          className={`mt-6 rounded-lg border p-4 ${
+            selectedEffectId === "custom" ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+          }`}
+        >
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                Tuy chinh hieu ung
+                {selectedEffectId === "custom" ? (
+                  <Badge className="rounded-full">
+                    <Check className="mr-1 size-3" />
+                    Dang dung
+                  </Badge>
+                ) : null}
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                Chinh tung thong so (do nhieu, vien toi, tan suat nhay...) roi render preview truoc khi ap dung. De nhay
+                de chiu: do nhay &le; 0.02 va toc do 2-5 Hz.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                defaultValue=""
+                onChange={(event) => {
+                  if (event.target.value) handleLoadParamsFromPreset(event.target.value);
+                  event.target.value = "";
+                }}
+                className="h-9 rounded-md border border-input bg-background px-3 text-xs"
+              >
+                <option value="">Nap thong so tu preset...</option>
+                {tvEffectStyles
+                  .filter((style) => style.id !== "none")
+                  .map((style) => (
+                    <option key={style.id} value={style.id}>
+                      {style.name}
+                    </option>
+                  ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid gap-5 lg:grid-cols-[1fr_minmax(280px,420px)]">
+            <div className="grid content-start gap-3 sm:grid-cols-3 md:grid-cols-4">
+              <div className="grid gap-1.5">
+                <Label className="text-xs">Tong mau</Label>
+                <select
+                  value={effectForm.tone}
+                  onChange={(event) => setEffectForm((current) => ({ ...current, tone: event.target.value as TVEffectTone }))}
+                  className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+                >
+                  {TONE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {EFFECT_PARAM_FIELDS.map((field) => (
+                <div key={field.key} className="grid gap-1.5">
+                  <Label className="text-xs">
+                    {field.label} <span className="text-muted-foreground">({field.min}–{field.max})</span>
+                  </Label>
+                  <Input
+                    type="number"
+                    min={field.min}
+                    max={field.max}
+                    step={field.step}
+                    value={effectForm[field.key]}
+                    onChange={(event) =>
+                      setEffectForm((current) => ({ ...current, [field.key]: event.target.value }))
+                    }
+                    className="h-9"
+                  />
+                </div>
+              ))}
+              <div className="col-span-full flex flex-wrap gap-3 pt-1">
+                <Button type="button" variant="outline" onClick={() => void handleCustomPreview()} disabled={isCustomPreviewing}>
+                  {isCustomPreviewing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
+                  {isCustomPreviewing ? "Dang render..." : "Render preview 4s"}
+                </Button>
+                <Button type="button" onClick={() => void handleCustomSave()} disabled={isCustomSaving}>
+                  {isCustomSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
+                  Luu & dung cau hinh nay
+                </Button>
+              </div>
+            </div>
+
+            {customPreviewPath ? (
+              <video
+                src={`/media/${customPreviewPath}${customPreviewBust ? `?t=${customPreviewBust}` : ""}`}
+                controls
+                loop
+                muted
+                className="aspect-video w-full self-start rounded-md bg-black object-contain"
+              />
+            ) : (
+              <div className="flex aspect-video w-full items-center justify-center self-start rounded-md border border-dashed border-border bg-background/50 text-xs text-muted-foreground">
+                Chua co preview custom — chinh thong so roi bam Render preview
+              </div>
+            )}
+          </div>
+        </div>
+      </PageSection>
 
       <PageSection>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">

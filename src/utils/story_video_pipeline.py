@@ -100,6 +100,7 @@ class StoryVideoPipelineRunner:
         self.clip_tags = config_dict.get("clip_tags", [])
         self.voice_id = config_dict.get("voice_id", "")
         self.waveform_overlay_id = str(config_dict.get("waveform_overlay_id", "") or "").strip()
+        self.tv_effect_style_id = str(config_dict.get("tv_effect_style_id", "") or "").strip()
 
         self._lock = threading.Lock()
         self.progress = {
@@ -506,6 +507,17 @@ class StoryVideoPipelineRunner:
         )
         return None
 
+    def _tv_effect_filter(self) -> str:
+        """Filter chain for the selected 1990s TV effect style (empty when disabled)."""
+        from src.processors.crt_effect_processor import get_tv_effect_filter
+
+        return get_tv_effect_filter(self.tv_effect_style_id or None)
+
+    @staticmethod
+    def _hwaccel_flags() -> list:
+        """NVDEC decode flags for the base video input (CPU fallback handled by caller)."""
+        return ["-hwaccel", "cuda"] if Config.USE_GPU_NVENC else []
+
     def _apply_story_overlays(self, current_video: str, audio_duration: float) -> str | None:
         """Overlay TV noise layers and the configured waveform in a single FFmpeg pass."""
         from src.utils.story_overlay_packs import get_or_create_story_overlay_pack
@@ -543,19 +555,30 @@ class StoryVideoPipelineRunner:
             if processed_path:
                 tv_noise_paths.append((record, processed_path))
 
+        style_filter = self._tv_effect_filter()
+
         if not tv_noise_paths and not waveform_path:
+            if style_filter:
+                return self._apply_tv_effect_only(current_video, audio_duration, style_filter)
             logger.info(f"[StoryPipeline:{self.story_id}] No story overlays configured.")
             return current_video
 
-        pack_path = get_or_create_story_overlay_pack(
-            tv_noise_paths,
-            waveform_record if waveform_path else None,
-            waveform_path,
-            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
-        )
+        # Precompose only when there are full-frame noise layers to merge. With
+        # just the small waveform, a direct overlay is much cheaper than
+        # blending a full-frame alpha pack every frame (~4% vs 100% of pixels).
+        pack_path = None
+        if tv_noise_paths:
+            pack_path = get_or_create_story_overlay_pack(
+                tv_noise_paths,
+                waveform_record if waveform_path else None,
+                waveform_path,
+                cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+            )
         self._raise_if_cancel_requested()
         if pack_path:
-            packed_output = self._apply_precomposed_story_overlay(current_video, audio_duration, pack_path)
+            packed_output = self._apply_precomposed_story_overlay(
+                current_video, audio_duration, pack_path, style_filter
+            )
             self._raise_if_cancel_requested()
             if packed_output:
                 return packed_output
@@ -565,7 +588,8 @@ class StoryVideoPipelineRunner:
 
         temp = _temp_dir(self.story_id)
         output_path = os.path.join(temp, f"story_overlays_{self.story_id}.mp4")
-        cmd = ["ffmpeg", "-y", "-i", current_video]
+        hwaccel_flags = self._hwaccel_flags()
+        cmd = ["ffmpeg", "-y", *hwaccel_flags, "-i", current_video]
 
         for _record, overlay_path in tv_noise_paths:
             cmd.extend(["-stream_loop", "-1", "-i", overlay_path])
@@ -577,6 +601,9 @@ class StoryVideoPipelineRunner:
 
         filter_parts: list[str] = []
         chain_label = "[0:v]"
+        if style_filter:
+            filter_parts.append(f"[0:v]{style_filter}[styled]")
+            chain_label = "[styled]"
         for index, (_record, _overlay_path) in enumerate(tv_noise_paths):
             input_index = index + 1
             noise_label = f"tvnoise{index}"
@@ -632,6 +659,17 @@ class StoryVideoPipelineRunner:
             progress_total_seconds=audio_duration,
             cancel_callback=lambda: is_story_cancel_requested(self.story_id),
         )
+        if not ok and hwaccel_flags:
+            self._raise_if_cancel_requested()
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] CUDA decode failed for overlay pass; retrying with CPU decode."
+            )
+            ok = FFmpegHelper.run_command(
+                cmd[:2] + cmd[2 + len(hwaccel_flags):],
+                progress_callback=_progress,
+                progress_total_seconds=audio_duration,
+                cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+            )
         if ok and os.path.isfile(output_path):
             return output_path
 
@@ -651,20 +689,26 @@ class StoryVideoPipelineRunner:
         current_video: str,
         audio_duration: float,
         pack_path: str,
+        style_filter: str = "",
     ) -> str | None:
         """Overlay a cached precomposed alpha pack in a single FFmpeg overlay layer."""
         temp = _temp_dir(self.story_id)
         output_path = os.path.join(temp, f"story_overlay_pack_{self.story_id}.mp4")
         fps = max(1, int(Config.TARGET_FPS))
+        base_chain = "setpts=PTS-STARTPTS"
+        if style_filter:
+            base_chain = f"{base_chain},{style_filter}"
         filter_str = (
-            "[0:v]setpts=PTS-STARTPTS,format=yuv420p[base];"
+            f"[0:v]{base_chain},format=yuv420p[base];"
             f"[1:v]setpts=N/{fps}/TB[pack];"
             "[base][pack]overlay=0:0:format=auto:eof_action=repeat:eval=init[packed];"
             "[packed]format=yuv420p[v]"
         )
+        hwaccel_flags = self._hwaccel_flags()
         cmd = [
             "ffmpeg",
             "-y",
+            *hwaccel_flags,
             "-i",
             current_video,
             "-stream_loop",
@@ -705,9 +749,91 @@ class StoryVideoPipelineRunner:
             progress_total_seconds=audio_duration,
             cancel_callback=lambda: is_story_cancel_requested(self.story_id),
         )
+        if not ok and hwaccel_flags:
+            self._raise_if_cancel_requested()
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] CUDA decode failed for pack overlay; retrying with CPU decode."
+            )
+            ok = FFmpegHelper.run_command(
+                cmd[:2] + cmd[2 + len(hwaccel_flags):],
+                progress_callback=_progress,
+                progress_total_seconds=audio_duration,
+                cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+            )
         if ok and os.path.isfile(output_path):
             logger.info(f"[StoryPipeline:{self.story_id}] Applied precomposed overlay pack: {pack_path}")
             return output_path
+        return None
+
+    def _apply_tv_effect_only(
+        self,
+        current_video: str,
+        audio_duration: float,
+        style_filter: str,
+    ) -> str | None:
+        """Apply the selected TV effect style when no overlays are configured."""
+        temp = _temp_dir(self.story_id)
+        output_path = os.path.join(temp, f"story_tv_effect_{self.story_id}.mp4")
+        hwaccel_flags = self._hwaccel_flags()
+        cmd = [
+            "ffmpeg",
+            "-y",
+            *hwaccel_flags,
+            "-i",
+            current_video,
+            "-vf",
+            f"{style_filter},format=yuv420p",
+            "-t",
+            str(audio_duration),
+        ]
+        cmd.extend(FFmpegHelper.get_nvenc_flags())
+        cmd.extend([
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ])
+
+        def _progress(payload: dict):
+            ffmpeg_percent = payload.get("ffmpegPercent")
+            if ffmpeg_percent is None:
+                return
+            self._update_progress(
+                "story_overlays",
+                90 + (float(ffmpeg_percent) * 0.08),
+                "Dang ap dung hieu ung TV...",
+            )
+
+        ok = FFmpegHelper.run_command(
+            cmd,
+            progress_callback=_progress,
+            progress_total_seconds=audio_duration,
+            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+        )
+        if not ok and hwaccel_flags:
+            self._raise_if_cancel_requested()
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] CUDA decode failed for TV effect pass; retrying with CPU decode."
+            )
+            ok = FFmpegHelper.run_command(
+                cmd[:2] + cmd[2 + len(hwaccel_flags):],
+                progress_callback=_progress,
+                progress_total_seconds=audio_duration,
+                cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+            )
+        if ok and os.path.isfile(output_path):
+            return output_path
+
+        self._raise_if_cancel_requested()
+        logger.error(f"[StoryPipeline:{self.story_id}] Failed to apply TV effect style.")
+        self._update_progress(
+            "story_overlays",
+            90,
+            "Ap dung hieu ung TV that bai.",
+            status="failed",
+            error="TV effect pass failed.",
+        )
         return None
 
     def _finalize(self, current_video: str) -> str:

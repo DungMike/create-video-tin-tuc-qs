@@ -259,6 +259,10 @@ import type {
   StoryProviderVideoSearchResponse,
   StoryVideoProvider,
   StoryVideoProgress,
+  TVEffectCustomSaveResponse,
+  TVEffectParams,
+  TVEffectPreviewResponse,
+  TVEffectStylesResponse,
   TVNoiseOverlay,
   TVNoiseOverlayJob,
   TVNoiseOverlayUploadResponse,
@@ -538,6 +542,44 @@ export async function generateCRTDemo(settings: CRTSettings, sampleClipId?: stri
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ settings, sampleClipId }),
+  });
+}
+
+// === TV Effect Styles (1990s looks) ===
+
+export async function getTVEffectStyles() {
+  return requestJson<TVEffectStylesResponse>("/api/story-video/tv-effects");
+}
+
+export async function selectTVEffectStyle(styleId: string) {
+  return requestJson<{ selectedId: string }>("/api/story-video/tv-effects/select", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ styleId }),
+  });
+}
+
+export async function generateTVEffectStylePreview(styleId: string, sampleClipId?: string, duration?: number) {
+  return requestJson<TVEffectPreviewResponse>("/api/story-video/tv-effects/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ styleId, sampleClipId, duration }),
+  });
+}
+
+export async function generateCustomTVEffectPreview(params: TVEffectParams, sampleClipId?: string, duration?: number) {
+  return requestJson<TVEffectPreviewResponse>("/api/story-video/tv-effects/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ params, sampleClipId, duration }),
+  });
+}
+
+export async function saveCustomTVEffect(params: TVEffectParams) {
+  return requestJson<TVEffectCustomSaveResponse>("/api/story-video/tv-effects/custom", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ params }),
   });
 }
 
