@@ -259,6 +259,8 @@ import type {
   StoryProviderVideoSearchResponse,
   StoryVideoProvider,
   StoryVideoProgress,
+  SubtitleFontInfo,
+  SubtitlePresetInfo,
   TVEffectCustomSaveResponse,
   TVEffectParams,
   TVEffectPreviewResponse,
@@ -629,10 +631,11 @@ export async function generateTVNoiseDemo(overlayId?: string, sampleClipId?: str
 
 // === Story Video ===
 
-export async function createStoryVideo(payload: CreateStoryVideoRequest, audioFile?: File) {
-  if (audioFile) {
+export async function createStoryVideo(payload: CreateStoryVideoRequest, audioFile?: File, subtitleFile?: File) {
+  if (audioFile || subtitleFile) {
     const fd = new FormData();
-    fd.append("audio", audioFile);
+    if (audioFile) fd.append("audio", audioFile);
+    if (subtitleFile) fd.append("subtitle", subtitleFile);
     fd.append("payload", JSON.stringify(payload));
     return requestJson<{ storyId: string }>("/api/story-video/create", { method: "POST", body: fd });
   }
@@ -657,11 +660,14 @@ export async function cancelStoryVideo(storyId: string) {
 
 // === Story Video Batch ===
 
-export async function createStoryBatch(payload: CreateStoryBatchRequest, audioFiles?: File[]) {
+export async function createStoryBatch(payload: CreateStoryBatchRequest, audioFiles?: File[], subtitleFiles?: File[]) {
   const fd = new FormData();
   fd.append("payload", JSON.stringify(payload));
   if (audioFiles?.length) {
     audioFiles.forEach((f) => fd.append("audio_files", f));
+  }
+  if (subtitleFiles?.length) {
+    subtitleFiles.forEach((f) => fd.append("subtitle_files", f));
   }
   return requestJson<{ batchId: string }>("/api/story-video/batch/create", { method: "POST", body: fd });
 }
@@ -695,6 +701,36 @@ export async function cancelStoryBatch(batchId: string) {
 
 export async function retryStoryBatchFailed(batchId: string) {
   return requestJson<{ batchId: string; retryCount: number }>(`/api/story-video/batch/${batchId}/retry-failed`, { method: "POST" });
+}
+
+// === Story Subtitles ===
+
+export async function getSubtitleFonts() {
+  return requestJson<{ fonts: SubtitleFontInfo[]; defaultFamily: string }>("/api/story-video/subtitle-fonts");
+}
+
+export async function uploadSubtitleFont(file: File) {
+  const fd = new FormData();
+  fd.append("font", file);
+  return requestJson<{ fonts: SubtitleFontInfo[]; defaultFamily: string }>("/api/story-video/subtitle-fonts", { method: "POST", body: fd });
+}
+
+export async function getSubtitlePresets() {
+  return requestJson<{ presets: SubtitlePresetInfo[] }>("/api/story-video/subtitle-presets");
+}
+
+export async function generateSubtitlePreview(body: {
+  font: string;
+  presetId: string;
+  maxCharsPerLine: number;
+  maxLines: number;
+  sampleClipId?: string;
+}) {
+  return requestJson<{ previewPath: string }>("/api/story-video/subtitle-preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 // === Waveform Overlay ===

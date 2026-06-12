@@ -773,6 +773,121 @@ def generate_tv_effect_style_preview():
 
 
 # ---------------------------------------------------------------------------
+# 9c. Subtitle fonts / presets / preview
+# ---------------------------------------------------------------------------
+def _subtitle_config_from_payload(payload: dict) -> dict:
+    """Map camelCase subtitle payload keys to pipeline config keys (without subtitle_path)."""
+
+    def _positive_int(value, default: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed > 0 else default
+
+    return {
+        "subtitle_font": str(payload.get("subtitleFont", "")).strip(),
+        "subtitle_preset": str(payload.get("subtitlePreset", "")).strip() or "clean",
+        "subtitle_max_chars_per_line": _positive_int(
+            payload.get("subtitleMaxCharsPerLine"), Config.STORY_SUBTITLE_MAX_CHARS_PER_LINE
+        ),
+        "subtitle_max_lines": _positive_int(
+            payload.get("subtitleMaxLines"), Config.STORY_SUBTITLE_MAX_LINES
+        ),
+    }
+
+
+@story_video_bp.route("/api/story-video/subtitle-fonts", methods=["GET"])
+def get_subtitle_fonts():
+    from src.utils.story_subtitles import scan_fonts
+
+    return jsonify({
+        "fonts": scan_fonts(),
+        "defaultFamily": Config.STORY_SUBTITLE_DEFAULT_FONT,
+    })
+
+
+@story_video_bp.route("/api/story-video/subtitle-fonts", methods=["POST"])
+def upload_subtitle_font():
+    from src.utils.story_subtitles import scan_fonts
+
+    font_file = request.files.get("font")
+    if not font_file or not font_file.filename:
+        return _error("Chưa chọn file font.", code="no_file")
+
+    ext = font_file.filename.rsplit(".", 1)[-1].lower() if "." in font_file.filename else ""
+    if ext not in {"ttf", "otf", "ttc"}:
+        return _error("Font phải có định dạng .ttf, .otf hoặc .ttc.", code="invalid_font_format")
+
+    font_file.stream.seek(0, os.SEEK_END)
+    font_size = font_file.stream.tell()
+    font_file.stream.seek(0)
+    if font_size > 40 * 1024 * 1024:
+        return _error("File font vượt quá 40MB.", code="font_too_large")
+
+    safe_name = secure_filename(font_file.filename)
+    if not safe_name.lower().endswith(f".{ext}"):
+        safe_name = f"font_{str(uuid.uuid4())[:8]}.{ext}"
+
+    os.makedirs(Config.STORY_FONTS_DIR, exist_ok=True)
+    font_file.save(os.path.join(Config.STORY_FONTS_DIR, safe_name))
+    logger.info(f"[StoryVideo] Subtitle font uploaded: {safe_name}")
+
+    return jsonify({
+        "fonts": scan_fonts(force_refresh=True),
+        "defaultFamily": Config.STORY_SUBTITLE_DEFAULT_FONT,
+    }), 201
+
+
+@story_video_bp.route("/api/story-video/subtitle-presets", methods=["GET"])
+def get_subtitle_presets():
+    from src.utils.story_subtitles import SUBTITLE_PRESETS
+
+    return jsonify({"presets": SUBTITLE_PRESETS})
+
+
+@story_video_bp.route("/api/story-video/subtitle-preview", methods=["POST"])
+def generate_subtitle_preview():
+    """Render a short subtitle preview. Body: {font, presetId, maxCharsPerLine, maxLines, sampleClipId?}."""
+    from src.utils.story_subtitles import get_subtitle_preset, render_subtitle_preview
+
+    data = request.get_json(silent=True) or {}
+    font_family = str(data.get("font", "")).strip() or Config.STORY_SUBTITLE_DEFAULT_FONT
+    preset_id = str(data.get("presetId", "")).strip() or "clean"
+    if not get_subtitle_preset(preset_id):
+        return _error("Preset không hợp lệ.", code="invalid_preset", status=404)
+
+    try:
+        max_chars = int(data.get("maxCharsPerLine", Config.STORY_SUBTITLE_MAX_CHARS_PER_LINE))
+        max_lines = int(data.get("maxLines", Config.STORY_SUBTITLE_MAX_LINES))
+    except (TypeError, ValueError):
+        return _error("maxCharsPerLine/maxLines không hợp lệ.", code="invalid_subtitle_config")
+    if max_chars < 1 or max_lines < 1:
+        return _error("maxCharsPerLine/maxLines không hợp lệ.", code="invalid_subtitle_config")
+
+    style_overrides = data.get("styleOverrides")
+    if not isinstance(style_overrides, dict):
+        style_overrides = None
+
+    # Empty library is fine: render_subtitle_preview falls back to a lavfi background.
+    sample_path = _find_sample_clip(data.get("sampleClipId"))
+
+    output_path = render_subtitle_preview(
+        font_family,
+        preset_id,
+        max_chars,
+        max_lines,
+        sample_clip_path=sample_path,
+        style_overrides=style_overrides,
+    )
+    if not output_path:
+        return _error("Không thể render preview phụ đề.", code="preview_failed", status=500)
+
+    rel = os.path.relpath(output_path, Config.STORAGE_DIR).replace("\\", "/")
+    return jsonify({"previewPath": rel})
+
+
+# ---------------------------------------------------------------------------
 # 10. POST /api/story-video/create — single story video
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/create", methods=["POST"])
@@ -787,9 +902,11 @@ def create_story_video():
         except json.JSONDecodeError:
             return _error("payload khong phai JSON hop le.", code="invalid_payload")
         audio_file = request.files.get("audio")
+        subtitle_file = request.files.get("subtitle")
     else:
         data = request.get_json(silent=True) or {}
         audio_file = None
+        subtitle_file = None
 
     input_type = str(data.get("inputType", "")).strip()
     if input_type not in ("audio_file", "script_url"):
@@ -798,6 +915,11 @@ def create_story_video():
     output_name = str(data.get("outputName", "")).strip()
     if not output_name:
         return _error("outputName không được để trống.", code="missing_output_name")
+
+    if subtitle_file and subtitle_file.filename:
+        sub_ext = subtitle_file.filename.rsplit(".", 1)[-1].lower() if "." in subtitle_file.filename else ""
+        if sub_ext != "srt":
+            return _error("File subtitle phải có định dạng .srt.", code="invalid_subtitle_format")
 
     story_id = f"sv-{str(uuid.uuid4())[:8]}"
     story_dir = os.path.join(Config.STORY_VIDEO_DIR, story_id)
@@ -812,6 +934,15 @@ def create_story_video():
         input_value = audio_path
         input_type = "audio_file"
 
+    # Handle subtitle file upload (.srt)
+    subtitle_path = ""
+    if subtitle_file and subtitle_file.filename:
+        safe_sub_name = secure_filename(subtitle_file.filename)
+        if not safe_sub_name.lower().endswith(".srt"):
+            safe_sub_name = "subtitle.srt"
+        subtitle_path = os.path.join(story_dir, safe_sub_name)
+        subtitle_file.save(subtitle_path)
+
     if not input_value:
         return _error("inputValue không được để trống.", code="missing_input_value")
 
@@ -824,6 +955,8 @@ def create_story_video():
         "tv_effect_style_id": str(data.get("tvEffectStyleId", "")).strip(),
         "waveform_overlay_id": str(data.get("waveformOverlayId", "")).strip(),
         "voice_id": str(data.get("voiceId", "")).strip(),
+        "subtitle_path": subtitle_path,
+        **_subtitle_config_from_payload(data),
     }
 
     runner = StoryVideoPipelineRunner(story_id, config_dict)
@@ -975,6 +1108,27 @@ def create_story_batch():
             audio_name_map[safe_name] = audio_path
             audio_name_map[str(af.filename)] = audio_path
 
+    # Handle uploaded subtitle files (mirrors the audio file mapping)
+    subtitle_files = request.files.getlist("subtitle_files")
+    subtitle_file_map: dict[int, str] = {}
+    subtitle_name_map: dict[str, str] = {}
+    for i, sf in enumerate(subtitle_files):
+        if sf.filename:
+            sub_ext = sf.filename.rsplit(".", 1)[-1].lower() if "." in sf.filename else ""
+            if sub_ext != "srt":
+                shutil.rmtree(batch_dir, ignore_errors=True)
+                return _error("File subtitle phải có định dạng .srt.", code="invalid_subtitle_format")
+            safe_name = secure_filename(sf.filename)
+            if not safe_name.lower().endswith(".srt"):
+                safe_name = "subtitle.srt"
+            saved_subtitle_path = os.path.join(batch_dir, f"subtitle_{i}_{safe_name}")
+            sf.save(saved_subtitle_path)
+            subtitle_file_map[i] = saved_subtitle_path
+            subtitle_name_map[safe_name] = saved_subtitle_path
+            subtitle_name_map[str(sf.filename)] = saved_subtitle_path
+
+    shared_subtitle_config = _subtitle_config_from_payload(shared_config)
+
     # Build story configs
     story_configs = []
     for idx, item in enumerate(items):
@@ -1000,6 +1154,19 @@ def create_story_batch():
                 shutil.rmtree(batch_dir, ignore_errors=True)
                 return _error(str(exc), code=exc.code)
 
+        # Map subtitle upload indexes or filenames to durable batch files.
+        subtitle_ref = str(item.get("subtitleFile", "")).strip()
+        subtitle_path = ""
+        if subtitle_ref:
+            if subtitle_ref.isdigit():
+                file_idx = int(subtitle_ref)
+                if file_idx in subtitle_file_map:
+                    subtitle_path = subtitle_file_map[file_idx]
+            elif subtitle_ref in subtitle_name_map:
+                subtitle_path = subtitle_name_map[subtitle_ref]
+            elif secure_filename(subtitle_ref) in subtitle_name_map:
+                subtitle_path = subtitle_name_map[secure_filename(subtitle_ref)]
+
         story_configs.append({
             "story_id": f"sv-{str(uuid.uuid4())[:8]}",
             "input_type": input_type,
@@ -1010,6 +1177,8 @@ def create_story_batch():
             "tv_effect_style_id": str(shared_config.get("tvEffectStyleId", "")).strip(),
             "waveform_overlay_id": str(shared_config.get("waveformOverlayId", "")).strip(),
             "voice_id": str(shared_config.get("voiceId", "")).strip(),
+            "subtitle_path": subtitle_path,
+            **shared_subtitle_config,
         })
 
     runner = StoryVideoBatchRunner(batch_id, story_configs)
@@ -1138,6 +1307,15 @@ def retry_batch_failed(batch_id: str):
             "output_name": s.get("output_name", ""),
             "clip_tags": s.get("clip_tags", []),
             "voice_id": s.get("voice_id", ""),
+            "subtitle_path": s.get("subtitle_path", ""),
+            "subtitle_font": s.get("subtitle_font", ""),
+            "subtitle_preset": s.get("subtitle_preset", "clean"),
+            "subtitle_max_chars_per_line": s.get(
+                "subtitle_max_chars_per_line", Config.STORY_SUBTITLE_MAX_CHARS_PER_LINE
+            ),
+            "subtitle_max_lines": s.get(
+                "subtitle_max_lines", Config.STORY_SUBTITLE_MAX_LINES
+            ),
         })
 
     retry_batch_id = f"{batch_id}-retry"

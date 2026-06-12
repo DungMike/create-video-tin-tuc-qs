@@ -755,6 +755,10 @@ export interface CreateStoryVideoRequest {
   crtSettings?: CRTSettings;
   waveformOverlayId?: string;
   voiceId?: string;
+  subtitleFont?: string;
+  subtitlePreset?: string;
+  subtitleMaxCharsPerLine?: number;
+  subtitleMaxLines?: number;
 }
 
 export interface StoryVideoProgress {
@@ -773,6 +777,7 @@ export interface CreateStoryBatchItem {
   inputType: "audio_file" | "script_url" | "drive_audio";
   inputValue: string;
   outputName: string;
+  subtitleFile?: string;
 }
 
 export interface CreateStoryBatchRequest {
@@ -782,7 +787,24 @@ export interface CreateStoryBatchRequest {
     crtSettings?: CRTSettings;
     waveformOverlayId?: string;
     voiceId?: string;
+    subtitleFont?: string;
+    subtitlePreset?: string;
+    subtitleMaxCharsPerLine?: number;
+    subtitleMaxLines?: number;
   };
+}
+
+export interface SubtitleFontInfo {
+  family: string;
+  supportsKorean: boolean;
+  supportsVietnamese: boolean;
+  source: "system" | "user";
+}
+
+export interface SubtitlePresetInfo {
+  id: string;
+  name: string;
+  description: string;
 }
 
 export interface StoryBatchItemProgress {

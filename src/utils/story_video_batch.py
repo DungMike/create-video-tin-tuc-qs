@@ -121,6 +121,15 @@ class StoryVideoBatchRunner:
                 "output_name": config.get("output_name", ""),
                 "clip_tags": config.get("clip_tags", []),
                 "voice_id": config.get("voice_id", ""),
+                "subtitle_path": config.get("subtitle_path", ""),
+                "subtitle_font": config.get("subtitle_font", ""),
+                "subtitle_preset": config.get("subtitle_preset", "clean"),
+                "subtitle_max_chars_per_line": config.get(
+                    "subtitle_max_chars_per_line", Config.STORY_SUBTITLE_MAX_CHARS_PER_LINE
+                ),
+                "subtitle_max_lines": config.get(
+                    "subtitle_max_lines", Config.STORY_SUBTITLE_MAX_LINES
+                ),
             })
 
         self._save_progress()

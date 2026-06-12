@@ -1,4 +1,4 @@
-import { Download, Loader2, Plus, RotateCcw, Settings, Square, Trash2, Upload } from "lucide-react";
+import { Download, Eye, Loader2, Plus, RotateCcw, Settings, Square, Trash2, Upload } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -26,20 +26,27 @@ import {
   cancelStoryVideo,
   createStoryBatch,
   createStoryVideo,
+  generateSubtitlePreview,
   getStoryBatchProgress,
   getStoryDriveAudioImport,
   getStoryVideoProgress,
+  getSubtitleFonts,
+  getSubtitlePresets,
   getVoices,
   retryStoryBatchFailed,
   startStoryDriveAudioImport,
+  uploadSubtitleFont,
 } from "@/lib/api";
 import type {
   CreateStoryBatchItem,
+  CreateStoryBatchRequest,
   CreateStoryVideoRequest,
   DriveAudioImportProgress,
   StoryBatchItemProgress,
   StoryBatchProgress,
   StoryVideoProgress,
+  SubtitleFontInfo,
+  SubtitlePresetInfo,
   VoiceRecord,
 } from "@/types/api";
 
@@ -60,6 +67,7 @@ interface BatchItem {
   inputValue: string;
   outputName: string;
   audioFile: File | null;
+  subtitleFile: File | null;
   sourceName: string;
 }
 
@@ -72,6 +80,12 @@ function nextBatchId(): string {
 
 function outputNameFromFileName(filename: string): string {
   return filename.replace(/\.[^/.]+$/, "").trim() || "story-item";
+}
+
+function clampInt(value: string, min: number, max: number, fallback: number): number {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(num)));
 }
 
 function stageLabel(stage: string): string {
@@ -104,6 +118,19 @@ export function StoryVideoPage() {
   });
   const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
   const [audioInputKey, setAudioInputKey] = useState(0);
+  const [singleSubtitleFile, setSingleSubtitleFile] = useState<File | null>(null);
+  const [subtitleInputKey, setSubtitleInputKey] = useState(0);
+  const [subtitleFonts, setSubtitleFonts] = useState<SubtitleFontInfo[]>([]);
+  const [subtitlePresets, setSubtitlePresets] = useState<SubtitlePresetInfo[]>([]);
+  const [subtitleFont, setSubtitleFont] = useState("");
+  const [subtitlePreset, setSubtitlePreset] = useState("clean");
+  const [subtitleMaxCharsPerLine, setSubtitleMaxCharsPerLine] = useState("42");
+  const [subtitleMaxLines, setSubtitleMaxLines] = useState("2");
+  const [fontInputKey, setFontInputKey] = useState(0);
+  const [isUploadingFont, setIsUploadingFont] = useState(false);
+  const [isSubtitlePreviewing, setIsSubtitlePreviewing] = useState(false);
+  const [subtitlePreviewPath, setSubtitlePreviewPath] = useState<string | null>(null);
+  const [subtitlePreviewBust, setSubtitlePreviewBust] = useState(0);
   const [voices, setVoices] = useState<VoiceRecord[]>([]);
   const [defaultVoiceId, setDefaultVoiceId] = useState("");
   const [voiceId, setVoiceId] = useState("");
@@ -139,39 +166,50 @@ export function StoryVideoPage() {
     setIsSubmitting(true);
     try {
       const audioFiles: File[] = [];
+      const subtitleFiles: File[] = [];
       const items: CreateStoryBatchItem[] = itemsToSubmit.map((item) => {
         let inputValue = item.inputValue;
         if (item.inputType === "audio_file") {
           inputValue = String(audioFiles.length);
           if (item.audioFile) audioFiles.push(item.audioFile);
         }
-        return {
+        const entry: CreateStoryBatchItem = {
           id: item.id,
           inputType: item.inputType,
           inputValue,
           outputName: item.outputName,
         };
+        if (item.subtitleFile) {
+          entry.subtitleFile = String(subtitleFiles.length);
+          subtitleFiles.push(item.subtitleFile);
+        }
+        return entry;
       });
+      const sharedConfig: CreateStoryBatchRequest["sharedConfig"] = {
+        clipTags: [],
+        voiceId: voiceId || undefined,
+      };
+      if (subtitleFiles.length) {
+        sharedConfig.subtitleFont = subtitleFont || undefined;
+        sharedConfig.subtitlePreset = subtitlePreset;
+        sharedConfig.subtitleMaxCharsPerLine = clampInt(subtitleMaxCharsPerLine, 16, 60, 42);
+        sharedConfig.subtitleMaxLines = clampInt(subtitleMaxLines, 1, 3, 2);
+      }
       const response = await createStoryBatch(
-        {
-          items,
-          sharedConfig: {
-            clipTags: [],
-            voiceId: voiceId || undefined,
-          },
-        },
+        { items, sharedConfig },
         audioFiles.length ? audioFiles : undefined,
+        subtitleFiles.length ? subtitleFiles : undefined,
       );
       setBatchId(response.batchId);
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the bat dau batch render.");
       setIsSubmitting(false);
     }
-  }, [resetProgress, voiceId]);
+  }, [resetProgress, voiceId, subtitleFont, subtitlePreset, subtitleMaxCharsPerLine, subtitleMaxLines]);
 
   useEffect(() => {
     let cancelled = false;
-    getVoices()
+    const loadVoices = getVoices()
       .then((voiceRes) => {
         if (cancelled) return;
         setVoices(voiceRes.voices);
@@ -180,10 +218,27 @@ export function StoryVideoPage() {
       })
       .catch((err) => {
         if (!cancelled) setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai cau hinh.");
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false);
       });
+    const loadFonts = getSubtitleFonts()
+      .then((res) => {
+        if (cancelled) return;
+        setSubtitleFonts(res.fonts);
+        setSubtitleFont((current) => current || res.defaultFamily);
+      })
+      .catch((err) => {
+        if (!cancelled) setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai danh sach font phu de.");
+      });
+    const loadPresets = getSubtitlePresets()
+      .then((res) => {
+        if (cancelled) return;
+        setSubtitlePresets(res.presets);
+      })
+      .catch((err) => {
+        if (!cancelled) setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai preset phu de.");
+      });
+    void Promise.all([loadVoices, loadFonts, loadPresets]).finally(() => {
+      if (!cancelled) setIsLoading(false);
+    });
     return () => {
       cancelled = true;
     };
@@ -262,6 +317,7 @@ export function StoryVideoPage() {
               inputValue: item.token,
               outputName: item.outputName,
               audioFile: null,
+              subtitleFile: null,
               sourceName: item.fileName,
             }));
             setBatchItems(importedItems);
@@ -303,6 +359,7 @@ export function StoryVideoPage() {
       inputValue: file.name,
       outputName: outputNameFromFileName(file.name),
       audioFile: file,
+      subtitleFile: null,
       sourceName: file.name,
     }));
     setBatchItems((prev) => [...prev, ...newItems]);
@@ -318,6 +375,7 @@ export function StoryVideoPage() {
         inputValue: "",
         outputName: "",
         audioFile: null,
+        subtitleFile: null,
         sourceName: "",
       },
     ]);
@@ -345,6 +403,45 @@ export function StoryVideoPage() {
 
   const updateBatchItem = (id: string, field: keyof BatchItem, value: string) => {
     setBatchItems((prev) => prev.map((item) => (item.id === id ? { ...item, [field]: value } : item)));
+  };
+
+  const updateBatchItemSubtitle = (id: string, file: File | null) => {
+    setBatchItems((prev) => prev.map((item) => (item.id === id ? { ...item, subtitleFile: file } : item)));
+  };
+
+  const handleFontUpload = async (file: File | null) => {
+    if (!file) return;
+    setIsUploadingFont(true);
+    setErrorMessage(null);
+    try {
+      const res = await uploadSubtitleFont(file);
+      setSubtitleFonts(res.fonts);
+      setSubtitleFont((current) => current || res.defaultFamily);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the upload font phu de.");
+    } finally {
+      setIsUploadingFont(false);
+      setFontInputKey((key) => key + 1);
+    }
+  };
+
+  const handleSubtitlePreview = async () => {
+    setIsSubtitlePreviewing(true);
+    setErrorMessage(null);
+    try {
+      const res = await generateSubtitlePreview({
+        font: subtitleFont,
+        presetId: subtitlePreset,
+        maxCharsPerLine: clampInt(subtitleMaxCharsPerLine, 16, 60, 42),
+        maxLines: clampInt(subtitleMaxLines, 1, 3, 2),
+      });
+      setSubtitlePreviewPath(res.previewPath);
+      setSubtitlePreviewBust(Date.now());
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the render preview phu de.");
+    } finally {
+      setIsSubtitlePreviewing(false);
+    }
   };
 
   const removeBatchItem = (id: string) => {
@@ -378,7 +475,13 @@ export function StoryVideoPage() {
           clipTags: [],
           voiceId: voiceId || undefined,
         };
-        const res = await createStoryVideo(payload, singleInput.audioFile ?? undefined);
+        if (singleSubtitleFile) {
+          payload.subtitleFont = subtitleFont || undefined;
+          payload.subtitlePreset = subtitlePreset;
+          payload.subtitleMaxCharsPerLine = clampInt(subtitleMaxCharsPerLine, 16, 60, 42);
+          payload.subtitleMaxLines = clampInt(subtitleMaxLines, 1, 3, 2);
+        }
+        const res = await createStoryVideo(payload, singleInput.audioFile ?? undefined, singleSubtitleFile ?? undefined);
         setStoryId(res.storyId);
       } catch (err) {
         setErrorMessage(err instanceof ApiError ? err.message : "Khong the bat dau render story video.");
@@ -472,6 +575,8 @@ export function StoryVideoPage() {
     }
   };
 
+  const selectedSubtitleFont = subtitleFonts.find((font) => font.family === subtitleFont);
+  const selectedSubtitlePreset = subtitlePresets.find((preset) => preset.id === subtitlePreset);
   const singleProgressPercent = storyProgress ? Math.round(Math.max(0, Math.min(100, storyProgress.percent))) : 0;
   const batchOverallPercent =
     batchProgress && batchProgress.totalItems > 0
@@ -556,10 +661,178 @@ export function StoryVideoPage() {
               onAddScript={handleAddBatchScript}
               onAddDriveFolder={() => setIsDriveDialogOpen(true)}
               onUpdate={updateBatchItem}
+              onUpdateSubtitle={updateBatchItemSubtitle}
               onRemove={removeBatchItem}
               isDriveImporting={isDriveImporting}
             />
           )}
+
+          <Separator />
+
+          <div className="grid gap-4 rounded-lg border border-border/70 bg-background/70 p-4">
+            <div className="space-y-1">
+              <h3 className="text-sm font-semibold text-foreground">Phụ đề</h3>
+              <p className="text-xs text-muted-foreground">
+                Burn phụ đề từ file .srt vào video (hiển thị trên TV noise / sóng âm). Cấu hình chỉ áp dụng khi có file .srt.
+              </p>
+            </div>
+
+            {mode === "single" ? (
+              <div className="grid gap-2 md:w-1/2">
+                <Label>File phụ đề (.srt, tùy chọn)</Label>
+                <Input
+                  key={subtitleInputKey}
+                  type="file"
+                  accept=".srt"
+                  onChange={(event) => {
+                    const file = event.currentTarget.files?.[0] ?? null;
+                    setSingleSubtitleFile(file);
+                    setSubtitleInputKey((key) => key + 1);
+                  }}
+                />
+                {singleSubtitleFile ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span>Đã chọn: {singleSubtitleFile.name}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-destructive hover:text-destructive"
+                      onClick={() => setSingleSubtitleFile(null)}
+                    >
+                      <Trash2 className="mr-1 size-3" />
+                      Bỏ chọn
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Ở chế độ batch, chọn file .srt riêng cho từng item trong danh sách phía trên.
+              </p>
+            )}
+
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <div className="grid content-start gap-2">
+                <div className="flex items-center justify-between gap-2">
+                  <Label htmlFor="subtitleFont">Font phụ đề</Label>
+                  <div className="flex gap-1">
+                    {selectedSubtitleFont?.supportsKorean ? (
+                      <Badge variant="secondary" className="rounded-full text-[10px]">
+                        KR
+                      </Badge>
+                    ) : null}
+                    {selectedSubtitleFont?.supportsVietnamese ? (
+                      <Badge variant="secondary" className="rounded-full text-[10px]">
+                        VI
+                      </Badge>
+                    ) : null}
+                  </div>
+                </div>
+                <select
+                  id="subtitleFont"
+                  value={subtitleFont}
+                  onChange={(event) => setSubtitleFont(event.target.value)}
+                  className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {subtitleFont && !subtitleFonts.some((font) => font.family === subtitleFont) ? (
+                    <option value={subtitleFont}>{subtitleFont}</option>
+                  ) : null}
+                  {subtitleFonts.map((font) => (
+                    <option key={font.family} value={font.family}>
+                      {font.family}
+                      {font.supportsKorean ? " [KR]" : ""}
+                      {font.supportsVietnamese ? " [VI]" : ""}
+                    </option>
+                  ))}
+                </select>
+                <label className="cursor-pointer justify-self-start">
+                  <Input
+                    key={fontInputKey}
+                    type="file"
+                    accept=".ttf,.otf,.ttc"
+                    className="hidden"
+                    disabled={isUploadingFont}
+                    onChange={(event) => void handleFontUpload(event.currentTarget.files?.[0] ?? null)}
+                  />
+                  <Button type="button" variant="outline" size="sm" asChild>
+                    <span>
+                      {isUploadingFont ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Plus className="mr-2 size-4" />}
+                      {isUploadingFont ? "Đang thêm font..." : "Thêm font..."}
+                    </span>
+                  </Button>
+                </label>
+              </div>
+
+              <div className="grid content-start gap-2">
+                <Label htmlFor="subtitlePreset">Hiệu ứng phụ đề</Label>
+                <select
+                  id="subtitlePreset"
+                  value={subtitlePreset}
+                  onChange={(event) => setSubtitlePreset(event.target.value)}
+                  className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {subtitlePresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name}
+                    </option>
+                  ))}
+                </select>
+                {selectedSubtitlePreset?.description ? (
+                  <p className="text-xs text-muted-foreground">{selectedSubtitlePreset.description}</p>
+                ) : null}
+              </div>
+
+              <div className="grid content-start gap-2">
+                <Label htmlFor="subtitleMaxChars">Ký tự tối đa/dòng</Label>
+                <Input
+                  id="subtitleMaxChars"
+                  type="number"
+                  min={16}
+                  max={60}
+                  step={1}
+                  value={subtitleMaxCharsPerLine}
+                  onChange={(event) => setSubtitleMaxCharsPerLine(event.target.value)}
+                />
+              </div>
+
+              <div className="grid content-start gap-2">
+                <Label htmlFor="subtitleMaxLines">Số dòng tối đa</Label>
+                <Input
+                  id="subtitleMaxLines"
+                  type="number"
+                  min={1}
+                  max={3}
+                  step={1}
+                  value={subtitleMaxLines}
+                  onChange={(event) => setSubtitleMaxLines(event.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-[1fr_minmax(280px,420px)]">
+              <div>
+                <Button type="button" variant="outline" onClick={() => void handleSubtitlePreview()} disabled={isSubtitlePreviewing}>
+                  {isSubtitlePreviewing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
+                  {isSubtitlePreviewing ? "Đang render..." : "Xem thử phụ đề"}
+                </Button>
+              </div>
+              {subtitlePreviewPath ? (
+                <video
+                  src={`/media/${subtitlePreviewPath}${subtitlePreviewBust ? `?t=${subtitlePreviewBust}` : ""}`}
+                  controls
+                  autoPlay
+                  loop
+                  muted
+                  className="aspect-video w-full self-start rounded-md bg-black object-contain"
+                />
+              ) : (
+                <div className="flex aspect-video w-full items-center justify-center self-start rounded-md border border-dashed border-border bg-background/50 text-xs text-muted-foreground">
+                  Chưa có preview phụ đề — bấm Xem thử phụ đề
+                </div>
+              )}
+            </div>
+          </div>
 
           <div className="flex flex-wrap gap-3">
             <Button type="button" onClick={() => void handleSubmit()} disabled={isSubmitting || isDriveImporting}>
@@ -725,6 +998,7 @@ function BatchInputForm({
   onAddScript,
   onAddDriveFolder,
   onUpdate,
+  onUpdateSubtitle,
   onRemove,
   isDriveImporting,
 }: {
@@ -734,6 +1008,7 @@ function BatchInputForm({
   onAddScript: () => void;
   onAddDriveFolder: () => void;
   onUpdate: (id: string, field: keyof BatchItem, value: string) => void;
+  onUpdateSubtitle: (id: string, file: File | null) => void;
   onRemove: (id: string) => void;
   isDriveImporting: boolean;
 }) {
@@ -793,7 +1068,7 @@ function BatchInputForm({
                   Xoa
                 </Button>
               </div>
-              <div className="grid gap-3 md:grid-cols-2">
+              <div className="grid gap-3 md:grid-cols-3">
                 <div className="grid gap-1.5">
                   <Label className="text-xs">{item.inputType === "script_url" ? "Script URL" : "File audio"}</Label>
                   {item.inputType === "script_url" ? (
@@ -813,6 +1088,17 @@ function BatchInputForm({
                     value={item.outputName}
                     onChange={(event) => onUpdate(item.id, "outputName", event.target.value)}
                   />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs">Phụ đề (.srt, tùy chọn)</Label>
+                  <Input
+                    type="file"
+                    accept=".srt"
+                    onChange={(event) => onUpdateSubtitle(item.id, event.currentTarget.files?.[0] ?? null)}
+                  />
+                  {item.subtitleFile ? (
+                    <p className="text-xs text-muted-foreground">Đã chọn: {item.subtitleFile.name}</p>
+                  ) : null}
                 </div>
               </div>
             </div>

@@ -101,6 +101,18 @@ class StoryVideoPipelineRunner:
         self.voice_id = config_dict.get("voice_id", "")
         self.waveform_overlay_id = str(config_dict.get("waveform_overlay_id", "") or "").strip()
         self.tv_effect_style_id = str(config_dict.get("tv_effect_style_id", "") or "").strip()
+        self.subtitle_path = str(config_dict.get("subtitle_path", "") or "").strip()
+        self.subtitle_font = str(config_dict.get("subtitle_font", "") or "").strip()
+        self.subtitle_preset = str(config_dict.get("subtitle_preset", "") or "").strip() or "clean"
+        self.subtitle_max_chars_per_line = self._coerce_positive_int(
+            config_dict.get("subtitle_max_chars_per_line"),
+            Config.STORY_SUBTITLE_MAX_CHARS_PER_LINE,
+        )
+        self.subtitle_max_lines = self._coerce_positive_int(
+            config_dict.get("subtitle_max_lines"),
+            Config.STORY_SUBTITLE_MAX_LINES,
+        )
+        self._subtitle_ass_path = ""
 
         self._lock = threading.Lock()
         self.progress = {
@@ -116,6 +128,14 @@ class StoryVideoPipelineRunner:
             "updatedAt": _utc_now(),
         }
         self._save_progress()
+
+    @staticmethod
+    def _coerce_positive_int(value, default: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed > 0 else default
 
     def _raise_if_cancel_requested(self):
         if is_story_cancel_requested(self.story_id):
@@ -202,7 +222,18 @@ class StoryVideoPipelineRunner:
                 )
                 return None
 
-            self._update_progress("story_overlays", 90, "Dang ap dung TV noise va song am...")
+            if self.subtitle_path:
+                self._update_progress("story_overlays", 90, "Dang chuan bi phu de...")
+                ass_path = self._prepare_subtitle_ass(audio_duration)
+                self._raise_if_cancel_requested()
+                if not ass_path:
+                    return None
+                self._subtitle_ass_path = ass_path
+
+            overlay_message = "Dang ap dung TV noise va song am..."
+            if self._subtitle_ass_path:
+                overlay_message = "Dang ap dung TV noise, song am va phu de..."
+            self._update_progress("story_overlays", 90, overlay_message)
             output_video = self._apply_story_overlays(rendered_video, audio_duration)
             self._raise_if_cancel_requested()
             if not output_video:
@@ -424,6 +455,60 @@ class StoryVideoPipelineRunner:
             return output_path
         return None
 
+    def _prepare_subtitle_ass(self, audio_duration: float) -> str | None:
+        """Build the burn-in .ass file from the uploaded .srt subtitle."""
+        from src.utils.story_subtitles import (
+            SubtitleParseError,
+            build_ass,
+            parse_srt,
+            resegment,
+            write_ass_file,
+        )
+
+        try:
+            cues = parse_srt(self.subtitle_path)
+            cues = resegment(
+                cues,
+                max_chars_per_line=self.subtitle_max_chars_per_line,
+                max_lines=self.subtitle_max_lines,
+            )
+        except SubtitleParseError as exc:
+            logger.error(f"[StoryPipeline:{self.story_id}] Subtitle parse failed: {exc}")
+            self._update_progress(
+                "story_overlays",
+                90,
+                "File subtitle (.srt) khong hop le.",
+                status="failed",
+                error=f"Invalid subtitle file: {exc}",
+            )
+            return None
+
+        clamped: list[dict] = []
+        for cue in cues:
+            start = float(cue.get("start", 0) or 0)
+            end = min(float(cue.get("end", 0) or 0), float(audio_duration))
+            if start >= audio_duration or end <= start:
+                continue
+            clamped.append({**cue, "start": start, "end": end})
+        if not clamped:
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] No subtitle cues fall within the audio duration."
+            )
+
+        width, height = (int(value) for value in Config.TARGET_RESOLUTION.split("x", 1))
+        ass_text = build_ass(
+            clamped,
+            font_family=self.subtitle_font or Config.STORY_SUBTITLE_DEFAULT_FONT,
+            preset_id=self.subtitle_preset or "clean",
+            play_res=(width, height),
+        )
+        ass_path = os.path.abspath(
+            os.path.join(_temp_dir(self.story_id), f"subs_{self.story_id}.ass")
+        )
+        write_ass_file(ass_text, ass_path)
+        logger.info(f"[StoryPipeline:{self.story_id}] Subtitle ASS ready: {ass_path}")
+        return ass_path
+
     def _apply_default_waveform_overlay(self, current_video: str, audio_duration: float) -> str | None:
         """Overlay the globally configured preprocessed waveform, if available."""
         from src.utils.waveform_overlays import (
@@ -518,6 +603,17 @@ class StoryVideoPipelineRunner:
         """NVDEC decode flags for the base video input (CPU fallback handled by caller)."""
         return ["-hwaccel", "cuda"] if Config.USE_GPU_NVENC else []
 
+    def _ass_filter_suffix(self) -> str:
+        """Subtitle burn-in snippet ("ass=<path>,") chained right before the final format=yuv420p."""
+        if not self._subtitle_ass_path:
+            return ""
+        from src.utils.story_subtitles import _list_font_files, ass_filter_path
+
+        ass_value = f"ass={ass_filter_path(self._subtitle_ass_path)}"
+        if _list_font_files(Config.STORY_FONTS_DIR):
+            ass_value += f":fontsdir={ass_filter_path(Config.STORY_FONTS_DIR)}"
+        return f"{ass_value},"
+
     def _apply_story_overlays(self, current_video: str, audio_duration: float) -> str | None:
         """Overlay TV noise layers and the configured waveform in a single FFmpeg pass."""
         from src.utils.story_overlay_packs import get_or_create_story_overlay_pack
@@ -560,6 +656,8 @@ class StoryVideoPipelineRunner:
         if not tv_noise_paths and not waveform_path:
             if style_filter:
                 return self._apply_tv_effect_only(current_video, audio_duration, style_filter)
+            if self._subtitle_ass_path:
+                return self._apply_subtitles_only(current_video, audio_duration)
             logger.info(f"[StoryPipeline:{self.story_id}] No story overlays configured.")
             return current_video
 
@@ -622,7 +720,7 @@ class StoryVideoPipelineRunner:
             )
             chain_label = "[waveout]"
 
-        filter_parts.append(f"{chain_label}format=yuv420p[v]")
+        filter_parts.append(f"{chain_label}{self._ass_filter_suffix()}format=yuv420p[v]")
 
         cmd.extend([
             "-filter_complex",
@@ -702,7 +800,7 @@ class StoryVideoPipelineRunner:
             f"[0:v]{base_chain},format=yuv420p[base];"
             f"[1:v]setpts=N/{fps}/TB[pack];"
             "[base][pack]overlay=0:0:format=auto:eof_action=repeat:eval=init[packed];"
-            "[packed]format=yuv420p[v]"
+            f"[packed]{self._ass_filter_suffix()}format=yuv420p[v]"
         )
         hwaccel_flags = self._hwaccel_flags()
         cmd = [
@@ -782,7 +880,7 @@ class StoryVideoPipelineRunner:
             "-i",
             current_video,
             "-vf",
-            f"{style_filter},format=yuv420p",
+            f"{style_filter},{self._ass_filter_suffix()}format=yuv420p",
             "-t",
             str(audio_duration),
         ]
@@ -833,6 +931,76 @@ class StoryVideoPipelineRunner:
             "Ap dung hieu ung TV that bai.",
             status="failed",
             error="TV effect pass failed.",
+        )
+        return None
+
+    def _apply_subtitles_only(
+        self,
+        current_video: str,
+        audio_duration: float,
+    ) -> str | None:
+        """Burn subtitles when no overlays/styles are configured (base video is stream-copied)."""
+        temp = _temp_dir(self.story_id)
+        output_path = os.path.join(temp, f"story_subtitles_{self.story_id}.mp4")
+        hwaccel_flags = self._hwaccel_flags()
+        cmd = [
+            "ffmpeg",
+            "-y",
+            *hwaccel_flags,
+            "-i",
+            current_video,
+            "-vf",
+            f"{self._ass_filter_suffix()}format=yuv420p",
+            "-t",
+            str(audio_duration),
+        ]
+        cmd.extend(FFmpegHelper.get_nvenc_flags())
+        cmd.extend([
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ])
+
+        def _progress(payload: dict):
+            ffmpeg_percent = payload.get("ffmpegPercent")
+            if ffmpeg_percent is None:
+                return
+            self._update_progress(
+                "story_overlays",
+                90 + (float(ffmpeg_percent) * 0.08),
+                "Dang ghi phu de vao video...",
+            )
+
+        ok = FFmpegHelper.run_command(
+            cmd,
+            progress_callback=_progress,
+            progress_total_seconds=audio_duration,
+            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+        )
+        if not ok and hwaccel_flags:
+            self._raise_if_cancel_requested()
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] CUDA decode failed for subtitle pass; retrying with CPU decode."
+            )
+            ok = FFmpegHelper.run_command(
+                cmd[:2] + cmd[2 + len(hwaccel_flags):],
+                progress_callback=_progress,
+                progress_total_seconds=audio_duration,
+                cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+            )
+        if ok and os.path.isfile(output_path):
+            return output_path
+
+        self._raise_if_cancel_requested()
+        logger.error(f"[StoryPipeline:{self.story_id}] Failed to burn subtitles.")
+        self._update_progress(
+            "story_overlays",
+            90,
+            "Ghi phu de vao video that bai.",
+            status="failed",
+            error="Subtitle burn-in pass failed.",
         )
         return None
 
