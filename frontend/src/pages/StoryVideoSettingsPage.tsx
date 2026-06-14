@@ -13,11 +13,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   ApiError,
+  deleteCtaOverlay,
   deleteTVNoiseOverlay,
   deleteWaveformOverlay,
   generateCustomTVEffectPreview,
   generateTVEffectStylePreview,
   generateTVNoiseDemo,
+  getCtaOverlays,
   getTVEffectStyles,
   getTVNoiseOverlayJob,
   getTVNoiseOverlays,
@@ -25,12 +27,14 @@ import {
   importTVNoiseOverlayFromYoutube,
   saveCustomTVEffect,
   selectTVEffectStyle,
+  updateCtaOverlay,
   updateTVNoiseOverlay,
   updateWaveformOverlay,
+  uploadCtaOverlay,
   uploadTVNoiseOverlay,
   uploadWaveformOverlay,
 } from "@/lib/api";
-import type { TVEffectParams, TVEffectStyle, TVEffectTone, TVNoiseOverlay, WaveformOverlay } from "@/types/api";
+import type { CtaOverlay, TVEffectParams, TVEffectStyle, TVEffectTone, TVNoiseOverlay, WaveformOverlay } from "@/types/api";
 
 const DEFAULT_EFFECT_PARAMS: TVEffectParams = {
   tone: "none",
@@ -138,6 +142,39 @@ function formFromOverlay(overlay?: WaveformOverlay): WaveformForm {
   };
 }
 
+type CtaForm = {
+  enabled: boolean;
+  keyColor: string;
+  similarity: string;
+  blend: string;
+  scaleWidth: string;
+  position: NonNullable<CtaOverlay["position"]>;
+  margin: string;
+};
+
+const DEFAULT_CTA_FORM: CtaForm = {
+  enabled: true,
+  keyColor: "0x1abe26",
+  similarity: "0.2",
+  blend: "0.1",
+  scaleWidth: "360",
+  position: "top_left",
+  margin: "24",
+};
+
+function ctaFormFromOverlay(overlay?: CtaOverlay): CtaForm {
+  if (!overlay) return DEFAULT_CTA_FORM;
+  return {
+    enabled: overlay.enabled ?? DEFAULT_CTA_FORM.enabled,
+    keyColor: overlay.keyColor ?? DEFAULT_CTA_FORM.keyColor,
+    similarity: String(overlay.similarity ?? DEFAULT_CTA_FORM.similarity),
+    blend: String(overlay.blend ?? DEFAULT_CTA_FORM.blend),
+    scaleWidth: String(overlay.scaleWidth ?? DEFAULT_CTA_FORM.scaleWidth),
+    position: overlay.position ?? DEFAULT_CTA_FORM.position,
+    margin: String(overlay.margin ?? DEFAULT_CTA_FORM.margin),
+  };
+}
+
 function formFromNoiseOverlay(overlay?: TVNoiseOverlay): TVNoiseForm {
   if (!overlay) return DEFAULT_NOISE_FORM;
   return {
@@ -153,6 +190,12 @@ export function StoryVideoSettingsPage() {
   const [overlays, setOverlays] = useState<WaveformOverlay[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [form, setForm] = useState<WaveformForm>(DEFAULT_FORM);
+  const [ctaOverlays, setCtaOverlays] = useState<CtaOverlay[]>([]);
+  const [selectedCtaId, setSelectedCtaId] = useState("");
+  const [ctaForm, setCtaForm] = useState<CtaForm>(DEFAULT_CTA_FORM);
+  const [isCtaUploading, setIsCtaUploading] = useState(false);
+  const [isCtaSaving, setIsCtaSaving] = useState(false);
+  const [ctaPreviewBust, setCtaPreviewBust] = useState(0);
   const [tvNoiseOverlays, setTvNoiseOverlays] = useState<TVNoiseOverlay[]>([]);
   const [selectedNoiseId, setSelectedNoiseId] = useState("");
   const [noiseForm, setNoiseForm] = useState<TVNoiseForm>(DEFAULT_NOISE_FORM);
@@ -183,6 +226,10 @@ export function StoryVideoSettingsPage() {
     () => overlays.find((overlay) => overlay.id === selectedId) ?? overlays.find((overlay) => overlay.isDefault),
     [overlays, selectedId],
   );
+  const selectedCta = useMemo(
+    () => ctaOverlays.find((overlay) => overlay.id === selectedCtaId) ?? ctaOverlays.find((overlay) => overlay.isDefault) ?? ctaOverlays[0],
+    [ctaOverlays, selectedCtaId],
+  );
   const selectedNoise = useMemo(
     () => tvNoiseOverlays.find((overlay) => overlay.id === selectedNoiseId) ?? tvNoiseOverlays[0],
     [tvNoiseOverlays, selectedNoiseId],
@@ -197,6 +244,16 @@ export function StoryVideoSettingsPage() {
         setSelectedId((current) => current || defaultId);
       })
       .catch((err) => setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai waveform overlay."));
+  };
+
+  const loadCtaOverlays = () => {
+    return getCtaOverlays()
+      .then((res) => {
+        setCtaOverlays(res.overlays);
+        const defaultId = res.overlays.find((overlay) => overlay.isDefault)?.id ?? res.overlays[0]?.id ?? "";
+        setSelectedCtaId((current) => current || defaultId);
+      })
+      .catch((err) => setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai CTA overlay."));
   };
 
   const loadTVNoiseOverlays = () => {
@@ -221,7 +278,9 @@ export function StoryVideoSettingsPage() {
 
   useEffect(() => {
     setIsLoading(true);
-    Promise.all([loadOverlays(), loadTVNoiseOverlays(), loadTVEffectStyles()]).finally(() => setIsLoading(false));
+    Promise.all([loadOverlays(), loadCtaOverlays(), loadTVNoiseOverlays(), loadTVEffectStyles()]).finally(() =>
+      setIsLoading(false),
+    );
   }, []);
 
   const handleSelectEffect = async (styleId: string) => {
@@ -291,6 +350,10 @@ export function StoryVideoSettingsPage() {
   useEffect(() => {
     setForm(formFromOverlay(selected));
   }, [selected]);
+
+  useEffect(() => {
+    setCtaForm(ctaFormFromOverlay(selectedCta));
+  }, [selectedCta]);
 
   useEffect(() => {
     setNoiseForm(formFromNoiseOverlay(selectedNoise));
@@ -456,6 +519,73 @@ export function StoryVideoSettingsPage() {
       void loadOverlays();
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the xoa waveform overlay.");
+    }
+  };
+
+  const handleCtaUpload = async (file: File | null) => {
+    if (!file) return;
+    setIsCtaUploading(true);
+    setErrorMessage(null);
+    try {
+      const res = await uploadCtaOverlay(file);
+      await loadCtaOverlays();
+      setSelectedCtaId(res.overlay.id);
+      setCtaPreviewBust(Date.now());
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the upload CTA overlay.");
+    } finally {
+      setIsCtaUploading(false);
+    }
+  };
+
+  const handleCtaSave = async () => {
+    if (!selectedCta) return;
+    setIsCtaSaving(true);
+    setErrorMessage(null);
+    try {
+      const payload: Partial<CtaOverlay> = {
+        isDefault: true,
+        enabled: ctaForm.enabled,
+        keyColor: ctaForm.keyColor.trim() || DEFAULT_CTA_FORM.keyColor,
+        similarity: Number(ctaForm.similarity),
+        blend: Number(ctaForm.blend),
+        scaleWidth: Number(ctaForm.scaleWidth),
+        position: ctaForm.position,
+        margin: Number(ctaForm.margin),
+      };
+      const res = await updateCtaOverlay(selectedCta.id, payload);
+      setCtaOverlays((current) =>
+        current.map((item) => (item.id === selectedCta.id ? res.overlay : { ...item, isDefault: false })),
+      );
+      setCtaPreviewBust(Date.now());
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the luu cau hinh CTA.");
+    } finally {
+      setIsCtaSaving(false);
+    }
+  };
+
+  const handleCtaToggle = async (enabled: boolean) => {
+    if (!selectedCta) return;
+    setCtaForm((current) => ({ ...current, enabled }));
+    setErrorMessage(null);
+    try {
+      const res = await updateCtaOverlay(selectedCta.id, { enabled });
+      setCtaOverlays((current) => current.map((item) => (item.id === selectedCta.id ? res.overlay : item)));
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the cap nhat trang thai CTA.");
+    }
+  };
+
+  const handleCtaDelete = async (overlayId: string) => {
+    setErrorMessage(null);
+    try {
+      await deleteCtaOverlay(overlayId);
+      setCtaOverlays((current) => current.filter((item) => item.id !== overlayId));
+      setSelectedCtaId("");
+      void loadCtaOverlays();
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the xoa CTA overlay.");
     }
   };
 
@@ -890,6 +1020,152 @@ export function StoryVideoSettingsPage() {
                   Luu va dat mac dinh
                 </Button>
                 <Button type="button" variant="destructive" onClick={() => void handleDelete(selected.id)}>
+                  <Trash2 className="mr-2 size-4" />
+                  Xoa
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </PageSection>
+
+      <PageSection>
+        <div className="mb-4 space-y-1">
+          <h2 className="text-base font-semibold text-foreground">CTA overlay (Like / Subscribe / Thông báo)</h2>
+          <p className="text-sm text-muted-foreground">
+            Video nút kêu gọi được tách nền xanh và chèn vào một góc của mọi video Story Video. Mặc định bật sẵn ở góc trên-trái, loop hết thời lượng và không có tiếng.
+          </p>
+        </div>
+        <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <Label>Upload video CTA (nền xanh)</Label>
+              <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
+                {isCtaUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
+                <span>{isCtaUploading ? "Dang tao alpha MOV..." : "Chon video CTA"}</span>
+                <Input
+                  type="file"
+                  accept=".mp4,.mov,.mkv,.webm"
+                  className="hidden"
+                  disabled={isCtaUploading}
+                  onChange={(event) => void handleCtaUpload(event.currentTarget.files?.[0] ?? null)}
+                />
+              </label>
+            </div>
+
+            {ctaOverlays.length ? (
+              <div className="grid gap-2">
+                {ctaOverlays.map((overlay) => (
+                  <button
+                    key={overlay.id}
+                    type="button"
+                    onClick={() => setSelectedCtaId(overlay.id)}
+                    className={`rounded-lg border p-3 text-left transition-colors ${
+                      selectedCta?.id === overlay.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate text-sm font-semibold text-foreground">{overlay.name}</span>
+                      <div className="flex items-center gap-1">
+                        {overlay.enabled === false ? (
+                          <Badge variant="secondary" className="rounded-full">Tắt</Badge>
+                        ) : null}
+                        {overlay.isDefault ? (
+                          <Badge className="rounded-full">
+                            <Star className="mr-1 size-3" />
+                            Default
+                          </Badge>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {overlay.durationSeconds}s | {overlay.scaleWidth ?? 360}px | {overlay.position ?? "top_left"}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <EmptyCard title="Chua co CTA overlay" description="Upload video nut nen xanh de tao overlay alpha." />
+            )}
+          </div>
+
+          {selectedCta ? (
+            <div className="grid gap-5">
+              {selectedCta.processedRelativePath ? (
+                <div
+                  className="w-full overflow-hidden rounded-lg"
+                  style={{
+                    backgroundColor: "#3a3a3a",
+                    backgroundImage:
+                      "linear-gradient(45deg, #555 25%, transparent 25%), linear-gradient(-45deg, #555 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #555 75%), linear-gradient(-45deg, transparent 75%, #555 75%)",
+                    backgroundSize: "24px 24px",
+                    backgroundPosition: "0 0, 0 12px, 12px -12px, -12px 0",
+                  }}
+                >
+                  <video
+                    key={ctaPreviewBust}
+                    src={`/media/${selectedCta.processedRelativePath}?t=${ctaPreviewBust}`}
+                    autoPlay
+                    loop
+                    muted
+                    playsInline
+                    className="aspect-video w-full object-contain"
+                  />
+                </div>
+              ) : null}
+
+              <label className="flex items-center gap-2 text-sm text-foreground">
+                <input
+                  type="checkbox"
+                  checked={ctaForm.enabled}
+                  onChange={(event) => void handleCtaToggle(event.currentTarget.checked)}
+                  className="size-4"
+                />
+                Bật CTA overlay cho mọi video Story Video
+              </label>
+
+              <div className="grid gap-4 md:grid-cols-3">
+                <div className="grid gap-2">
+                  <Label>Key color</Label>
+                  <Input value={ctaForm.keyColor} onChange={(event) => setCtaForm((current) => ({ ...current, keyColor: event.target.value }))} />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Similarity</Label>
+                  <Input type="number" min="0" max="1" step="0.01" value={ctaForm.similarity} onChange={(event) => setCtaForm((current) => ({ ...current, similarity: event.target.value }))} />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Blend</Label>
+                  <Input type="number" min="0" max="1" step="0.01" value={ctaForm.blend} onChange={(event) => setCtaForm((current) => ({ ...current, blend: event.target.value }))} />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Width</Label>
+                  <Input type="number" min="64" step="2" value={ctaForm.scaleWidth} onChange={(event) => setCtaForm((current) => ({ ...current, scaleWidth: event.target.value }))} />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Position</Label>
+                  <select
+                    value={ctaForm.position}
+                    onChange={(event) => setCtaForm((current) => ({ ...current, position: event.target.value as CtaForm["position"] }))}
+                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                  >
+                    <option value="top_left">Top left</option>
+                    <option value="top_right">Top right</option>
+                    <option value="bottom_left">Bottom left</option>
+                    <option value="bottom_right">Bottom right</option>
+                  </select>
+                </div>
+                <div className="grid gap-2">
+                  <Label>Margin</Label>
+                  <Input type="number" min="0" step="1" value={ctaForm.margin} onChange={(event) => setCtaForm((current) => ({ ...current, margin: event.target.value }))} />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-3">
+                <Button type="button" onClick={handleCtaSave} disabled={isCtaSaving}>
+                  {isCtaSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
+                  Luu va dat mac dinh
+                </Button>
+                <Button type="button" variant="destructive" onClick={() => void handleCtaDelete(selectedCta.id)}>
                   <Trash2 className="mr-2 size-4" />
                   Xoa
                 </Button>

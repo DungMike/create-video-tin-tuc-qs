@@ -176,6 +176,22 @@ class Config:
     WAVEFORM_OVERLAY_KEY_BLEND = float(os.getenv("WAVEFORM_OVERLAY_KEY_BLEND", "0.03"))
     WAVEFORM_OVERLAY_WIDTH = int(os.getenv("WAVEFORM_OVERLAY_WIDTH", "420"))
 
+    # --- Story CTA Overlay (Like/Subscribe/Notification corner decoration) ---
+    STORY_CTA_OVERLAY_DIR = os.path.join(STORAGE_DIR, "story_cta_overlays")
+    # Bundled default seed video (green-screen buttons). Lives under src/ because storage/ is gitignored.
+    STORY_CTA_DEFAULT_VIDEO = os.getenv(
+        "STORY_CTA_DEFAULT_VIDEO",
+        os.path.join(os.path.dirname(__file__), "assets", "story_cta_default.mp4"),
+    )
+    STORY_CTA_OVERLAY_POSITION = os.getenv("STORY_CTA_OVERLAY_POSITION", "top_left")
+    STORY_CTA_OVERLAY_MARGIN = int(os.getenv("STORY_CTA_OVERLAY_MARGIN", "24"))
+    # Actual green of the bundled buttons clip sampled at ~0x1abe26 (R26 G190 B38).
+    STORY_CTA_OVERLAY_KEY_COLOR = os.getenv("STORY_CTA_OVERLAY_KEY_COLOR", "0x1abe26")
+    STORY_CTA_OVERLAY_KEY_SIMILARITY = float(os.getenv("STORY_CTA_OVERLAY_KEY_SIMILARITY", "0.20"))
+    STORY_CTA_OVERLAY_KEY_BLEND = float(os.getenv("STORY_CTA_OVERLAY_KEY_BLEND", "0.10"))
+    STORY_CTA_OVERLAY_WIDTH = int(os.getenv("STORY_CTA_OVERLAY_WIDTH", "360"))
+    STORY_CTA_OVERLAY_DEFAULT_ENABLED = os.getenv("STORY_CTA_OVERLAY_DEFAULT_ENABLED", "true").lower() == "true"
+
     # --- Story TV Noise Overlay ---
     STORY_TV_NOISE_OVERLAY_DIR = os.path.join(STORAGE_DIR, "story_tv_noise_overlays")
     STORY_TV_NOISE_TOLERANCE = float(os.getenv("STORY_TV_NOISE_TOLERANCE", "0.08"))

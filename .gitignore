@@ -8,6 +8,7 @@ tests/*
 !tests/test_story_video_library_delete.py
 !tests/test_story_overlay_cuda_benchmark.py
 !tests/test_story_overlay_packs.py
+!tests/test_story_cta_overlay.py
 !tests/test_story_subtitles.py
 !tests/test-transcript/
 tests/test-transcript/*

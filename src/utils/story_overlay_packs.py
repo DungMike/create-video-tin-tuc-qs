@@ -19,7 +19,8 @@ from src.utils.logger import logger
 _pack_lock = threading.Lock()
 # v2: prores_ks 4444 thay cho qtrle — qtrle decode don luong (~20fps voi noi dung
 # nhieu) la nut nghen cua pass overlay; ProRes decode da luong nhanh hon nhieu.
-_PACK_VERSION = 2
+# v3: them lop CTA overlay (Like/Subscribe) vao pack — bump de vo hieu hoa cache cu.
+_PACK_VERSION = 3
 
 
 def _target_size() -> tuple[int, int]:
@@ -52,6 +53,8 @@ def build_pack_signature(
     tv_noise_paths: list[tuple[dict, str]],
     waveform_record: dict | None,
     waveform_path: str | None,
+    cta_record: dict | None = None,
+    cta_path: str | None = None,
 ) -> dict:
     """Build a stable signature for the currently active overlay stack."""
     width, height = _target_size()
@@ -89,6 +92,24 @@ def build_pack_signature(
                 "x": x_expr,
                 "y": y_expr,
                 "file": _file_fingerprint(waveform_path),
+            }
+        )
+
+    if cta_record and cta_path:
+        from src.utils.story_cta_overlay import overlay_position_expr as cta_position_expr
+
+        x_expr, y_expr = cta_position_expr(cta_record)
+        overlay_duration = _duration_from_record(cta_record)
+        if overlay_duration <= 0:
+            overlay_duration = FFmpegHelper.probe_duration(cta_path)
+        max_duration = max(max_duration, overlay_duration)
+        overlays.append(
+            {
+                "kind": "cta",
+                "id": str(cta_record.get("id") or ""),
+                "x": x_expr,
+                "y": y_expr,
+                "file": _file_fingerprint(cta_path),
             }
         )
 
@@ -210,6 +231,8 @@ def get_or_create_story_overlay_pack(
     tv_noise_paths: list[tuple[dict, str]],
     waveform_record: dict | None,
     waveform_path: str | None,
+    cta_record: dict | None = None,
+    cta_path: str | None = None,
     *,
     cancel_callback: Callable[[], bool] | None = None,
 ) -> str | None:
@@ -217,7 +240,9 @@ def get_or_create_story_overlay_pack(
     if not Config.STORY_OVERLAY_PRECOMPOSE_ENABLED:
         return None
 
-    signature = build_pack_signature(tv_noise_paths, waveform_record, waveform_path)
+    signature = build_pack_signature(
+        tv_noise_paths, waveform_record, waveform_path, cta_record, cta_path
+    )
     if not signature["overlays"]:
         return None
 

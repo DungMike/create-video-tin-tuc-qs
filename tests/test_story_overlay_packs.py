@@ -47,6 +47,6 @@ def test_precompose_pack_signature_and_filter(tmp_path, monkeypatch):
 
     command = build_precompose_command(signature, str(tmp_path / "pack.mov"))
     assert command.count("-stream_loop") == 2
-    assert "qtrle" in command
+    assert "prores_ks" in command
     assert str(tmp_path / "pack.mov") == command[-1]
     assert pack_hash(signature) == pack_hash(signature)

@@ -616,6 +616,11 @@ class StoryVideoPipelineRunner:
 
     def _apply_story_overlays(self, current_video: str, audio_duration: float) -> str | None:
         """Overlay TV noise layers and the configured waveform in a single FFmpeg pass."""
+        from src.utils.story_cta_overlay import (
+            get_active_cta_overlay,
+            overlay_position_expr as cta_position_expr,
+            processed_abs_path as cta_processed_abs_path,
+        )
         from src.utils.story_overlay_packs import get_or_create_story_overlay_pack
         from src.utils.story_tv_noise_overlays import (
             get_active_tv_noise_overlays,
@@ -645,6 +650,12 @@ class StoryVideoPipelineRunner:
             logger.warning(f"[StoryPipeline:{self.story_id}] Waveform processed file is missing.")
             waveform_record = None
 
+        cta_record = get_active_cta_overlay()
+        cta_path = cta_processed_abs_path(cta_record) if cta_record else None
+        if cta_record and not cta_path:
+            logger.warning(f"[StoryPipeline:{self.story_id}] CTA processed file is missing.")
+            cta_record = None
+
         tv_noise_paths: list[tuple[dict, str]] = []
         for record in tv_noise_records:
             processed_path = tv_noise_processed_abs_path(record)
@@ -653,7 +664,7 @@ class StoryVideoPipelineRunner:
 
         style_filter = self._tv_effect_filter()
 
-        if not tv_noise_paths and not waveform_path:
+        if not tv_noise_paths and not waveform_path and not cta_path:
             if style_filter:
                 return self._apply_tv_effect_only(current_video, audio_duration, style_filter)
             if self._subtitle_ass_path:
@@ -670,6 +681,8 @@ class StoryVideoPipelineRunner:
                 tv_noise_paths,
                 waveform_record if waveform_path else None,
                 waveform_path,
+                cta_record if cta_path else None,
+                cta_path,
                 cancel_callback=lambda: is_story_cancel_requested(self.story_id),
             )
         self._raise_if_cancel_requested()
@@ -697,6 +710,11 @@ class StoryVideoPipelineRunner:
             waveform_input_index = 1 + len(tv_noise_paths)
             cmd.extend(["-stream_loop", "-1", "-i", waveform_path])
 
+        cta_input_index = None
+        if cta_path:
+            cta_input_index = 1 + len(tv_noise_paths) + (1 if waveform_path else 0)
+            cmd.extend(["-stream_loop", "-1", "-i", cta_path])
+
         filter_parts: list[str] = []
         chain_label = "[0:v]"
         if style_filter:
@@ -719,6 +737,14 @@ class StoryVideoPipelineRunner:
                 f"{chain_label}[wave]overlay={x_expr}:{y_expr}:format=auto:eof_action=repeat:eval=init[waveout]"
             )
             chain_label = "[waveout]"
+
+        if cta_path and cta_record and cta_input_index is not None:
+            cx_expr, cy_expr = cta_position_expr(cta_record)
+            filter_parts.append(f"[{cta_input_index}:v]setpts=PTS-STARTPTS[cta]")
+            filter_parts.append(
+                f"{chain_label}[cta]overlay={cx_expr}:{cy_expr}:format=auto:eof_action=repeat:eval=init[ctaout]"
+            )
+            chain_label = "[ctaout]"
 
         filter_parts.append(f"{chain_label}{self._ass_filter_suffix()}format=yuv420p[v]")
 

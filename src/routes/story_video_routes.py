@@ -1469,6 +1469,92 @@ def delete_waveform_overlay(overlay_id: str):
 
 
 # ---------------------------------------------------------------------------
+# 19b. Story CTA overlay management (Like/Subscribe/Notification corner)
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/cta-overlays", methods=["GET"])
+def get_cta_overlays():
+    from src.utils.story_cta_overlay import ensure_default_cta_overlay, load_cta_index
+
+    ensure_default_cta_overlay()  # seed-on-first-load so the UI always shows the default
+    data = load_cta_index()
+    return jsonify({"overlays": data.get("overlays", [])})
+
+
+@story_video_bp.route("/api/story-video/cta-overlays", methods=["POST"])
+def upload_cta_overlay():
+    from src.utils.story_cta_overlay import create_cta_overlay
+
+    upload_file = request.files.get("file")
+    if not upload_file or not upload_file.filename:
+        return _error("Chua chon file.", code="no_file")
+
+    ext = upload_file.filename.rsplit(".", 1)[-1].lower() if "." in upload_file.filename else ""
+    if ext not in Config.ALLOWED_VIDEO_EXTENSIONS:
+        return _error("Dinh dang khong ho tro.", code="invalid_format")
+
+    try:
+        overlay_record = create_cta_overlay(upload_file)
+    except Exception as exc:
+        logger.error(f"[StoryVideo] CTA preprocessing error: {exc}", exc_info=True)
+        return _error(f"Khong the xu ly CTA overlay: {exc}", code="cta_preprocess_failed", status=500)
+
+    logger.info(f"[StoryVideo] CTA overlay uploaded: {overlay_record.get('filename')}")
+    return jsonify({"overlay": overlay_record}), 201
+
+
+@story_video_bp.route("/api/story-video/cta-overlays/<overlay_id>", methods=["PATCH"])
+def update_cta_overlay_config(overlay_id: str):
+    from src.utils.story_cta_overlay import update_cta_overlay
+
+    data = request.get_json(silent=True) or {}
+    updates = {}
+
+    try:
+        if "isDefault" in data:
+            updates["isDefault"] = bool(data.get("isDefault"))
+        if "enabled" in data:
+            updates["enabled"] = bool(data.get("enabled"))
+        if "keyColor" in data:
+            updates["keyColor"] = str(data.get("keyColor") or Config.STORY_CTA_OVERLAY_KEY_COLOR).strip()
+        if "similarity" in data:
+            updates["similarity"] = max(0.0, min(1.0, float(data.get("similarity"))))
+        if "blend" in data:
+            updates["blend"] = max(0.0, min(1.0, float(data.get("blend"))))
+        if "scaleWidth" in data:
+            updates["scaleWidth"] = max(64, int(data.get("scaleWidth")))
+        if "position" in data:
+            position = str(data.get("position") or Config.STORY_CTA_OVERLAY_POSITION)
+            if position not in {"top_left", "top_right", "bottom_left", "bottom_right"}:
+                return _error("position khong hop le.", code="invalid_position")
+            updates["position"] = position
+        if "margin" in data:
+            updates["margin"] = max(0, int(data.get("margin")))
+    except (TypeError, ValueError):
+        return _error("Cau hinh CTA khong hop le.", code="invalid_cta_config")
+
+    try:
+        overlay = update_cta_overlay(overlay_id, updates)
+    except Exception as exc:
+        logger.error(f"[StoryVideo] CTA update error: {exc}", exc_info=True)
+        return _error(f"Khong the cap nhat CTA overlay: {exc}", code="cta_update_failed", status=500)
+
+    if not overlay:
+        return _error("Overlay khong ton tai.", code="overlay_not_found", status=404)
+    return jsonify({"overlay": overlay})
+
+
+@story_video_bp.route("/api/story-video/cta-overlays/<overlay_id>", methods=["DELETE"])
+def delete_cta_overlay(overlay_id: str):
+    from src.utils.story_cta_overlay import delete_cta_overlay_record
+
+    if not delete_cta_overlay_record(overlay_id):
+        return _error("Overlay khong ton tai.", code="overlay_not_found", status=404)
+
+    logger.info(f"[StoryVideo] CTA overlay deleted: {overlay_id}")
+    return jsonify({"deleted": True, "overlayId": overlay_id})
+
+
+# ---------------------------------------------------------------------------
 # 20. TV noise overlay management
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/tv-noise-overlays", methods=["GET"])

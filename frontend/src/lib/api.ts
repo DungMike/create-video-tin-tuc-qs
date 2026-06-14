@@ -244,6 +244,7 @@ import type {
   CRTSettings,
   CreateStoryBatchRequest,
   CreateStoryVideoRequest,
+  CtaOverlay,
   DecorImage,
   DecorImagesResponse,
   DecorImageUploadResponse,
@@ -755,4 +756,28 @@ export async function updateWaveformOverlay(id: string, payload: Partial<Wavefor
 
 export async function deleteWaveformOverlay(id: string) {
   return requestJson<void>(`/api/story-video/waveform-overlays/${id}`, { method: "DELETE" });
+}
+
+// === CTA Overlay (Like/Subscribe/Notification corner) ===
+
+export async function getCtaOverlays() {
+  return requestJson<{ overlays: CtaOverlay[] }>("/api/story-video/cta-overlays");
+}
+
+export async function uploadCtaOverlay(file: File) {
+  const fd = new FormData();
+  fd.append("file", file);
+  return requestJson<{ overlay: CtaOverlay }>("/api/story-video/cta-overlays", { method: "POST", body: fd });
+}
+
+export async function updateCtaOverlay(id: string, payload: Partial<CtaOverlay>) {
+  return requestJson<{ overlay: CtaOverlay }>(`/api/story-video/cta-overlays/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteCtaOverlay(id: string) {
+  return requestJson<void>(`/api/story-video/cta-overlays/${id}`, { method: "DELETE" });
 }

@@ -848,3 +848,23 @@ export interface WaveformOverlay {
   updatedAt?: string;
 }
 
+export interface CtaOverlay {
+  id: string;
+  name: string;
+  filename: string;
+  processedFilename?: string;
+  relativePath?: string;
+  processedRelativePath?: string;
+  durationSeconds: number;
+  isDefault?: boolean;
+  enabled?: boolean;
+  keyColor?: string;
+  similarity?: number;
+  blend?: number;
+  scaleWidth?: number;
+  position?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
+  margin?: number;
+  createdAt: string;
+  updatedAt?: string;
+}
+
