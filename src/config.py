@@ -148,6 +148,12 @@ class Config:
     STORY_OVERLAY_PACK_DURATION_SECONDS = int(os.getenv("STORY_OVERLAY_PACK_DURATION_SECONDS", "80"))
     STORY_RAW_DIR = os.path.join(STORAGE_DIR, "story_raw_videos")
     STORY_LIBRARY_PAGE_SIZE = int(os.getenv("STORY_LIBRARY_PAGE_SIZE", "20"))
+    # Multiple named clip libraries ("folders"). The Default library's root IS
+    # STORY_LIBRARY_DIR itself (no file migration); other libraries live under
+    # STORY_LIBRARY_DIR/<library_id>/. The registry file (libraries.json) is
+    # resolved dynamically from STORY_LIBRARY_DIR in src/utils/story_library.py.
+    STORY_LIBRARY_DEFAULT_ID = "default"
+    STORY_LIBRARY_DEFAULT_NAME = os.getenv("STORY_LIBRARY_DEFAULT_NAME", "Mặc định")
     STORY_DRIVE_AUDIO_IMPORT_DIR = os.path.join(STORY_VIDEO_DIR, "drive_audio_imports")
     STORY_DRIVE_AUDIO_IMPORT_TTL_SECONDS = int(os.getenv("STORY_DRIVE_AUDIO_IMPORT_TTL_SECONDS", "86400"))
     STORY_DRIVE_AUDIO_MAX_FILES = int(os.getenv("STORY_DRIVE_AUDIO_MAX_FILES", "100"))

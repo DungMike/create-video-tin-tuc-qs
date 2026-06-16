@@ -5,6 +5,7 @@ import { Link } from "react-router-dom";
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
 import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
+import { StoryLibrarySelect } from "@/components/StoryLibrarySelect";
 import { TopNav } from "@/components/top-nav";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { useActiveStoryLibrary } from "@/hooks/useActiveStoryLibrary";
 import {
   ApiError,
   cancelStoryBatch,
@@ -134,6 +136,13 @@ export function StoryVideoPage() {
   const [voices, setVoices] = useState<VoiceRecord[]>([]);
   const [defaultVoiceId, setDefaultVoiceId] = useState("");
   const [voiceId, setVoiceId] = useState("");
+  const {
+    libraries,
+    activeId: activeLibraryId,
+    activeLibrary,
+    setActiveId: setActiveLibraryId,
+    refresh: refreshLibraries,
+  } = useActiveStoryLibrary();
   const [storyId, setStoryId] = useState<string | null>(null);
   const [storyProgress, setStoryProgress] = useState<StoryVideoProgress | null>(null);
   const [batchId, setBatchId] = useState<string | null>(null);
@@ -186,6 +195,7 @@ export function StoryVideoPage() {
         return entry;
       });
       const sharedConfig: CreateStoryBatchRequest["sharedConfig"] = {
+        libraryId: activeLibraryId,
         clipTags: [],
         voiceId: voiceId || undefined,
       };
@@ -205,7 +215,7 @@ export function StoryVideoPage() {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the bat dau batch render.");
       setIsSubmitting(false);
     }
-  }, [resetProgress, voiceId, subtitleFont, subtitlePreset, subtitleMaxCharsPerLine, subtitleMaxLines]);
+  }, [resetProgress, activeLibraryId, voiceId, subtitleFont, subtitlePreset, subtitleMaxCharsPerLine, subtitleMaxLines]);
 
   useEffect(() => {
     let cancelled = false;
@@ -472,6 +482,7 @@ export function StoryVideoPage() {
           inputType: singleInput.inputType,
           inputValue: singleInput.inputType === "script_url" ? singleInput.inputValue : singleInput.audioFile?.name ?? "",
           outputName: singleInput.outputName,
+          libraryId: activeLibraryId,
           clipTags: [],
           voiceId: voiceId || undefined,
         };
@@ -600,7 +611,7 @@ export function StoryVideoPage() {
         description="Render tu audio/script voi clip 5 giay, TV noise va song am mac dinh."
         stats={[
           { label: "Mode", value: mode === "single" ? "Single" : "Batch" },
-          { label: "Clips", value: "Default library" },
+          { label: "Thư viện", value: activeLibrary?.name ?? "Mặc định" },
           { label: "Overlays", value: "Global settings" },
         ]}
       />
@@ -627,6 +638,27 @@ export function StoryVideoPage() {
         </div>
 
         <div className="grid gap-5">
+          <div className="grid gap-2">
+            <Label className="text-sm">Thư viện video (clip nguồn)</Label>
+            <StoryLibrarySelect
+              libraries={libraries}
+              value={activeLibraryId}
+              onChange={setActiveLibraryId}
+              onLibrariesChanged={() => void refreshLibraries()}
+              manage
+              disabled={isSubmitting}
+            />
+            {activeLibrary && activeLibrary.clipCount === 0 ? (
+              <p className="text-xs text-amber-500">
+                Thư viện này chưa có clip — thêm clip ở{" "}
+                <Link to="/story-video/settings" className="underline">
+                  trang cấu hình
+                </Link>{" "}
+                trước khi render.
+              </p>
+            ) : null}
+          </div>
+
           <div className="grid gap-2 md:w-1/2">
             <Label htmlFor="voiceId">Voice cho TTS</Label>
             <select

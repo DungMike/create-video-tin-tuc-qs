@@ -12,17 +12,18 @@ from src.config import Config
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.logger import logger
 from src.utils.story_library import (
+    _clips_dir,
+    _index_lock,
     load_story_library_index,
     save_story_library_index,
-    story_library_index_lock,
 )
 
 _TARGET_PROVIDER_VIDEO_HEIGHT = 1080
 
 
-def _ensure_dirs():
+def _ensure_dirs(library_id=None):
     os.makedirs(Config.STORY_RAW_DIR, exist_ok=True)
-    os.makedirs(os.path.join(Config.STORY_LIBRARY_DIR, "clips"), exist_ok=True)
+    os.makedirs(_clips_dir(library_id), exist_ok=True)
 
 
 def _detect_source(url: str) -> str:
@@ -325,13 +326,18 @@ def split_into_clips(video_path: str, clip_duration: int | None = None) -> list[
     return clips
 
 
-def add_clips_to_library(clips: list[str], source_type: str, tags: list[str] | None = None) -> list[dict]:
-    _ensure_dirs()
-    clips_dir = os.path.join(Config.STORY_LIBRARY_DIR, "clips")
+def add_clips_to_library(
+    clips: list[str],
+    source_type: str,
+    tags: list[str] | None = None,
+    library_id=None,
+) -> list[dict]:
+    _ensure_dirs(library_id)
+    clips_dir = _clips_dir(library_id)
     added = []
 
-    with story_library_index_lock:
-        index = load_story_library_index()
+    with _index_lock(library_id):
+        index = load_story_library_index(library_id)
 
         for clip_path in clips:
             clip_id = str(uuid.uuid4())
@@ -360,7 +366,7 @@ def add_clips_to_library(clips: list[str], source_type: str, tags: list[str] | N
             index["assets"].append(asset)
             added.append(asset)
 
-        save_story_library_index(index)
+        save_story_library_index(index, library_id)
 
     logger.info(f"Added {len(added)} clips to story library (source: {source_type})")
     return added
@@ -371,8 +377,9 @@ def download_from_links(
     session_id: str,
     tags: list[str] | None = None,
     progress_callback=None,
+    library_id=None,
 ) -> list[dict]:
-    _ensure_dirs()
+    _ensure_dirs(library_id)
     session_dir = os.path.join(Config.STORY_RAW_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
 
@@ -422,7 +429,7 @@ def download_from_links(
         clips = split_into_clips(dest_path)
         if clips:
             clip_tags = [source_type, f"session:{session_id}", *(tags or [])]
-            added = add_clips_to_library(clips, source_type, clip_tags)
+            added = add_clips_to_library(clips, source_type, clip_tags, library_id=library_id)
             all_added.extend(added)
 
     if progress_callback:
@@ -441,8 +448,9 @@ def download_from_provider_items(
     session_id: str,
     tags: list[str] | None = None,
     progress_callback=None,
+    library_id=None,
 ) -> list[dict]:
-    _ensure_dirs()
+    _ensure_dirs(library_id)
     session_dir = os.path.join(Config.STORY_RAW_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
 
@@ -485,7 +493,7 @@ def download_from_provider_items(
         clips = split_into_clips(dest_path)
         if clips:
             clip_tags = [provider, f"session:{session_id}", *(tags or [])]
-            added = add_clips_to_library(clips, provider, clip_tags)
+            added = add_clips_to_library(clips, provider, clip_tags, library_id=library_id)
             all_added.extend(added)
 
     if progress_callback:
@@ -504,8 +512,9 @@ def process_local_uploads(
     session_id: str,
     tags: list[str] | None = None,
     progress_callback=None,
+    library_id=None,
 ) -> list[dict]:
-    _ensure_dirs()
+    _ensure_dirs(library_id)
     session_dir = os.path.join(Config.STORY_RAW_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
 
@@ -545,7 +554,7 @@ def process_local_uploads(
         clips = split_into_clips(dest_path)
         if clips:
             clip_tags = ["local_upload", f"session:{session_id}", *(tags or [])]
-            added = add_clips_to_library(clips, "local_upload", clip_tags)
+            added = add_clips_to_library(clips, "local_upload", clip_tags, library_id=library_id)
             all_added.extend(added)
 
     if progress_callback:

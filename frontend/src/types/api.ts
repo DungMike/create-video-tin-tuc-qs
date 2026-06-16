@@ -554,6 +554,38 @@ export interface BulletinListItem {
 
 export type StoryVideoProvider = "pixabay" | "pexels";
 
+export interface StoryLibrary {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  clipCount: number;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface StoryLibrariesResponse {
+  libraries: StoryLibrary[];
+  defaultLibraryId: string;
+}
+
+export interface CreateStoryLibraryRequest {
+  name: string;
+}
+
+export interface UpdateStoryLibraryRequest {
+  name: string;
+}
+
+export interface StoryLibraryMutationResponse {
+  library: StoryLibrary;
+}
+
+export interface StoryLibraryDeleteResponse {
+  deleted: boolean;
+  libraryId: string;
+  deletedClips: number;
+}
+
 export interface StoryClip {
   id: string;
   sourceType: StoryVideoProvider | "local" | "local_upload" | "direct";
@@ -751,6 +783,7 @@ export interface CreateStoryVideoRequest {
   inputType: "audio_file" | "script_url";
   inputValue: string;
   outputName: string;
+  libraryId?: string;
   clipTags?: string[];
   crtSettings?: CRTSettings;
   waveformOverlayId?: string;
@@ -783,6 +816,7 @@ export interface CreateStoryBatchItem {
 export interface CreateStoryBatchRequest {
   items: CreateStoryBatchItem[];
   sharedConfig: {
+    libraryId?: string;
     clipTags?: string[];
     crtSettings?: CRTSettings;
     waveformOverlayId?: string;

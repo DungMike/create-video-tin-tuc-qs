@@ -120,6 +120,7 @@ class StoryVideoBatchRunner:
                 "input_value": config.get("input_value", ""),
                 "output_name": config.get("output_name", ""),
                 "clip_tags": config.get("clip_tags", []),
+                "library_id": config.get("library_id", ""),
                 "voice_id": config.get("voice_id", ""),
                 "subtitle_path": config.get("subtitle_path", ""),
                 "subtitle_font": config.get("subtitle_font", ""),

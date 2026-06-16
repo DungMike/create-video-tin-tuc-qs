@@ -16,7 +16,7 @@ from src.processors.audio_utils import get_audio_duration, validate_audio
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.file_manager import storage_absolute_path, storage_relative_path
 from src.utils.logger import logger
-from src.utils.story_library import load_story_library_index
+from src.utils.story_library import load_story_library_index, story_library_root
 from src.utils.tts_audio import (
     TTSAudioError,
     create_audio_from_google_doc,
@@ -85,8 +85,8 @@ def load_story_progress(story_id: str) -> dict | None:
     return _load_json(_progress_path(story_id))
 
 
-def _load_story_library_index() -> dict:
-    return load_story_library_index()
+def _load_story_library_index(library_id=None) -> dict:
+    return load_story_library_index(library_id)
 
 
 class StoryVideoPipelineRunner:
@@ -98,6 +98,7 @@ class StoryVideoPipelineRunner:
         self.input_value = config_dict.get("input_value", "")
         self.output_name = config_dict.get("output_name", "")
         self.clip_tags = config_dict.get("clip_tags", [])
+        self.library_id = str(config_dict.get("library_id", "") or "").strip()
         self.voice_id = config_dict.get("voice_id", "")
         self.waveform_overlay_id = str(config_dict.get("waveform_overlay_id", "") or "").strip()
         self.tv_effect_style_id = str(config_dict.get("tv_effect_style_id", "") or "").strip()
@@ -200,12 +201,13 @@ class StoryVideoPipelineRunner:
             clips = self._select_clips(audio_duration)
             self._raise_if_cancel_requested()
             if not clips:
+                library_hint = f" (thu vien: {self.library_id})" if self.library_id else ""
                 self._update_progress(
                     "select_clips",
                     15,
-                    "Khong tim thay clip nao trong thu vien.",
+                    f"Khong tim thay clip nao trong thu vien{library_hint}.",
                     status="failed",
-                    error="No clips available in story library.",
+                    error="No clips available in the selected story library.",
                 )
                 return None
 
@@ -322,7 +324,7 @@ class StoryVideoPipelineRunner:
 
     def _select_clips(self, audio_duration: float) -> list[str]:
         """Select prebuilt story-library clips without re-encoding them."""
-        index = _load_story_library_index()
+        index = _load_story_library_index(self.library_id)
         all_clips = index.get("assets", [])
 
         if self.clip_tags:
@@ -352,7 +354,7 @@ class StoryVideoPipelineRunner:
             rel_path = clip.get("relative_path", "")
             if not rel_path:
                 continue
-            clip_path = os.path.join(Config.STORY_LIBRARY_DIR, rel_path)
+            clip_path = os.path.join(story_library_root(self.library_id), rel_path)
             if not os.path.isfile(clip_path):
                 continue
 

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EmptyCard } from "@/components/empty-card";
 import { PaginationBar } from "@/components/pagination-bar";
 import { StatusAlert } from "@/components/status-alert";
+import { StoryLibrarySelect } from "@/components/StoryLibrarySelect";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -21,6 +22,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useActiveStoryLibrary } from "@/hooks/useActiveStoryLibrary";
 import {
   ApiError,
   deleteStoryClip,
@@ -244,6 +246,14 @@ export function StoryLibraryManager({
   const [fileInputKey, setFileInputKey] = useState(0);
   const [selectedTagFilter, setSelectedTagFilter] = useState<string[]>(filterTags ?? []);
 
+  const {
+    libraries,
+    activeId: activeLibraryId,
+    activeLibrary,
+    setActiveId: setActiveLibraryId,
+    refresh: refreshLibraries,
+  } = useActiveStoryLibrary();
+
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadLibrary = useCallback(async (targetPage: number) => {
@@ -251,8 +261,8 @@ export function StoryLibraryManager({
     setErrorMessage(null);
     try {
       const [libResponse, statsResponse] = await Promise.all([
-        getStoryLibrary(targetPage, PAGE_SIZE, selectedTagFilter.length ? selectedTagFilter : undefined),
-        getStoryLibraryStats(),
+        getStoryLibrary(activeLibraryId, targetPage, PAGE_SIZE, selectedTagFilter.length ? selectedTagFilter : undefined),
+        getStoryLibraryStats(activeLibraryId),
       ]);
       setClips(libResponse.clips);
       setTotalPages(libResponse.totalPages);
@@ -265,7 +275,7 @@ export function StoryLibraryManager({
     } finally {
       setIsLoading(false);
     }
-  }, [selectedTagFilter]);
+  }, [activeLibraryId, selectedTagFilter]);
 
   const refreshLibraryAfterDelete = useCallback(async (targetPage: number) => {
     const response = await loadLibrary(targetPage);
@@ -273,6 +283,26 @@ export function StoryLibraryManager({
       setPage(response.totalPages);
     }
   }, [loadLibrary]);
+
+  // Reset view state when switching libraries (skip the initial mount).
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
+    setPage(1);
+    setSelectedTagFilter([]);
+    setSelectedProviderVideos({});
+    setImportSessionId(null);
+    setUploadSessionId(null);
+    setImportProgress(null);
+    setUploadProgress(null);
+    setIsImporting(false);
+    setIsUploading(false);
+    onSelectionChange?.([]);
+    onAllSelectedChange?.(false);
+  }, [activeLibraryId, onSelectionChange, onAllSelectedChange]);
 
   useEffect(() => {
     loadLibrary(page);
@@ -382,7 +412,7 @@ export function StoryLibraryManager({
     setIsImporting(true);
     setImportProgress(null);
     try {
-      const res = await importSelectedStoryVideos(selectedProviderList, parseTags(providerTags));
+      const res = await importSelectedStoryVideos(activeLibraryId, selectedProviderList, parseTags(providerTags));
       setImportSessionId(res.sessionId);
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the import video da chon.");
@@ -400,7 +430,7 @@ export function StoryLibraryManager({
     setIsUploading(true);
     setUploadProgress(null);
     try {
-      const res = await uploadStoryVideos(uploadFiles, parseTags(uploadTags));
+      const res = await uploadStoryVideos(activeLibraryId, uploadFiles, parseTags(uploadTags));
       setUploadSessionId(res.sessionId);
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the upload video.");
@@ -412,7 +442,7 @@ export function StoryLibraryManager({
     setErrorMessage(null);
     setSuccessMessage(null);
     try {
-      await deleteStoryClip(clipId);
+      await deleteStoryClip(activeLibraryId, clipId);
       if (selectionMode && onSelectionChange) {
         onSelectionChange(selectedClipIds.filter((id) => id !== clipId));
       }
@@ -430,8 +460,8 @@ export function StoryLibraryManager({
     setIsBulkDeleting(true);
     try {
       const response = bulkDeleteTarget.scope === "page"
-        ? await deleteStoryClipsBulk({ scope: "ids", clipIds: bulkDeleteTarget.clipIds })
-        : await deleteStoryClipsBulk({ scope: "all" });
+        ? await deleteStoryClipsBulk(activeLibraryId, { scope: "ids", clipIds: bulkDeleteTarget.clipIds })
+        : await deleteStoryClipsBulk(activeLibraryId, { scope: "all" });
       const failedCount = response.failedClipIds.length + response.failedFiles.length;
 
       if (bulkDeleteTarget.scope === "page") {
@@ -507,6 +537,14 @@ export function StoryLibraryManager({
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
+          <StoryLibrarySelect
+            libraries={libraries}
+            value={activeLibraryId}
+            onChange={setActiveLibraryId}
+            onLibrariesChanged={() => void refreshLibraries()}
+            manage
+            disabled={bulkActionsDisabled}
+          />
           {selectionMode ? (
             <>
               <Badge variant={allSelected ? "default" : "secondary"} className="rounded-full">
@@ -566,7 +604,7 @@ export function StoryLibraryManager({
             <AlertDialogDescription>
               {bulkDeleteTarget?.scope === "page"
                 ? `Thao tac se xoa ${bulkDeleteTarget.clipIds.length} clip dang hien thi o trang ${bulkDeleteTarget.page}. Khong the hoan tac.`
-                : `Thao tac se xoa ${bulkDeleteTarget?.totalClips ?? 0} clip trong toan bo thu vien Story Video. Story Video dang render co the bi anh huong va thao tac khong the hoan tac.`}
+                : `Thao tac se xoa ${bulkDeleteTarget?.totalClips ?? 0} clip trong thu vien "${activeLibrary?.name ?? ""}". Story Video dang render co the bi anh huong va thao tac khong the hoan tac.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -742,7 +780,10 @@ export function StoryLibraryManager({
           <span>Dang tai thu vien clip...</span>
         </div>
       ) : clips.length === 0 ? (
-        <EmptyCard title="Chua co clip trong thu vien" description="Search Pixabay/Pexels hoac upload file video de bat dau." />
+        <EmptyCard
+          title={activeLibrary ? `Thu vien "${activeLibrary.name}" chua co clip` : "Chua co clip trong thu vien"}
+          description="Search Pixabay/Pexels hoac upload file video de bat dau."
+        />
       ) : (
         <>
           <section className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

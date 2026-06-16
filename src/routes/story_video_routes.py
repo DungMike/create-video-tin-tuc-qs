@@ -20,11 +20,22 @@ from werkzeug.utils import secure_filename
 from src.config import Config
 from src.utils.logger import logger
 from src.utils.story_library import (
+    LibraryError,
+    count_library_clips,
+    create_library,
+    delete_library,
     delete_story_library_assets,
+    ensure_libraries_registry,
+    get_default_library_id,
+    get_library as get_library_record,
+    load_libraries,
     load_story_library_index as _load_library_index,
+    rename_library,
+    resolve_library_id,
     save_story_library_index as _save_library_index,
-    story_library_index_lock,
+    story_library_root,
 )
+from src.utils.story_library import _index_lock as _library_index_lock
 
 story_video_bp = Blueprint("story_video", __name__)
 
@@ -39,12 +50,43 @@ def _error(message: str, code: str = "bad_request", status: int = 400):
     return jsonify({"error": {"code": code, "message": message}}), status
 
 
-def _has_active_library_session() -> bool:
+def _has_active_library_session(library_id=None) -> bool:
+    """True if a download/upload/import session is still running.
+
+    When ``library_id`` is given, only sessions targeting that library count.
+    """
+    target = resolve_library_id(library_id) if library_id else None
     with _download_sessions_lock:
-        return any(
-            session.get("status") not in {"completed", "failed"}
-            for session in _download_sessions.values()
-        )
+        for session in _download_sessions.values():
+            if session.get("status") in {"completed", "failed"}:
+                continue
+            if target is not None and resolve_library_id(session.get("libraryId")) != target:
+                continue
+            return True
+    return False
+
+
+def _library_id_from_request():
+    """Resolve the target library id from query (GET) or JSON/form body."""
+    raw = request.args.get("libraryId")
+    if raw is None:
+        body = request.get_json(silent=True)
+        if isinstance(body, dict):
+            raw = body.get("libraryId")
+    if raw is None and request.form:
+        raw = request.form.get("libraryId")
+    return str(raw or "").strip()
+
+
+def _resolve_or_404(raw_library_id):
+    """Validate a library id. Blank/"default" -> Default. Unknown -> (None, 404)."""
+    ensure_libraries_registry()
+    raw = str(raw_library_id or "").strip()
+    if not raw or raw == get_default_library_id():
+        return get_default_library_id(), None
+    if get_library_record(raw) is None:
+        return None, _error("Thư viện không tồn tại.", code="library_not_found", status=404)
+    return raw, None
 
 
 def _new_tv_noise_job(action: str, overlay_id: str = "") -> str:
@@ -158,12 +200,16 @@ def _run_tv_noise_preprocess_async(overlay_id: str, session_id: str | None = Non
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/library", methods=["GET"])
 def get_library():
+    library_id, err = _resolve_or_404(request.args.get("libraryId"))
+    if err:
+        return err
+
     page = max(1, int(request.args.get("page", 1)))
     per_page = min(100, max(1, int(request.args.get("per_page", Config.STORY_LIBRARY_PAGE_SIZE))))
     tag_filter = request.args.get("tags", "").strip()
     filter_tags = [t.strip() for t in tag_filter.split(",") if t.strip()] if tag_filter else []
 
-    index = _load_library_index()
+    index = _load_library_index(library_id)
     assets = index.get("assets", [])
 
     # Filter by tags if provided
@@ -197,6 +243,10 @@ def download_library_videos():
     links = data.get("links", [])
     tags = data.get("tags", [])
 
+    library_id, err = _resolve_or_404(data.get("libraryId"))
+    if err:
+        return err
+
     if not links or not isinstance(links, list):
         return _error("Cần ít nhất 1 link.", code="no_links")
 
@@ -216,6 +266,7 @@ def download_library_videos():
             "total": len(links),
             "message": "Bắt đầu tải...",
             "addedClips": 0,
+            "libraryId": library_id,
         }
 
     def _run_download():
@@ -227,7 +278,7 @@ def download_library_videos():
                     _download_sessions[session_id].update(data)
 
         try:
-            result = download_from_links(links, session_id, tags, progress_cb)
+            result = download_from_links(links, session_id, tags, progress_cb, library_id=library_id)
             added_count = len(result) if isinstance(result, list) else 0
             with _download_sessions_lock:
                 _download_sessions[session_id].update({
@@ -257,6 +308,10 @@ def upload_library_videos():
     files = request.files.getlist("files")
     if not files:
         return _error("Chưa chọn file nào.", code="no_files")
+
+    library_id, err = _resolve_or_404(request.form.get("libraryId"))
+    if err:
+        return err
 
     tags_raw = request.form.get("tags", "[]")
     try:
@@ -292,6 +347,7 @@ def upload_library_videos():
             "total": len(saved_paths),
             "message": "Đang xử lý file...",
             "addedClips": 0,
+            "libraryId": library_id,
         }
 
     def _run_upload():
@@ -303,7 +359,7 @@ def upload_library_videos():
                     _download_sessions[session_id].update(data)
 
         try:
-            result = process_local_uploads(saved_paths, session_id, tags, progress_cb)
+            result = process_local_uploads(saved_paths, session_id, tags, progress_cb, library_id=library_id)
             added_count = len(result) if isinstance(result, list) else 0
             with _download_sessions_lock:
                 _download_sessions[session_id].update({
@@ -386,6 +442,10 @@ def import_selected_story_videos():
     raw_items = data.get("items", [])
     tags = data.get("tags", [])
 
+    library_id, err = _resolve_or_404(data.get("libraryId"))
+    if err:
+        return err
+
     if not isinstance(raw_items, list) or not raw_items:
         return _error("Can chon it nhat 1 video.", code="no_items")
     if tags is not None and not isinstance(tags, list):
@@ -415,6 +475,7 @@ def import_selected_story_videos():
             "total": len(items),
             "message": "Bat dau import video...",
             "addedClips": 0,
+            "libraryId": library_id,
         }
 
     def _run_import():
@@ -426,7 +487,7 @@ def import_selected_story_videos():
                     _download_sessions[session_id].update(progress_data)
 
         try:
-            result = download_from_provider_items(items, session_id, clean_tags, progress_cb)
+            result = download_from_provider_items(items, session_id, clean_tags, progress_cb, library_id=library_id)
             added_count = len(result) if isinstance(result, list) else 0
             with _download_sessions_lock:
                 _download_sessions[session_id].update({
@@ -453,7 +514,10 @@ def import_selected_story_videos():
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/library/<clip_id>", methods=["DELETE"])
 def delete_library_clip(clip_id: str):
-    result = delete_story_library_assets([clip_id])
+    library_id, err = _resolve_or_404(_library_id_from_request())
+    if err:
+        return err
+    result = delete_story_library_assets([clip_id], library_id=library_id)
 
     if result["missingClipIds"]:
         return _error("Clip không tồn tại.", code="clip_not_found", status=404)
@@ -473,6 +537,10 @@ def bulk_delete_library_clips():
     if not isinstance(data, dict):
         return _error("Payload phai la JSON object.", code="invalid_payload")
 
+    library_id, err = _resolve_or_404(data.get("libraryId"))
+    if err:
+        return err
+
     scope = str(data.get("scope") or "").strip().lower()
     if scope == "ids":
         raw_clip_ids = data.get("clipIds")
@@ -481,15 +549,15 @@ def bulk_delete_library_clips():
         clip_ids = [clip_id.strip() for clip_id in raw_clip_ids if isinstance(clip_id, str) and clip_id.strip()]
         if not clip_ids:
             return _error("Can it nhat 1 clipId de xoa.", code="invalid_clip_ids")
-        result = delete_story_library_assets(clip_ids)
+        result = delete_story_library_assets(clip_ids, library_id=library_id)
     elif scope == "all":
-        if _has_active_library_session():
+        if _has_active_library_session(library_id):
             return _error(
                 "Thu vien dang duoc import hoac upload. Hay doi tac vu hoan tat roi xoa lai.",
                 code="library_busy",
                 status=409,
             )
-        result = delete_story_library_assets(delete_all=True, clean_orphans=True)
+        result = delete_story_library_assets(delete_all=True, clean_orphans=True, library_id=library_id)
     else:
         return _error("scope phai la 'ids' hoac 'all'.", code="invalid_scope")
 
@@ -506,8 +574,12 @@ def update_clip_tags(clip_id: str):
     if not isinstance(new_tags, list):
         return _error("tags phải là array.", code="invalid_tags")
 
-    with story_library_index_lock:
-        index = _load_library_index()
+    library_id, err = _resolve_or_404(data.get("libraryId"))
+    if err:
+        return err
+
+    with _library_index_lock(library_id):
+        index = _load_library_index(library_id)
         found = False
         for asset in index.get("assets", []):
             if asset.get("id") == clip_id:
@@ -518,7 +590,7 @@ def update_clip_tags(clip_id: str):
         if not found:
             return _error("Clip không tồn tại.", code="clip_not_found", status=404)
 
-        _save_library_index(index)
+        _save_library_index(index, library_id)
     return jsonify({"updated": True, "clipId": clip_id, "tags": new_tags})
 
 
@@ -527,7 +599,10 @@ def update_clip_tags(clip_id: str):
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/library/stats", methods=["GET"])
 def get_library_stats():
-    index = _load_library_index()
+    library_id, err = _resolve_or_404(request.args.get("libraryId"))
+    if err:
+        return err
+    index = _load_library_index(library_id)
     assets = index.get("assets", [])
 
     total_duration = sum(a.get("duration", 0) for a in assets)
@@ -541,6 +616,78 @@ def get_library_stats():
         "totalDuration": round(total_duration, 2),
         "bySource": by_source,
     })
+
+
+# ---------------------------------------------------------------------------
+# 7b. Library registry CRUD (multiple named clip libraries / "folders")
+# ---------------------------------------------------------------------------
+def _serialize_library(record: dict, *, with_count: bool = True) -> dict:
+    payload = {
+        "id": record.get("id"),
+        "name": record.get("name"),
+        "isDefault": bool(record.get("isDefault")),
+        "createdAt": record.get("createdAt"),
+    }
+    if record.get("updatedAt"):
+        payload["updatedAt"] = record["updatedAt"]
+    if with_count:
+        payload["clipCount"] = count_library_clips(record.get("id"))
+    return payload
+
+
+@story_video_bp.route("/api/story-video/libraries", methods=["GET"])
+def list_libraries():
+    libraries = [_serialize_library(lib) for lib in load_libraries()]
+    return jsonify({
+        "libraries": libraries,
+        "defaultLibraryId": get_default_library_id(),
+    })
+
+
+@story_video_bp.route("/api/story-video/libraries", methods=["POST"])
+def create_library_route():
+    data = request.get_json(silent=True) or {}
+    try:
+        record = create_library(data.get("name", ""))
+    except LibraryError as exc:
+        status = 409 if exc.code == "duplicate_library_name" else 400
+        return _error(exc.message, code=exc.code, status=status)
+    return jsonify({"library": _serialize_library(record)}), 201
+
+
+@story_video_bp.route("/api/story-video/libraries/<library_id>", methods=["PATCH"])
+def rename_library_route(library_id: str):
+    data = request.get_json(silent=True) or {}
+    try:
+        record = rename_library(library_id, data.get("name", ""))
+    except LibraryError as exc:
+        status = {
+            "library_not_found": 404,
+            "duplicate_library_name": 409,
+        }.get(exc.code, 400)
+        return _error(exc.message, code=exc.code, status=status)
+    return jsonify({"library": _serialize_library(record)})
+
+
+@story_video_bp.route("/api/story-video/libraries/<library_id>", methods=["DELETE"])
+def delete_library_route(library_id: str):
+    body = request.get_json(silent=True) or {}
+    delete_clips = body.get("deleteClips", True)
+    if _has_active_library_session(library_id):
+        return _error(
+            "Thu vien dang duoc import hoac upload. Hay doi tac vu hoan tat roi xoa lai.",
+            code="library_in_use",
+            status=409,
+        )
+    try:
+        result = delete_library(library_id, delete_clips=bool(delete_clips))
+    except LibraryError as exc:
+        status = {
+            "library_not_found": 404,
+            "cannot_delete_default": 409,
+        }.get(exc.code, 400)
+        return _error(exc.message, code=exc.code, status=status)
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------
@@ -652,20 +799,29 @@ def generate_crt_demo():
 # ---------------------------------------------------------------------------
 # 9b. TV effect styles (1990s looks) — list / select / preview
 # ---------------------------------------------------------------------------
-def _find_sample_clip(sample_clip_id: str | None = None) -> str | None:
-    """Resolve a sample clip path from the story library (specific id or first available)."""
-    index = _load_library_index()
-    assets = index.get("assets", [])
-    if sample_clip_id:
-        clip = next((a for a in assets if a.get("id") == sample_clip_id), None)
-        if clip:
-            path = os.path.join(Config.STORY_LIBRARY_DIR, clip.get("relative_path", ""))
+def _find_sample_clip(sample_clip_id: str | None = None, library_id=None) -> str | None:
+    """Resolve a sample clip path from a story library (specific id or first available).
+
+    Searches the requested library first; if it yields nothing and the library is
+    not the Default, falls back to the Default library so previews still work.
+    """
+    candidates = [resolve_library_id(library_id)]
+    if candidates[0] != get_default_library_id():
+        candidates.append(get_default_library_id())
+
+    for lib_id in candidates:
+        root = story_library_root(lib_id)
+        assets = _load_library_index(lib_id).get("assets", [])
+        if sample_clip_id:
+            clip = next((a for a in assets if a.get("id") == sample_clip_id), None)
+            if clip:
+                path = os.path.join(root, clip.get("relative_path", ""))
+                if os.path.isfile(path):
+                    return path
+        for asset in assets:
+            path = os.path.join(root, asset.get("relative_path", ""))
             if os.path.isfile(path):
                 return path
-    for asset in assets:
-        path = os.path.join(Config.STORY_LIBRARY_DIR, asset.get("relative_path", ""))
-        if os.path.isfile(path):
-            return path
     return None
 
 
@@ -755,7 +911,7 @@ def generate_tv_effect_style_preview():
     elif not get_tv_effect_style(style_id):
         return _error("Style không hợp lệ.", code="invalid_style", status=404)
 
-    sample_path = _find_sample_clip(data.get("sampleClipId"))
+    sample_path = _find_sample_clip(data.get("sampleClipId"), data.get("libraryId"))
     if not sample_path:
         return _error("Không có clip mẫu trong thư viện. Hãy thêm clip trước.", code="no_sample", status=404)
 
@@ -870,7 +1026,7 @@ def generate_subtitle_preview():
         style_overrides = None
 
     # Empty library is fine: render_subtitle_preview falls back to a lavfi background.
-    sample_path = _find_sample_clip(data.get("sampleClipId"))
+    sample_path = _find_sample_clip(data.get("sampleClipId"), data.get("libraryId"))
 
     output_path = render_subtitle_preview(
         font_family,
@@ -951,6 +1107,7 @@ def create_story_video():
         "input_value": input_value,
         "output_name": output_name,
         "clip_tags": data.get("clipTags", []),
+        "library_id": str(data.get("libraryId", "") or "").strip(),
         "crt_settings": data.get("crtSettings", {}),
         "tv_effect_style_id": str(data.get("tvEffectStyleId", "")).strip(),
         "waveform_overlay_id": str(data.get("waveformOverlayId", "")).strip(),
@@ -1173,6 +1330,7 @@ def create_story_batch():
             "input_value": input_value,
             "output_name": output_name,
             "clip_tags": shared_config.get("clipTags", []),
+            "library_id": str(shared_config.get("libraryId", "") or "").strip(),
             "crt_settings": shared_config.get("crtSettings", {}),
             "tv_effect_style_id": str(shared_config.get("tvEffectStyleId", "")).strip(),
             "waveform_overlay_id": str(shared_config.get("waveformOverlayId", "")).strip(),
@@ -1306,6 +1464,7 @@ def retry_batch_failed(batch_id: str):
             "input_value": input_value,
             "output_name": s.get("output_name", ""),
             "clip_tags": s.get("clip_tags", []),
+            "library_id": s.get("library_id", ""),
             "voice_id": s.get("voice_id", ""),
             "subtitle_path": s.get("subtitle_path", ""),
             "subtitle_font": s.get("subtitle_font", ""),

@@ -243,6 +243,7 @@ import type {
   CRTPresetsResponse,
   CRTSettings,
   CreateStoryBatchRequest,
+  CreateStoryLibraryRequest,
   CreateStoryVideoRequest,
   CtaOverlay,
   DecorImage,
@@ -252,11 +253,15 @@ import type {
   DownloadProgress,
   ParseScriptResponse,
   StoryBatchProgress,
+  StoryLibrariesResponse,
   StoryLibraryBulkDeleteRequest,
   StoryLibraryBulkDeleteResponse,
+  StoryLibraryDeleteResponse,
+  StoryLibraryMutationResponse,
   StoryLibraryResponse,
   StoryLibraryStats,
   StoryProviderVideo,
+  UpdateStoryLibraryRequest,
   StoryProviderVideoSearchResponse,
   StoryVideoProvider,
   StoryVideoProgress,
@@ -455,24 +460,53 @@ export const getSegmentResources = (bulletinId: string, segmentType: SegmentType
   );
 
 
-// === Story Video Library ===
+// === Story Video Libraries (folders) ===
 
-export async function getStoryLibrary(page = 1, perPage = 20, tags?: string[]) {
-  const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
+export async function getStoryLibraries() {
+  return requestJson<StoryLibrariesResponse>("/api/story-video/libraries");
+}
+
+export async function createStoryLibrary(payload: CreateStoryLibraryRequest) {
+  return requestJson<StoryLibraryMutationResponse>("/api/story-video/libraries", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function renameStoryLibrary(libraryId: string, payload: UpdateStoryLibraryRequest) {
+  return requestJson<StoryLibraryMutationResponse>(`/api/story-video/libraries/${libraryId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteStoryLibrary(libraryId: string) {
+  return requestJson<StoryLibraryDeleteResponse>(`/api/story-video/libraries/${libraryId}`, {
+    method: "DELETE",
+  });
+}
+
+// === Story Video Library (clips within a folder) ===
+
+export async function getStoryLibrary(libraryId: string, page = 1, perPage = 20, tags?: string[]) {
+  const params = new URLSearchParams({ page: String(page), per_page: String(perPage), libraryId });
   if (tags?.length) params.set("tags", tags.join(","));
   return requestJson<StoryLibraryResponse>(`/api/story-video/library?${params}`);
 }
 
-export async function downloadStoryVideos(links: string[], tags: string[] = []) {
+export async function downloadStoryVideos(libraryId: string, links: string[], tags: string[] = []) {
   return requestJson<{ sessionId: string }>("/api/story-video/library/download", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ links, tags }),
+    body: JSON.stringify({ libraryId, links, tags }),
   });
 }
 
-export async function uploadStoryVideos(files: File[], tags: string[] = []) {
+export async function uploadStoryVideos(libraryId: string, files: File[], tags: string[] = []) {
   const fd = new FormData();
+  fd.append("libraryId", libraryId);
   files.forEach((f) => fd.append("files", f));
   if (tags.length) fd.append("tags", JSON.stringify(tags));
   return requestJson<{ sessionId: string }>("/api/story-video/library/upload", {
@@ -495,11 +529,16 @@ export async function searchStoryProviderVideos(
   return requestJson<StoryProviderVideoSearchResponse>(`/api/story-video/video-search/${provider}?${params}`);
 }
 
-export async function importSelectedStoryVideos(items: StoryProviderVideo[], tags: string[] = []) {
+export async function importSelectedStoryVideos(
+  libraryId: string,
+  items: StoryProviderVideo[],
+  tags: string[] = [],
+) {
   return requestJson<{ sessionId: string }>("/api/story-video/library/import-selected", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      libraryId,
       items: items.map((item) => ({
         provider: item.provider,
         id: item.id,
@@ -510,28 +549,33 @@ export async function importSelectedStoryVideos(items: StoryProviderVideo[], tag
   });
 }
 
-export async function deleteStoryClip(clipId: string) {
-  return requestJson<void>(`/api/story-video/library/${clipId}`, { method: "DELETE" });
+export async function deleteStoryClip(libraryId: string, clipId: string) {
+  return requestJson<void>(`/api/story-video/library/${clipId}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ libraryId }),
+  });
 }
 
-export async function deleteStoryClipsBulk(payload: StoryLibraryBulkDeleteRequest) {
+export async function deleteStoryClipsBulk(libraryId: string, payload: StoryLibraryBulkDeleteRequest) {
   return requestJson<StoryLibraryBulkDeleteResponse>("/api/story-video/library/bulk-delete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ libraryId, ...payload }),
   });
 }
 
-export async function updateStoryClipTags(clipId: string, tags: string[]) {
+export async function updateStoryClipTags(libraryId: string, clipId: string, tags: string[]) {
   return requestJson<void>(`/api/story-video/library/${clipId}/tags`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tags }),
+    body: JSON.stringify({ libraryId, tags }),
   });
 }
 
-export async function getStoryLibraryStats() {
-  return requestJson<StoryLibraryStats>("/api/story-video/library/stats");
+export async function getStoryLibraryStats(libraryId: string) {
+  const params = new URLSearchParams({ libraryId });
+  return requestJson<StoryLibraryStats>(`/api/story-video/library/stats?${params}`);
 }
 
 // === CRT Effect ===
