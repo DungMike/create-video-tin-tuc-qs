@@ -34,6 +34,11 @@ class Config:
     FFMPEG_IMAGE_CLIP_TIMEOUT_SECONDS = int(os.getenv("FFMPEG_IMAGE_CLIP_TIMEOUT_SECONDS", "120"))
     IMAGE_MOTION_CACHE_ENABLED = os.getenv("IMAGE_MOTION_CACHE_ENABLED", "true").lower() == "true"
     IMAGE_MOTION_WORKERS = int(os.getenv("IMAGE_MOTION_WORKERS", "4"))
+    # Number of story videos to render concurrently within one batch. The render is
+    # bound by a single-threaded libavfilter graph (~1.2 cores) with NVENC idle, so
+    # running a few in parallel uses the otherwise-idle cores/encoder. Output is
+    # identical to sequential. Keep modest on low-core machines (default 2).
+    STORY_BATCH_MAX_WORKERS = max(1, int(os.getenv("STORY_BATCH_MAX_WORKERS", "2")))
     IMAGE_ONLY_FAST_CHUNK_CONCAT = os.getenv("IMAGE_ONLY_FAST_CHUNK_CONCAT", "true").lower() == "true"
     IMAGE_ONLY_SKIP_XFADE = os.getenv("IMAGE_ONLY_SKIP_XFADE", "true").lower() == "true"
     IMAGE_CLIP_FADE_DURATION = float(os.getenv("IMAGE_CLIP_FADE_DURATION", "0.5"))

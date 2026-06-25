@@ -832,6 +832,7 @@ export interface SubtitleFontInfo {
   family: string;
   supportsKorean: boolean;
   supportsVietnamese: boolean;
+  supportsThai: boolean;
   source: "system" | "user";
 }
 

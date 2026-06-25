@@ -249,11 +249,18 @@ def search_pexels_videos(query: str, page: int = 1, per_page: int = 20) -> dict:
     }
 
 
-def search_provider_videos(provider: str, query: str, page: int = 1, per_page: int = 20) -> dict:
+# Maximum results per page each provider's API supports.
+PIXABAY_MAX_PER_PAGE = 200  # Pixabay: per_page valid 3-200
+PEXELS_MAX_PER_PAGE = 80  # Pexels: per_page valid 1-80
+
+
+def search_provider_videos(provider: str, query: str, page: int = 1, per_page: int | None = None) -> dict:
     if provider == "pixabay":
-        return search_pixabay_videos(query, page, max(3, min(80, per_page)))
+        size = PIXABAY_MAX_PER_PAGE if per_page is None else max(3, min(PIXABAY_MAX_PER_PAGE, per_page))
+        return search_pixabay_videos(query, page, size)
     if provider == "pexels":
-        return search_pexels_videos(query, page, max(1, min(80, per_page)))
+        size = PEXELS_MAX_PER_PAGE if per_page is None else max(1, min(PEXELS_MAX_PER_PAGE, per_page))
+        return search_pexels_videos(query, page, size)
     raise ValueError("Unsupported provider")
 
 

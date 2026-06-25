@@ -28,17 +28,23 @@ _FONT_EXTENSIONS = (".ttf", ".otf", ".ttc")
 _FONTS_INDEX_FILENAME = "fonts_index.json"
 _KOREAN_PROBE_CODEPOINT = 0xAC00
 _VIETNAMESE_PROBE_CODEPOINT = 0x1EBF
+_THAI_PROBE_CODEPOINT = 0x0E01  # THAI CHARACTER KO KAI
 
+# (filename_prefix, family, supports_korean, supports_vietnamese, supports_thai)
 _FALLBACK_FONT_WHITELIST = (
-    ("malgun", "Malgun Gothic", True, False),
-    ("arial", "Arial", False, True),
-    ("segoeui", "Segoe UI", False, True),
-    ("tahoma", "Tahoma", False, True),
-    ("verdana", "Verdana", False, True),
-    ("calibri", "Calibri", False, True),
-    ("times", "Times New Roman", False, True),
-    ("georgia", "Georgia", False, True),
-    ("cambria", "Cambria", False, True),
+    ("malgun", "Malgun Gothic", True, False, False),
+    ("arial", "Arial", False, True, False),
+    ("segoeui", "Segoe UI", False, True, False),
+    ("tahoma", "Tahoma", False, True, True),
+    ("leelawadeeui", "Leelawadee UI", False, True, True),
+    ("leelawadee", "Leelawadee", False, True, True),
+    ("verdana", "Verdana", False, True, False),
+    ("calibri", "Calibri", False, True, False),
+    ("times", "Times New Roman", False, True, False),
+    ("georgia", "Georgia", False, True, False),
+    ("cambria", "Cambria", False, True, False),
+    ("sarabun", "Sarabun", False, True, True),
+    ("notosansthai", "Noto Sans Thai", False, False, True),
 )
 
 _TIMESTAMP_RE = re.compile(
@@ -603,7 +609,7 @@ def _cmap_maps_codepoint(data: bytes, codepoint: int) -> bool:
     return False
 
 
-def _parse_sfnt_at(file_obj, base_offset: int) -> tuple[str, bool, bool] | None:
+def _parse_sfnt_at(file_obj, base_offset: int) -> tuple[str, bool, bool, bool] | None:
     file_obj.seek(base_offset)
     header = file_obj.read(12)
     if len(header) < 12 or header[:4] not in (b"\x00\x01\x00\x00", b"OTTO", b"true"):
@@ -633,16 +639,18 @@ def _parse_sfnt_at(file_obj, base_offset: int) -> tuple[str, bool, bool] | None:
         return None
     supports_korean = False
     supports_vietnamese = False
+    supports_thai = False
     if cmap_loc:
         file_obj.seek(cmap_loc[0])
         cmap_data = file_obj.read(cmap_loc[1])
         supports_korean = _cmap_maps_codepoint(cmap_data, _KOREAN_PROBE_CODEPOINT)
         supports_vietnamese = _cmap_maps_codepoint(cmap_data, _VIETNAMESE_PROBE_CODEPOINT)
-    return family, supports_korean, supports_vietnamese
+        supports_thai = _cmap_maps_codepoint(cmap_data, _THAI_PROBE_CODEPOINT)
+    return family, supports_korean, supports_vietnamese, supports_thai
 
 
-def _probe_font_file(path: str) -> list[tuple[str, bool, bool]]:
-    results: list[tuple[str, bool, bool]] = []
+def _probe_font_file(path: str) -> list[tuple[str, bool, bool, bool]]:
+    results: list[tuple[str, bool, bool, bool]] = []
     try:
         with open(path, "rb") as file_obj:
             head = file_obj.read(4)
@@ -669,11 +677,11 @@ def _probe_font_file(path: str) -> list[tuple[str, bool, bool]]:
     return results
 
 
-def _fallback_font_entries(filename: str) -> list[tuple[str, bool, bool]]:
+def _fallback_font_entries(filename: str) -> list[tuple[str, bool, bool, bool]]:
     stem = os.path.splitext(os.path.basename(filename))[0].lower()
-    for prefix, family, supports_korean, supports_vietnamese in _FALLBACK_FONT_WHITELIST:
+    for prefix, family, supports_korean, supports_vietnamese, supports_thai in _FALLBACK_FONT_WHITELIST:
         if stem.startswith(prefix):
-            return [(family, supports_korean, supports_vietnamese)]
+            return [(family, supports_korean, supports_vietnamese, supports_thai)]
     return []
 
 
@@ -732,18 +740,20 @@ def scan_fonts(force_refresh: bool = False) -> list[dict]:
             entries = _probe_font_file(path)
             if not entries:
                 entries = _fallback_font_entries(path)
-            for family, supports_korean, supports_vietnamese in entries:
+            for family, supports_korean, supports_vietnamese, supports_thai in entries:
                 record = registry.setdefault(family, {
                     "family": family,
                     "files": [],
                     "supportsKorean": False,
                     "supportsVietnamese": False,
+                    "supportsThai": False,
                     "source": source,
                 })
                 if normalized not in record["files"]:
                     record["files"].append(normalized)
                 record["supportsKorean"] = record["supportsKorean"] or supports_korean
                 record["supportsVietnamese"] = record["supportsVietnamese"] or supports_vietnamese
+                record["supportsThai"] = record["supportsThai"] or supports_thai
                 if source == "user":
                     record["source"] = "user"
 
@@ -761,6 +771,7 @@ def scan_fonts(force_refresh: bool = False) -> list[dict]:
 _PREVIEW_SAMPLE_LINES = [
     "그날 밤, 진실이 깨어났다. 라디오에서 목소리가 흘러나왔다.",
     "Đêm đó, sự thật đã thức tỉnh trong căn phòng nhỏ.",
+    "คืนนั้น ความจริงได้ตื่นขึ้นในห้องเล็กๆ",
     "The truth finally came out.",
 ]
 _PREVIEW_DURATION_SECONDS = 4.5

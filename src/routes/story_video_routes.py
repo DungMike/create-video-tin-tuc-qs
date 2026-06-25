@@ -412,7 +412,9 @@ def search_story_provider_videos(provider: str):
 
     try:
         page = max(1, int(request.args.get("page", 1)))
-        per_page = max(1, min(80, int(request.args.get("per_page", 20))))
+        # Upper-bound at the highest provider max (Pixabay 200); the per-provider
+        # clamp in search_provider_videos narrows Pexels to its own 80 limit.
+        per_page = max(1, min(200, int(request.args.get("per_page", 200))))
     except ValueError:
         return _error("page/per_page khong hop le.", code="invalid_pagination")
 

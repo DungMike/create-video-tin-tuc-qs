@@ -43,7 +43,11 @@ import type {
 } from "@/types/api";
 
 const PAGE_SIZE = 20;
-const PROVIDER_PAGE_SIZE = 12;
+// Request the maximum page size each provider's API supports per call.
+const PROVIDER_PAGE_SIZE: Record<StoryVideoProvider, number> = {
+  pixabay: 200,
+  pexels: 80,
+};
 const PROVIDERS: StoryVideoProvider[] = ["pixabay", "pexels"];
 
 type BulkDeleteTarget =
@@ -361,7 +365,7 @@ export function StoryLibraryManager({
     setErrorMessage(null);
     setSearchingProvider(provider);
     try {
-      const response = await searchStoryProviderVideos(provider, query, targetPage, PROVIDER_PAGE_SIZE);
+      const response = await searchStoryProviderVideos(provider, query, targetPage, PROVIDER_PAGE_SIZE[provider]);
       setProviderResults((current) => ({ ...current, [provider]: response.items }));
       setProviderPages((current) => ({ ...current, [provider]: response.page }));
       setProviderTotalPages((current) => ({

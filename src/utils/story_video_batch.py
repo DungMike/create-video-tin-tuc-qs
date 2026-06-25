@@ -6,6 +6,7 @@ with unified batch progress tracking.
 
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from src.config import Config
@@ -86,12 +87,25 @@ def request_batch_cancel(batch_id: str) -> dict | None:
 
 
 class StoryVideoBatchRunner:
-    """Runs a batch of story video pipelines sequentially in a daemon thread."""
+    """Runs a batch of story video pipelines in a daemon thread.
+
+    Stories are rendered concurrently with a bounded worker pool
+    (``Config.STORY_BATCH_MAX_WORKERS``). Each story renders in its own
+    ``story_id``-namespaced dirs and as an independent ffmpeg process, so the
+    output is identical to sequential rendering — only the scheduling differs.
+    """
 
     def __init__(self, batch_id: str, story_configs: list[dict]):
         self.batch_id = batch_id
         self.story_configs = story_configs
-        self._lock = threading.Lock()
+        # RLock so a locked section can safely call another locked helper.
+        self._lock = threading.RLock()
+        self._max_workers = max(1, min(Config.STORY_BATCH_MAX_WORKERS, len(story_configs) or 1))
+
+        # Counters shared across worker threads; always mutate under self._lock.
+        self.completed_count = 0
+        self.failed_count = 0
+        self.cancelled_count = 0
 
         self.progress = {
             "batchId": batch_id,
@@ -169,120 +183,119 @@ class StoryVideoBatchRunner:
         thread = threading.Thread(target=self._run_batch, daemon=True)
         thread.start()
         logger.info(
-            f"[StoryBatch:{self.batch_id}] Started batch with {len(self.story_configs)} stories."
+            f"[StoryBatch:{self.batch_id}] Started batch with {len(self.story_configs)} stories "
+            f"(max_workers={self._max_workers})."
         )
 
-    def _run_batch(self):
-        """Process each story sequentially."""
-        total = len(self.story_configs)
-        self._update_progress("running", 0, f"Bat dau xu ly batch {total} video...")
+    def _emit_progress(self, *, message: str | None = None):
+        """Recompute batch counters/percent from finished stories and persist."""
+        with self._lock:
+            total = self.progress["total"] or 1
+            finished = self.completed_count + self.failed_count + self.cancelled_count
+            self.progress["completed"] = self.completed_count
+            self.progress["failed"] = self.failed_count
+            self.progress["cancelled"] = self.cancelled_count
+            self.progress["current"] = finished
+            self.progress["percent"] = round(min(100, max(0, (finished / total) * 100)), 1)
+            self.progress["status"] = (
+                "cancelling" if is_batch_cancel_requested(self.batch_id) else "running"
+            )
+            self.progress["message"] = message or (
+                f"Da xu ly {finished}/{self.progress['total']} video..."
+            )
+            self.progress["updatedAt"] = _utc_now()
+            _save_json(_batch_progress_path(self.batch_id), self.progress)
 
-        completed_count = 0
-        failed_count = 0
-        cancelled_count = 0
+    def _run_single_story(self, index: int, config: dict):
+        """Render one story; updates shared progress under the lock. Never raises."""
+        story_id = config["story_id"]
 
-        for i, config in enumerate(self.story_configs):
-            story_id = config["story_id"]
+        if is_batch_cancel_requested(self.batch_id):
+            request_story_cancel(story_id)
+        if is_story_cancel_requested(story_id):
+            with self._lock:
+                self.progress["stories"][index]["status"] = "cancelled"
+                self.progress["results"].append({"storyId": story_id, "status": "cancelled"})
+                self.cancelled_count += 1
+            self._emit_progress()
+            return
 
-            if is_batch_cancel_requested(self.batch_id):
-                request_story_cancel(story_id)
-            if is_story_cancel_requested(story_id):
-                cancelled_count += 1
+        with self._lock:
+            self.progress["stories"][index]["status"] = "running"
+        self._emit_progress(message=f"Dang xu ly video {story_id}...")
+
+        try:
+            runner = StoryVideoPipelineRunner(story_id, config)
+            output_path = runner.run()
+
+            if output_path:
                 with self._lock:
-                    self.progress["stories"][i]["status"] = "cancelled"
+                    self.progress["stories"][index]["status"] = "completed"
                     self.progress["results"].append({
                         "storyId": story_id,
-                        "status": "cancelled",
+                        "status": "completed",
+                        "videoPath": output_path,
                     })
-                self._update_progress(
-                    "cancelling" if is_batch_cancel_requested(self.batch_id) else "running",
-                    ((i + 1) / total) * 100,
-                    f"Da huy video {i + 1}/{total}.",
-                    current=i + 1,
-                    completed=completed_count,
-                    failed=failed_count,
-                    cancelled=cancelled_count,
-                )
-                continue
-
-            with self._lock:
-                self.progress["stories"][i]["status"] = "running"
-
-            overall_pct = (i / total) * 100
-            self._update_progress(
-                "running", overall_pct,
-                f"Dang xu ly video {i + 1}/{total} ({story_id})...",
-                current=i + 1,
-            )
-
-            try:
-                runner = StoryVideoPipelineRunner(story_id, config)
-                output_path = runner.run()
-
-                if output_path:
-                    completed_count += 1
+                    self.completed_count += 1
+            else:
+                story_progress = load_story_progress(story_id)
+                error_msg = story_progress.get("error", "Unknown error") if story_progress else ""
+                if is_story_cancel_requested(story_id) or (
+                    story_progress and story_progress.get("status") == "cancelled"
+                ):
                     with self._lock:
-                        self.progress["stories"][i]["status"] = "completed"
-                        self.progress["results"].append({
-                            "storyId": story_id,
-                            "status": "completed",
-                            "videoPath": output_path,
-                        })
+                        self.progress["stories"][index]["status"] = "cancelled"
+                        self.progress["results"].append({"storyId": story_id, "status": "cancelled"})
+                        self.cancelled_count += 1
                 else:
-                    story_progress = load_story_progress(story_id)
-                    error_msg = ""
-                    if story_progress:
-                        error_msg = story_progress.get("error", "Unknown error")
-                    if is_story_cancel_requested(story_id) or (story_progress and story_progress.get("status") == "cancelled"):
-                        cancelled_count += 1
-                        with self._lock:
-                            self.progress["stories"][i]["status"] = "cancelled"
-                            self.progress["results"].append({
-                                "storyId": story_id,
-                                "status": "cancelled",
-                            })
-                    else:
-                        failed_count += 1
-                        with self._lock:
-                            self.progress["stories"][i]["status"] = "failed"
-                            self.progress["results"].append({
-                                "storyId": story_id,
-                                "status": "failed",
-                                "error": error_msg,
-                            })
-
-            except Exception as exc:
-                if is_story_cancel_requested(story_id):
-                    cancelled_count += 1
                     with self._lock:
-                        self.progress["stories"][i]["status"] = "cancelled"
-                        self.progress["results"].append({
-                            "storyId": story_id,
-                            "status": "cancelled",
-                        })
-                else:
-                    failed_count += 1
-                    logger.error(
-                        f"[StoryBatch:{self.batch_id}] Story {story_id} exception: {exc}",
-                        exc_info=True,
-                    )
-                    with self._lock:
-                        self.progress["stories"][i]["status"] = "failed"
+                        self.progress["stories"][index]["status"] = "failed"
                         self.progress["results"].append({
                             "storyId": story_id,
                             "status": "failed",
-                            "error": str(exc),
+                            "error": error_msg,
                         })
+                        self.failed_count += 1
 
-            self._update_progress(
-                "cancelling" if is_batch_cancel_requested(self.batch_id) else "running",
-                ((i + 1) / total) * 100,
-                f"Hoan tat video {i + 1}/{total}.",
-                current=i + 1,
-                completed=completed_count,
-                failed=failed_count,
-                cancelled=cancelled_count,
-            )
+        except Exception as exc:
+            if is_story_cancel_requested(story_id):
+                with self._lock:
+                    self.progress["stories"][index]["status"] = "cancelled"
+                    self.progress["results"].append({"storyId": story_id, "status": "cancelled"})
+                    self.cancelled_count += 1
+            else:
+                logger.error(
+                    f"[StoryBatch:{self.batch_id}] Story {story_id} exception: {exc}",
+                    exc_info=True,
+                )
+                with self._lock:
+                    self.progress["stories"][index]["status"] = "failed"
+                    self.progress["results"].append({
+                        "storyId": story_id,
+                        "status": "failed",
+                        "error": str(exc),
+                    })
+                    self.failed_count += 1
+
+        self._emit_progress()
+
+    def _run_batch(self):
+        """Process stories concurrently with a bounded worker pool."""
+        total = len(self.story_configs)
+        self._update_progress("running", 0, f"Bat dau xu ly batch {total} video...")
+
+        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+            futures = {
+                executor.submit(self._run_single_story, i, config): i
+                for i, config in enumerate(self.story_configs)
+            }
+            for future in as_completed(futures):
+                # _run_single_story never raises, but surface anything unexpected.
+                future.result()
+
+        completed_count = self.completed_count
+        failed_count = self.failed_count
+        cancelled_count = self.cancelled_count
 
         if is_batch_cancel_requested(self.batch_id) or cancelled_count == total:
             final_status = "cancelled"
@@ -295,6 +308,7 @@ class StoryVideoBatchRunner:
         self._update_progress(
             final_status, 100,
             f"Batch hoan tat: {completed_count} thanh cong, {failed_count} that bai, {cancelled_count} da huy.",
+            current=completed_count + failed_count + cancelled_count,
             completed=completed_count,
             failed=failed_count,
             cancelled=cancelled_count,
