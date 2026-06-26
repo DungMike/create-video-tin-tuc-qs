@@ -561,6 +561,51 @@ export interface StoryLibrary {
   clipCount: number;
   createdAt: string;
   updatedAt?: string;
+  // Present when this library is a pre-baked "styled" library.
+  styled?: boolean;
+  styleId?: string;
+  styleLabel?: string;
+  sourceLibraryId?: string;
+  // Present when style + waveform + CTA are all baked in (runtime = subtitle only).
+  fullyBaked?: boolean;
+  clipDuration?: number;
+  waveformLabel?: string;
+  ctaLabel?: string;
+}
+
+export interface BakeStoryLibraryRequest {
+  sourceLibraryId: string;
+  name: string;
+  styleId?: string;
+  params?: TVEffectParams;
+  // "full" (default) bakes waveform + CTA in too; "style" bakes style only.
+  mode?: "style" | "full";
+  waveformId?: string;
+  ctaId?: string;
+  unitSeconds?: number;
+}
+
+export interface BakeStoryLibraryResponse {
+  jobId: string;
+  targetLibraryId: string;
+}
+
+export interface StoryLibraryBakeJob {
+  jobId: string;
+  status: "pending" | "running" | "cancelling" | "completed" | "partial" | "cancelled" | "failed";
+  sourceLibraryId: string;
+  targetLibraryId: string;
+  targetName: string;
+  styleId: string;
+  styleLabel: string;
+  total: number;
+  completed: number;
+  failed: number;
+  percent: number;
+  message: string;
+  error?: string;
+  startedAt: string;
+  updatedAt: string;
 }
 
 export interface StoryLibrariesResponse {

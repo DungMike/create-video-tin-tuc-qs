@@ -632,6 +632,16 @@ def _serialize_library(record: dict, *, with_count: bool = True) -> dict:
     }
     if record.get("updatedAt"):
         payload["updatedAt"] = record["updatedAt"]
+    if record.get("styled"):
+        payload["styled"] = True
+        payload["styleId"] = record.get("styleId")
+        payload["styleLabel"] = record.get("styleLabel")
+        payload["sourceLibraryId"] = record.get("sourceLibraryId")
+    if record.get("fullyBaked"):
+        payload["fullyBaked"] = True
+        payload["clipDuration"] = record.get("clipDuration")
+        payload["waveformLabel"] = record.get("waveformLabel")
+        payload["ctaLabel"] = record.get("ctaLabel")
     if with_count:
         payload["clipCount"] = count_library_clips(record.get("id"))
     return payload
@@ -690,6 +700,204 @@ def delete_library_route(library_id: str):
         }.get(exc.code, 400)
         return _error(exc.message, code=exc.code, status=status)
     return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# 7c. Bake a TV style into a clip library -> new pre-styled library
+# ---------------------------------------------------------------------------
+def _resolve_bake_style(data: dict):
+    """Resolve the bake style from the request body.
+
+    Returns ``(style_id, style_label, style_params, style_filter)`` or an
+    ``(error_response, status)`` tuple wrapped via ``_error`` on failure.
+    """
+    from src.processors.crt_effect_processor import (
+        _target_resolution,
+        build_custom_tv_effect_filter,
+        build_tv_effect_filter,
+        get_tv_effect_style,
+        sanitize_tv_effect_params,
+    )
+
+    width, height = _target_resolution()
+    custom_params = data.get("params")
+    style_id = str(data.get("styleId", "")).strip()
+
+    if custom_params is not None:
+        if not isinstance(custom_params, dict):
+            return _error("params không hợp lệ.", code="invalid_params")
+        params = sanitize_tv_effect_params(custom_params)
+        style_filter = build_custom_tv_effect_filter(params, width, height)
+        style_id, style_label = "custom", "Custom"
+    else:
+        style = get_tv_effect_style(style_id)
+        if not style:
+            return _error("Style không hợp lệ.", code="invalid_style", status=404)
+        params = sanitize_tv_effect_params(style.get("params"))
+        style_filter = build_tv_effect_filter(style_id, width, height)
+        style_label = style.get("name", style_id)
+
+    if not style_filter:
+        return _error(
+            "Hiệu ứng rỗng — chọn một style có hiệu ứng để bake.",
+            code="empty_style",
+        )
+    return style_id, style_label, params, style_filter
+
+
+def _resolve_bake_overlays(waveform_id: str, cta_id: str):
+    """Resolve the picked waveform + CTA for a full bake.
+
+    Returns ``(wave_path, wave_xy, wave_label, cta_path, cta_xy, cta_label)`` or
+    an ``_error()`` response tuple.
+    """
+    from src.utils.story_cta_overlay import (
+        load_cta_index,
+        overlay_position_expr as cta_pos,
+        processed_abs_path as cta_path_of,
+    )
+    from src.utils.waveform_overlays import (
+        load_waveform_index,
+        overlay_position_expr as wave_pos,
+        processed_abs_path as wave_path_of,
+    )
+
+    wave = next((o for o in load_waveform_index().get("overlays", []) if o.get("id") == waveform_id), None)
+    if not wave:
+        return _error("Không tìm thấy sóng âm đã chọn.", code="waveform_not_found", status=404)
+    wpath = wave_path_of(wave)
+    if not wpath:
+        return _error("Sóng âm chưa được xử lý (thiếu file alpha).", code="waveform_not_processed")
+
+    cta = next((o for o in load_cta_index().get("overlays", []) if o.get("id") == cta_id), None)
+    if not cta:
+        return _error("Không tìm thấy CTA đã chọn.", code="cta_not_found", status=404)
+    cpath = cta_path_of(cta)
+    if not cpath:
+        return _error("CTA chưa được xử lý (thiếu file alpha).", code="cta_not_processed")
+
+    return (wpath, wave_pos(wave), str(wave.get("name") or waveform_id),
+            cpath, cta_pos(cta), str(cta.get("name") or cta_id))
+
+
+@story_video_bp.route("/api/story-video/library/bake", methods=["POST"])
+def bake_story_library():
+    """Bake a TV style (and, in 'full' mode, waveform + CTA) into a new library."""
+    from src.utils.story_library import _utc_now_iso, set_library_metadata
+    from src.utils.story_library_bake import StoryLibraryBakeRunner
+
+    data = request.get_json(silent=True) or {}
+    source_library_id = str(data.get("sourceLibraryId", "") or "").strip()
+    target_name = str(data.get("name", "") or "").strip()
+    mode = (str(data.get("mode") or "full")).strip().lower()
+    if mode not in {"style", "full"}:
+        mode = "full"
+
+    source = get_library_record(source_library_id) or (
+        get_library_record(get_default_library_id())
+        if not source_library_id or source_library_id == get_default_library_id()
+        else None
+    )
+    if not source:
+        return _error("Không tìm thấy thư viện nguồn.", code="library_not_found", status=404)
+    source_library_id = source.get("id")
+
+    if source.get("styled"):
+        return _error("Không thể bake từ một thư viện đã được style.", code="source_already_styled")
+    if count_library_clips(source_library_id) <= 0:
+        return _error("Thư viện nguồn không có clip nào.", code="empty_source_library")
+
+    resolved = _resolve_bake_style(data)
+    if not isinstance(resolved, tuple) or len(resolved) != 4:
+        return resolved  # already an _error() response tuple
+    style_id, style_label, style_params, style_filter = resolved
+
+    runner_kwargs: dict = {"mode": mode}
+    extra_meta: dict = {}
+    if mode == "full":
+        waveform_id = str(data.get("waveformId", "") or "").strip()
+        cta_id = str(data.get("ctaId", "") or "").strip()
+        if not waveform_id or not cta_id:
+            return _error("Chế độ full-bake cần chọn sóng âm và CTA.", code="missing_overlays")
+        ov = _resolve_bake_overlays(waveform_id, cta_id)
+        if not isinstance(ov, tuple) or len(ov) != 6:
+            return ov  # _error() response tuple
+        wpath, wxy, wlabel, cpath, cxy, clabel = ov
+        try:
+            unit_seconds = int(data.get("unitSeconds", 10))
+        except (TypeError, ValueError):
+            unit_seconds = 10
+        unit_seconds = max(5, min(30, unit_seconds))
+        runner_kwargs.update(
+            waveform_path=wpath, waveform_xy=wxy, cta_path=cpath, cta_xy=cxy, unit_seconds=unit_seconds
+        )
+        extra_meta = dict(
+            fullyBaked=True, clipDuration=unit_seconds,
+            waveformId=waveform_id, waveformLabel=wlabel, ctaId=cta_id, ctaLabel=clabel,
+        )
+
+    if _has_active_library_session(source_library_id):
+        return _error(
+            "Thư viện nguồn đang được import/upload. Hãy đợi tác vụ hoàn tất.",
+            code="library_in_use",
+            status=409,
+        )
+
+    try:
+        target = create_library(target_name)
+    except LibraryError as exc:
+        status = 409 if exc.code == "duplicate_library_name" else 400
+        return _error(exc.message, code=exc.code, status=status)
+
+    target_library_id = target.get("id")
+    set_library_metadata(
+        target_library_id,
+        styled=True,
+        styleId=style_id,
+        styleLabel=style_label,
+        styleParams=style_params,
+        sourceLibraryId=source_library_id,
+        bakedAt=_utc_now_iso(),
+        **extra_meta,
+    )
+
+    job_id = f"bake-{str(uuid.uuid4())[:8]}"
+    runner = StoryLibraryBakeRunner(
+        job_id,
+        source_library_id=source_library_id,
+        target_library_id=target_library_id,
+        target_name=target_name,
+        style_filter=style_filter,
+        style_id=style_id,
+        style_label=style_label,
+        **runner_kwargs,
+    )
+    runner.start_async()
+    logger.info(
+        f"[StoryBake] Started bake job={job_id} mode={mode} -> library={target_library_id}"
+    )
+    return jsonify({"jobId": job_id, "targetLibraryId": target_library_id}), 202
+
+
+@story_video_bp.route("/api/story-video/library/bake/<job_id>", methods=["GET"])
+def get_story_library_bake_job(job_id: str):
+    from src.utils.story_library_bake import load_bake_progress
+
+    progress = load_bake_progress(job_id)
+    if not progress:
+        return _error("Không tìm thấy tác vụ bake.", code="bake_job_not_found", status=404)
+    return jsonify(progress)
+
+
+@story_video_bp.route("/api/story-video/library/bake/<job_id>/cancel", methods=["POST"])
+def cancel_story_library_bake_job(job_id: str):
+    from src.utils.story_library_bake import load_bake_progress, request_bake_cancel
+
+    progress = request_bake_cancel(job_id)
+    if not progress:
+        if not load_bake_progress(job_id):
+            return _error("Không tìm thấy tác vụ bake.", code="bake_job_not_found", status=404)
+    return jsonify({"jobId": job_id, "status": (progress or {}).get("status", "unknown")})
 
 
 # ---------------------------------------------------------------------------

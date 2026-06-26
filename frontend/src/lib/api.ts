@@ -251,9 +251,12 @@ import type {
   DecorImageUploadResponse,
   DriveAudioImportProgress,
   DownloadProgress,
+  BakeStoryLibraryRequest,
+  BakeStoryLibraryResponse,
   ParseScriptResponse,
   StoryBatchProgress,
   StoryLibrariesResponse,
+  StoryLibraryBakeJob,
   StoryLibraryBulkDeleteRequest,
   StoryLibraryBulkDeleteResponse,
   StoryLibraryDeleteResponse,
@@ -486,6 +489,25 @@ export async function deleteStoryLibrary(libraryId: string) {
   return requestJson<StoryLibraryDeleteResponse>(`/api/story-video/libraries/${libraryId}`, {
     method: "DELETE",
   });
+}
+
+export async function bakeStoryLibrary(payload: BakeStoryLibraryRequest) {
+  return requestJson<BakeStoryLibraryResponse>("/api/story-video/library/bake", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getStoryLibraryBakeJob(jobId: string) {
+  return requestJson<StoryLibraryBakeJob>(`/api/story-video/library/bake/${jobId}`);
+}
+
+export async function cancelStoryLibraryBakeJob(jobId: string) {
+  return requestJson<{ jobId: string; status: string }>(
+    `/api/story-video/library/bake/${jobId}/cancel`,
+    { method: "POST" },
+  );
 }
 
 // === Story Video Library (clips within a folder) ===

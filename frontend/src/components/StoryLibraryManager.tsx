@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EmptyCard } from "@/components/empty-card";
 import { PaginationBar } from "@/components/pagination-bar";
 import { StatusAlert } from "@/components/status-alert";
+import { StoryLibraryBakeDialog } from "@/components/StoryLibraryBakeDialog";
 import { StoryLibrarySelect } from "@/components/StoryLibrarySelect";
 import {
   AlertDialog,
@@ -547,6 +548,11 @@ export function StoryLibraryManager({
             onChange={setActiveLibraryId}
             onLibrariesChanged={() => void refreshLibraries()}
             manage
+            disabled={bulkActionsDisabled}
+          />
+          <StoryLibraryBakeDialog
+            source={activeLibrary}
+            onBaked={() => void refreshLibraries()}
             disabled={bulkActionsDisabled}
           />
           {selectionMode ? (

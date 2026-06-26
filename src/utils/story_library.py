@@ -453,3 +453,66 @@ def delete_library(library_id, *, delete_clips: bool = True) -> dict:
             _library_locks.pop(lid, None)
 
         return {"deleted": True, "libraryId": lid, "deletedClips": deleted_clips}
+
+
+# --------------------------------------------------------------------------- #
+# Library metadata (extra registry fields, e.g. "styled" pre-baked libraries)
+# --------------------------------------------------------------------------- #
+# Reserved registry fields that callers must not overwrite via set_library_metadata.
+_PROTECTED_LIBRARY_FIELDS = {"id", "isDefault"}
+
+
+def set_library_metadata(library_id, **fields) -> dict:
+    """Merge extra key/value pairs into a library's registry record.
+
+    Records are persisted whole, so any extra fields automatically surface in
+    ``get_library`` / ``load_libraries``. Used to mark pre-baked "styled"
+    libraries with their effect + source provenance. Raises ``LibraryError`` if
+    the library is unknown.
+    """
+    lid = str(library_id or "").strip()
+    with _registry_lock:
+        data = ensure_libraries_registry()
+        libraries = data.get("libraries", [])
+        target = next((lib for lib in libraries if lib.get("id") == lid), None)
+        if target is None:
+            raise LibraryError("library_not_found", "Không tìm thấy thư viện.")
+        for key, value in fields.items():
+            if key in _PROTECTED_LIBRARY_FIELDS:
+                continue
+            target[key] = value
+        _save_registry(data)
+        return target
+
+
+def is_styled_library(library_id=None) -> bool:
+    """True when the resolved library is a pre-baked "styled" library.
+
+    Defensive: returns False for the Default/unknown libraries.
+    """
+    record = get_library(resolve_library_id(library_id))
+    return bool(record and record.get("styled"))
+
+
+def is_fully_baked_library(library_id=None) -> bool:
+    """True when the library has style + waveform + CTA all baked into the clips.
+
+    Such libraries need only subtitle burn-in at render time (no overlay pass).
+    """
+    record = get_library(resolve_library_id(library_id))
+    return bool(record and record.get("fullyBaked"))
+
+
+def library_clip_duration(library_id=None, default: int = 0) -> int:
+    """Return the per-clip/unit duration a library was built with.
+
+    Pre-baked "full" libraries use longer units (e.g. 10s, to match the CTA
+    loop); regular libraries fall back to ``default`` (the caller passes
+    ``Config.STORY_CLIP_DURATION``).
+    """
+    record = get_library(resolve_library_id(library_id)) or {}
+    try:
+        value = int(record.get("clipDuration") or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return value if value > 0 else default

@@ -114,6 +114,7 @@ class StoryVideoPipelineRunner:
             Config.STORY_SUBTITLE_MAX_LINES,
         )
         self._subtitle_ass_path = ""
+        self._seg_dur_cache: int | None = None
 
         self._lock = threading.Lock()
         self.progress = {
@@ -129,6 +130,15 @@ class StoryVideoPipelineRunner:
             "updatedAt": _utc_now(),
         }
         self._save_progress()
+
+    def _segment_duration(self) -> int:
+        """Per-clip/unit duration for this library (pre-baked 'full' libraries use 10s units)."""
+        if self._seg_dur_cache is None:
+            from src.utils.story_library import library_clip_duration
+
+            default = max(1, int(Config.STORY_CLIP_DURATION))
+            self._seg_dur_cache = max(1, library_clip_duration(self.library_id, default))
+        return self._seg_dur_cache
 
     @staticmethod
     def _coerce_positive_int(value, default: int) -> int:
@@ -371,7 +381,7 @@ class StoryVideoPipelineRunner:
             logger.error(f"[StoryPipeline:{self.story_id}] No valid clips found in story library.")
             return []
 
-        segment_duration = max(1, int(Config.STORY_CLIP_DURATION))
+        segment_duration = self._segment_duration()
         min_duration = max(0.5, segment_duration - 0.25)
         pool = [item for item in valid_clips if item[1] >= min_duration] or valid_clips
         target_duration = audio_duration + 0.25
@@ -401,7 +411,7 @@ class StoryVideoPipelineRunner:
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, f"video_{self.story_id}.mp4")
         concat_file = os.path.join(temp, "story_segments.txt")
-        segment_duration = max(1, int(Config.STORY_CLIP_DURATION))
+        segment_duration = self._segment_duration()
 
         with open(concat_file, "w", encoding="utf-8") as file_obj:
             for segment_path in segments:
@@ -595,8 +605,20 @@ class StoryVideoPipelineRunner:
         return None
 
     def _tv_effect_filter(self) -> str:
-        """Filter chain for the selected 1990s TV effect style (empty when disabled)."""
+        """Filter chain for the selected 1990s TV effect style (empty when disabled).
+
+        Pre-baked "styled" libraries already have the style burned into every
+        clip, so the style pass is skipped to avoid double-styling (and to take
+        the much cheaper overlay-only render path).
+        """
         from src.processors.crt_effect_processor import get_tv_effect_filter
+        from src.utils.story_library import is_styled_library
+
+        if is_styled_library(self.library_id):
+            logger.info(
+                f"[StoryPipeline:{self.story_id}] Styled library selected; skipping TV style pass."
+            )
+            return ""
 
         return get_tv_effect_filter(self.tv_effect_style_id or None)
 
@@ -618,6 +640,21 @@ class StoryVideoPipelineRunner:
 
     def _apply_story_overlays(self, current_video: str, audio_duration: float) -> str | None:
         """Overlay TV noise layers and the configured waveform in a single FFmpeg pass."""
+        from src.utils.story_library import is_fully_baked_library
+
+        # Fully-baked libraries already have style + waveform + CTA burned into the
+        # clips, so the only remaining work is subtitle burn-in (the fastest path).
+        if is_fully_baked_library(self.library_id):
+            if self._subtitle_ass_path:
+                logger.info(
+                    f"[StoryPipeline:{self.story_id}] Fully-baked library; subtitle-only pass."
+                )
+                return self._apply_subtitles_only(current_video, audio_duration)
+            logger.info(
+                f"[StoryPipeline:{self.story_id}] Fully-baked library, no subtitle; using rendered video as-is."
+            )
+            return current_video
+
         from src.utils.story_cta_overlay import (
             get_active_cta_overlay,
             overlay_position_expr as cta_position_expr,

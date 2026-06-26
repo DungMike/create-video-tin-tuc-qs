@@ -39,6 +39,10 @@ class Config:
     # running a few in parallel uses the otherwise-idle cores/encoder. Output is
     # identical to sequential. Keep modest on low-core machines (default 2).
     STORY_BATCH_MAX_WORKERS = max(1, int(os.getenv("STORY_BATCH_MAX_WORKERS", "2")))
+    # Number of clips to bake (re-encode with a TV style) concurrently when
+    # building a pre-styled library. Like the batch render it is filter-bound on
+    # CPU with NVENC mostly idle, so a couple in parallel uses spare cores.
+    STORY_BAKE_MAX_WORKERS = max(1, int(os.getenv("STORY_BAKE_MAX_WORKERS", "2")))
     IMAGE_ONLY_FAST_CHUNK_CONCAT = os.getenv("IMAGE_ONLY_FAST_CHUNK_CONCAT", "true").lower() == "true"
     IMAGE_ONLY_SKIP_XFADE = os.getenv("IMAGE_ONLY_SKIP_XFADE", "true").lower() == "true"
     IMAGE_CLIP_FADE_DURATION = float(os.getenv("IMAGE_CLIP_FADE_DURATION", "0.5"))

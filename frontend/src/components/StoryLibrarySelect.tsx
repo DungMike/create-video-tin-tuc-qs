@@ -121,8 +121,10 @@ export function StoryLibrarySelect({
       >
         {libraries.map((lib) => (
           <option key={lib.id} value={lib.id}>
+            {lib.styled ? "🎞 " : ""}
             {lib.name}
-            {lib.isDefault ? " (mặc định)" : ""} · {lib.clipCount}
+            {lib.isDefault ? " (mặc định)" : ""}
+            {lib.styled && lib.styleLabel ? ` [${lib.styleLabel}]` : ""} · {lib.clipCount}
           </option>
         ))}
       </select>
