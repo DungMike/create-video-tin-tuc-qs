@@ -1143,6 +1143,7 @@ def generate_tv_effect_style_preview():
 # ---------------------------------------------------------------------------
 def _subtitle_config_from_payload(payload: dict) -> dict:
     """Map camelCase subtitle payload keys to pipeline config keys (without subtitle_path)."""
+    from src.utils.story_subtitles import get_subtitle_preset
 
     def _positive_int(value, default: int) -> int:
         try:
@@ -1151,9 +1152,13 @@ def _subtitle_config_from_payload(payload: dict) -> dict:
             return default
         return parsed if parsed > 0 else default
 
+    preset_id = str(payload.get("subtitlePreset", "")).strip() or "clean"
+    if not get_subtitle_preset(preset_id):
+        preset_id = "clean"
+
     return {
         "subtitle_font": str(payload.get("subtitleFont", "")).strip(),
-        "subtitle_preset": str(payload.get("subtitlePreset", "")).strip() or "clean",
+        "subtitle_preset": preset_id,
         "subtitle_max_chars_per_line": _positive_int(
             payload.get("subtitleMaxCharsPerLine"), Config.STORY_SUBTITLE_MAX_CHARS_PER_LINE
         ),
@@ -1209,7 +1214,11 @@ def upload_subtitle_font():
 def get_subtitle_presets():
     from src.utils.story_subtitles import SUBTITLE_PRESETS
 
-    return jsonify({"presets": SUBTITLE_PRESETS})
+    presets = [
+        {"id": item["id"], "name": item["name"], "description": item["description"]}
+        for item in SUBTITLE_PRESETS
+    ]
+    return jsonify({"presets": presets})
 
 
 @story_video_bp.route("/api/story-video/subtitle-preview", methods=["POST"])

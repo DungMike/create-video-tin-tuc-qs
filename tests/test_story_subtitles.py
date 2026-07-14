@@ -19,13 +19,58 @@ def _style_line(ass_text: str) -> str:
 
 
 def test_subtitle_presets_registry():
-    assert [item["id"] for item in ss.SUBTITLE_PRESETS] == [
-        "clean", "fade_soft", "karaoke_pop", "emphasis_bold",
-    ]
+    ids = [item["id"] for item in ss.SUBTITLE_PRESETS]
+    # The four originals must remain present (their exact ASS output is guarded below).
+    assert {"clean", "fade_soft", "karaoke_pop", "emphasis_bold"}.issubset(set(ids))
+    assert len(ids) == len(set(ids)), "preset ids must be unique"
     for item in ss.SUBTITLE_PRESETS:
         assert item["name"] and item["description"]
     assert ss.get_subtitle_preset("clean")["id"] == "clean"
     assert ss.get_subtitle_preset("does_not_exist") is None
+
+
+def test_every_preset_builds_valid_ass():
+    # Every registered preset must round-trip through build_ass without error and
+    # produce a Style row plus a Dialogue line.
+    cues = [{"start": 0.0, "end": 2.0, "text": "xin chào thế giới"}]
+    for item in ss.SUBTITLE_PRESETS:
+        ass_text = ss.build_ass(cues, "Arial", item["id"])
+        style_fields = _style_line(ass_text)[len("Style: "):].split(",")
+        # 23 comma-separated fields per the [V4+ Styles] Format row.
+        assert len(style_fields) == 23
+        assert _dialogue_lines(ass_text)
+
+
+def test_get_preset_style_unknown_falls_back_to_clean():
+    assert ss.get_preset_style("does_not_exist") == ss.get_preset_style("clean")
+
+
+def test_build_ass_preset_yellow_pop_primary_colour():
+    ass_text = ss.build_ass([{"start": 0.0, "end": 2.0, "text": "abc"}], "Arial", "yellow_pop")
+    fields = _style_line(ass_text)[len("Style: "):].split(",")
+    assert fields[3] == "&H0000FFFF"  # PrimaryColour = yellow
+
+
+def test_build_ass_preset_box_dark_uses_opaque_box():
+    ass_text = ss.build_ass([{"start": 0.0, "end": 2.0, "text": "abc"}], "Arial", "box_dark")
+    fields = _style_line(ass_text)[len("Style: "):].split(",")
+    assert fields[5] == "&H80000000"  # OutlineColour = translucent black box fill
+    assert fields[15] == "3"          # BorderStyle = opaque box
+
+
+def test_build_ass_preset_neon_cyan_has_blur():
+    ass_text = ss.build_ass([{"start": 0.0, "end": 2.0, "text": "abc"}], "Arial", "neon_cyan")
+    line = _dialogue_lines(ass_text)[0]
+    assert "\\blur" in line
+    fields = _style_line(ass_text)[len("Style: "):].split(",")
+    assert fields[5] == "&H00FFFF00"  # OutlineColour = cyan glow
+
+
+def test_build_ass_preset_pop_in_has_scale_transform():
+    ass_text = ss.build_ass([{"start": 0.0, "end": 2.0, "text": "abc"}], "Arial", "pop_in")
+    line = _dialogue_lines(ass_text)[0]
+    assert "\\t(" in line
+    assert "\\fscx" in line
 
 
 def test_parse_srt_real_file():

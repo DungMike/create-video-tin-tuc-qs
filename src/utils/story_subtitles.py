@@ -16,11 +16,80 @@ class SubtitleParseError(Exception):
     pass
 
 
+# Default ASS style spec. Each preset in SUBTITLE_PRESETS carries a partial "style"
+# dict that overrides these fields; build_ass / _render_dialogue_text read the merged
+# result via get_preset_style() instead of branching on preset_id.
+#   Colours are ASS &HAABBGGRR (alpha 00 = opaque -> FF = transparent).
+#   border_style: 1 = outline + drop shadow, 3 = opaque box (box colour = outline_colour).
+#   anim: "standard" -> use the static `inline` tag; "fade_dynamic" -> duration-aware
+#         \fade; "karaoke" -> per-syllable \kf via _render_karaoke_text.
+_DEFAULT_STYLE = {
+    "primary": "&H00FFFFFF",
+    "secondary": "&H00FFFFFF",
+    "outline_colour": "&H00000000",
+    "back_colour": "&H00000000",
+    "bold": 0,
+    "italic": 0,
+    "border_style": 1,
+    "outline": 3,
+    "shadow": 1,
+    "inline": "{\\fad(250,250)}",
+    "anim": "standard",
+}
+
 SUBTITLE_PRESETS = [
-    {"id": "clean", "name": "Clean", "description": "Chữ trắng viền đen, fade nhẹ hai đầu."},
-    {"id": "fade_soft", "name": "Fade mềm", "description": "Mờ dần vào/ra theo độ dài từng câu."},
-    {"id": "karaoke_pop", "name": "Karaoke Pop", "description": "Tô màu vàng từng chữ theo nhịp thoại."},
-    {"id": "emphasis_bold", "name": "Đậm nổi bật", "description": "Chữ đậm, viền dày, bóng đổ rõ."},
+    # --- Original four (output-preserving; guarded by tests) ---
+    {"id": "clean", "name": "Clean", "description": "Chữ trắng viền đen, fade nhẹ hai đầu.",
+     "style": {}},
+    {"id": "fade_soft", "name": "Fade mềm", "description": "Mờ dần vào/ra theo độ dài từng câu.",
+     "style": {"anim": "fade_dynamic"}},
+    {"id": "karaoke_pop", "name": "Karaoke Pop", "description": "Tô màu vàng từng chữ theo nhịp thoại.",
+     "style": {"anim": "karaoke", "primary": "&H0000FFFF", "secondary": "&H00FFFFFF"}},
+    {"id": "emphasis_bold", "name": "Đậm nổi bật", "description": "Chữ đậm, viền dày, bóng đổ rõ.",
+     "style": {"bold": 1,
+               "inline": "{\\fad(200,200)\\bord4\\shad2\\3c&H000000&\\4c&H202020&}"}},
+
+    # --- Màu chữ (text colour) ---
+    {"id": "yellow_pop", "name": "Vàng nổi", "description": "Chữ vàng, viền đen, nổi bật trên nền tối.",
+     "style": {"primary": "&H0000FFFF"}},
+    {"id": "cyan_cool", "name": "Xanh cyan", "description": "Chữ xanh cyan mát, viền đen.",
+     "style": {"primary": "&H00FFFF00"}},
+    {"id": "pink_hot", "name": "Hồng nổi", "description": "Chữ hồng rực, viền đen.",
+     "style": {"primary": "&H00B469FF"}},
+    {"id": "green_mint", "name": "Xanh lá", "description": "Chữ xanh lá tươi, viền đen.",
+     "style": {"primary": "&H0000FF00"}},
+    {"id": "orange_warm", "name": "Cam ấm", "description": "Chữ cam ấm, viền đen.",
+     "style": {"primary": "&H000080FF"}},
+
+    # --- Viền & glow (outline / neon) ---
+    {"id": "outline_bold", "name": "Viền dày", "description": "Chữ trắng viền đen dày, đọc rõ mọi nền.",
+     "style": {"outline": 6}},
+    {"id": "outline_gold", "name": "Viền vàng", "description": "Chữ trắng, viền vàng kim dày.",
+     "style": {"outline_colour": "&H0000D7FF", "outline": 4}},
+    {"id": "neon_cyan", "name": "Neon cyan", "description": "Chữ trắng phát quầng sáng xanh cyan.",
+     "style": {"outline_colour": "&H00FFFF00", "outline": 3, "shadow": 0,
+               "inline": "{\\fad(200,200)\\blur6}"}},
+    {"id": "neon_pink", "name": "Neon hồng", "description": "Chữ trắng phát quầng sáng hồng.",
+     "style": {"outline_colour": "&H00B469FF", "outline": 3, "shadow": 0,
+               "inline": "{\\fad(200,200)\\blur6}"}},
+
+    # --- Nền / khung chữ (background box) ---
+    {"id": "box_dark", "name": "Hộp tối mờ", "description": "Chữ trắng trên hộp đen trong suốt nhẹ.",
+     "style": {"border_style": 3, "outline_colour": "&H80000000", "outline": 8, "shadow": 0}},
+    {"id": "box_solid", "name": "Hộp đen đặc", "description": "Chữ trắng trên hộp đen đặc.",
+     "style": {"border_style": 3, "outline_colour": "&H00000000", "outline": 6, "shadow": 0}},
+    {"id": "tiktok_yellow", "name": "TikTok vàng", "description": "Chữ vàng trên hộp đen kiểu TikTok.",
+     "style": {"primary": "&H0000FFFF", "border_style": 3, "outline_colour": "&H80000000",
+               "outline": 8, "shadow": 0}},
+    {"id": "banner_red", "name": "Banner đỏ", "description": "Chữ trắng trên dải banner đỏ đặc.",
+     "style": {"border_style": 3, "outline_colour": "&H000000C0", "outline": 8, "shadow": 0}},
+
+    # --- Chuyển động (motion) ---
+    {"id": "pop_in", "name": "Bật vào", "description": "Chữ trắng bật to nhẹ khi xuất hiện.",
+     "style": {"inline": "{\\fad(120,120)\\fscx70\\fscy70\\t(0,220,\\fscx100\\fscy100)}"}},
+    {"id": "karaoke_box", "name": "Karaoke nền", "description": "Karaoke vàng trên hộp đen mờ.",
+     "style": {"anim": "karaoke", "primary": "&H0000FFFF", "secondary": "&H00FFFFFF",
+               "border_style": 3, "outline_colour": "&H80000000", "outline": 8, "shadow": 0}},
 ]
 
 _SYSTEM_FONTS_DIR = "C:/Windows/Fonts"
@@ -59,6 +128,14 @@ _SENTENCE_TRAILERS = "\"'”’」』)]"
 
 def get_subtitle_preset(preset_id: str) -> dict | None:
     return next((item for item in SUBTITLE_PRESETS if item["id"] == preset_id), None)
+
+
+def get_preset_style(preset_id: str) -> dict:
+    """Merged ASS style spec for a preset. Unknown ids fall back to `clean`."""
+    preset = get_subtitle_preset(preset_id) or get_subtitle_preset("clean")
+    merged = dict(_DEFAULT_STYLE)
+    merged.update(preset.get("style") or {})
+    return merged
 
 
 def _decode_srt_bytes(raw: bytes) -> str:
@@ -335,7 +412,8 @@ def _karaoke_units(line: str) -> list[str]:
         return [word for word in line.split(" ") if word]
     units = [line[i:i + 2] for i in range(0, len(line), 2)]
     if len(units) >= 2 and len(units[-1]) == 1:
-        units[-2] += units.pop()
+        last = units.pop()
+        units[-1] += last
     return units
 
 
@@ -377,19 +455,19 @@ def _render_karaoke_text(lines: list[str], duration: float) -> str:
 
 def _render_dialogue_text(text: str, preset_id: str, duration: float) -> str:
     lines = text.split("\n")
-    if preset_id == "karaoke_pop":
+    style = get_preset_style(preset_id)
+    anim = style["anim"]
+    if anim == "karaoke":
         return _render_karaoke_text(lines, duration)
     escaped = "\\N".join(_escape_ass_text(line) for line in lines)
-    if preset_id == "fade_soft":
+    if anim == "fade_dynamic":
         duration_ms = int(round(duration * 1000))
         if duration_ms >= 900:
             tag = f"{{\\fade(255,0,255,0,400,{duration_ms - 400},{duration_ms})}}"
         else:
             tag = "{\\fad(200,200)}"
-    elif preset_id == "emphasis_bold":
-        tag = "{\\fad(200,200)\\bord4\\shad2\\3c&H000000&\\4c&H202020&}"
     else:
-        tag = "{\\fad(250,250)}"
+        tag = style["inline"]
     return tag + escaped
 
 
@@ -424,14 +502,16 @@ def build_ass(
     alignment = _coerce_style_int(overrides.get("alignment"), 2)
     margin_lr = max(10, int(round(40 * scale)))
 
-    primary = "&H00FFFFFF"
-    secondary = "&H00FFFFFF"
-    bold = 0
-    if preset_id == "karaoke_pop":
-        primary = "&H0000FFFF"
-        secondary = "&H00FFFFFF"
-    elif preset_id == "emphasis_bold":
-        bold = 1
+    style = get_preset_style(preset_id)
+    primary = style["primary"]
+    secondary = style["secondary"]
+    outline_colour = style["outline_colour"]
+    back_colour = style["back_colour"]
+    bold = style["bold"]
+    italic = style["italic"]
+    border_style = style["border_style"]
+    outline = style["outline"]
+    shadow = style["shadow"]
 
     header = [
         "[Script Info]",
@@ -445,8 +525,9 @@ def build_ass(
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,{font_family},{font_size},{primary},{secondary},&H00000000,&H00000000,"
-        f"{bold},0,0,0,100,100,0,0,1,3,1,{alignment},{margin_lr},{margin_lr},{margin_v},1",
+        f"Style: Default,{font_family},{font_size},{primary},{secondary},{outline_colour},{back_colour},"
+        f"{bold},{italic},0,0,100,100,0,0,{border_style},{outline},{shadow},"
+        f"{alignment},{margin_lr},{margin_lr},{margin_v},1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
