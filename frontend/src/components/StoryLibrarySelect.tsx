@@ -30,7 +30,7 @@ export interface StoryLibrarySelectProps {
   value: string;
   onChange: (libraryId: string) => void;
   /** Called after a create/rename/delete so the parent can re-fetch the list. */
-  onLibrariesChanged?: () => void;
+  onLibrariesChanged?: () => void | Promise<void>;
   /** Show the create/rename/delete controls (false = picker only). */
   manage?: boolean;
   disabled?: boolean;
@@ -52,8 +52,6 @@ export function StoryLibrarySelect({
   const [error, setError] = useState<string | null>(null);
 
   const active = libraries.find((lib) => lib.id === value);
-  const isDefault = active?.isDefault ?? false;
-  const defaultLibrary = libraries.find((lib) => lib.isDefault);
 
   const handleCreate = async () => {
     const trimmed = name.trim();
@@ -67,8 +65,12 @@ export function StoryLibrarySelect({
       const res = await createStoryLibrary({ name: trimmed });
       setCreateOpen(false);
       setName("");
+      // Refresh the library list BEFORE selecting the new id so the shared
+      // active-library hook already knows about it. Otherwise there is an async
+      // window where the persisted id points at a library not yet in the list,
+      // and the hook silently falls back to (and re-persists) the default.
+      await onLibrariesChanged?.();
       onChange(res.library.id);
-      onLibrariesChanged?.();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Không tạo được thư viện.");
     } finally {
@@ -99,9 +101,18 @@ export function StoryLibrarySelect({
     setBusy(true);
     setError(null);
     try {
-      await deleteStoryLibrary(value);
+      const res = await deleteStoryLibrary(value);
       setDeleteOpen(false);
-      onChange(defaultLibrary?.id ?? "default");
+      // New selection after removing the current one: the newly-promoted default (when
+      // we deleted the default), else the existing default, else any remaining library,
+      // else none (last library deleted -> empty picker).
+      const remaining = libraries.filter((lib) => lib.id !== value);
+      const next =
+        res.newDefaultLibraryId ||
+        remaining.find((lib) => lib.isDefault)?.id ||
+        remaining[0]?.id ||
+        "";
+      onChange(next);
       onLibrariesChanged?.();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Không xóa được thư viện.");
@@ -149,8 +160,8 @@ export function StoryLibrarySelect({
             type="button"
             variant="outline"
             size="icon"
-            disabled={disabled || isDefault || !active}
-            title={isDefault ? "Không thể đổi tên thư viện mặc định" : "Đổi tên thư viện"}
+            disabled={disabled || !active}
+            title="Đổi tên thư viện"
             onClick={() => {
               setName(active?.name ?? "");
               setError(null);
@@ -164,8 +175,8 @@ export function StoryLibrarySelect({
             variant="outline"
             size="icon"
             className="text-destructive hover:text-destructive"
-            disabled={disabled || isDefault || !active}
-            title={isDefault ? "Không thể xóa thư viện mặc định" : "Xóa thư viện"}
+            disabled={disabled || !active}
+            title="Xóa thư viện"
             onClick={() => {
               setError(null);
               setDeleteOpen(true);

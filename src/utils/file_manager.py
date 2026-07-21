@@ -91,13 +91,52 @@ def save_library_index(data: dict):
         json.dump(data, file_obj, ensure_ascii=False, indent=2)
 
 
+def _is_within(child: str, parent: str) -> bool:
+    """True if `child` is inside `parent`. Handles different drives on Windows."""
+    try:
+        return os.path.commonpath([child, parent]) == parent
+    except ValueError:
+        # Different drives (e.g. F: vs E:) raise ValueError on Windows.
+        return False
+
+
 def storage_relative_path(abs_path: str) -> str:
-    rel_path = os.path.relpath(os.path.abspath(abs_path), os.path.abspath(Config.STORAGE_DIR))
-    return rel_path.replace("\\", "/")
+    """Convert an absolute path to a path servable via the /media/ route.
+
+    Files under STORAGE_DIR are returned relative to it (unchanged behaviour).
+    Files under OUTPUT_DIR — which may live on a different drive — are returned
+    with an ``output/`` prefix. When OUTPUT_DIR is the default ``./storage/output``
+    this yields exactly the same ``output/...`` strings as before, so the mapping
+    is backward compatible. Anything else falls back to the absolute path so
+    callers never crash on cross-drive inputs.
+    """
+    abs_norm = os.path.abspath(abs_path)
+    storage_root = os.path.abspath(Config.STORAGE_DIR)
+    if _is_within(abs_norm, storage_root):
+        return os.path.relpath(abs_norm, storage_root).replace("\\", "/")
+
+    output_root = os.path.abspath(Config.OUTPUT_DIR)
+    if _is_within(abs_norm, output_root):
+        rel = os.path.relpath(abs_norm, output_root).replace("\\", "/")
+        return "output" if rel == "." else f"output/{rel}"
+
+    return abs_norm.replace("\\", "/")
 
 
 def storage_absolute_path(rel_path: str) -> str:
-    return os.path.normpath(os.path.join(os.path.abspath(Config.STORAGE_DIR), rel_path))
+    """Inverse of :func:`storage_relative_path`.
+
+    Absolute inputs are returned normalized. ``output/...`` paths resolve against
+    OUTPUT_DIR (which may be on another drive); everything else resolves against
+    STORAGE_DIR. With the default OUTPUT_DIR under storage this is a no-op change.
+    """
+    norm = (rel_path or "").replace("\\", "/")
+    if os.path.isabs(norm):
+        return os.path.normpath(norm)
+    if norm == "output" or norm.startswith("output/"):
+        sub = norm[len("output"):].lstrip("/")
+        return os.path.normpath(os.path.join(os.path.abspath(Config.OUTPUT_DIR), sub))
+    return os.path.normpath(os.path.join(os.path.abspath(Config.STORAGE_DIR), norm))
 
 
 def normalize_tags(raw_values: list[str]) -> list[str]:

@@ -5,12 +5,14 @@ with unified batch progress tracking.
 """
 
 import os
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from src.config import Config
 from src.utils.logger import logger
+from src.utils.story_clip_bag import SharedClipBag
 from src.utils.story_video_pipeline import (
     StoryVideoPipelineRunner,
     _save_json,
@@ -101,6 +103,10 @@ class StoryVideoBatchRunner:
         # RLock so a locked section can safely call another locked helper.
         self._lock = threading.RLock()
         self._max_workers = max(1, min(Config.STORY_BATCH_MAX_WORKERS, len(story_configs) or 1))
+        # One shuffled deck shared by every story of this batch, so clips are
+        # drawn without replacement across videos instead of each video
+        # re-shuffling the whole library pool independently.
+        self._clip_bag = SharedClipBag()
 
         # Counters shared across worker threads; always mutate under self._lock.
         self.completed_count = 0
@@ -225,7 +231,7 @@ class StoryVideoBatchRunner:
         self._emit_progress(message=f"Dang xu ly video {story_id}...")
 
         try:
-            runner = StoryVideoPipelineRunner(story_id, config)
+            runner = StoryVideoPipelineRunner(story_id, config, clip_bag=self._clip_bag)
             output_path = runner.run()
 
             if output_path:
@@ -305,6 +311,19 @@ class StoryVideoBatchRunner:
             final_status = "partial"
         else:
             final_status = "failed"
+
+        if failed_count == 0:
+            # Nothing left to retry, so the uploaded audio/subtitle originals and any
+            # other working cache under the batch dir can go. progress.json gets
+            # rewritten right after by _update_progress, which recreates the dir via
+            # _batch_dir()'s makedirs. Batches with failures keep their dir intact
+            # since retry-failed re-reads the originals from it.
+            batch_dir = _batch_dir(self.batch_id)
+            try:
+                shutil.rmtree(batch_dir, ignore_errors=True)
+            except OSError:
+                pass
+
         self._update_progress(
             final_status, 100,
             f"Batch hoan tat: {completed_count} thanh cong, {failed_count} that bai, {cancelled_count} da huy.",

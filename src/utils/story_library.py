@@ -62,28 +62,29 @@ def _read_registry_raw() -> dict:
 
 
 def resolve_library_id(library_id=None) -> str:
-    """Map any input to a usable library id, falling back to Default.
+    """Map any input to a usable library id, falling back to the current default.
 
-    None / "" / "default" / malformed / unknown -> the Default id. Used by the
-    path helpers so generation paths stay resilient; management routes should
+    A known, well-formed id resolves to itself. Blank / malformed / unknown ids
+    fall back to whichever library is currently flagged default (see
+    ``get_default_library_id``) — which is "" when no library exists at all. Used by
+    the path helpers so generation paths stay resilient; management routes should
     instead call ``get_library`` and 404 explicitly on unknown ids.
     """
-    default_id = Config.STORY_LIBRARY_DEFAULT_ID
     lid = str(library_id or "").strip()
-    if not lid or lid == default_id:
-        return default_id
-    if not _ID_RE.match(lid):
-        return default_id
-    for lib in _read_registry_raw().get("libraries", []):
-        if lib.get("id") == lid:
-            return lid
-    return default_id
+    if lid and _ID_RE.match(lid):
+        for lib in _read_registry_raw().get("libraries", []):
+            if lib.get("id") == lid:
+                return lid
+    return get_default_library_id()
 
 
 def _library_root(library_id=None) -> str:
     lid = resolve_library_id(library_id)
-    if lid == Config.STORY_LIBRARY_DEFAULT_ID:
-        return Config.STORY_LIBRARY_DIR          # Default == existing root (no migration)
+    if not lid:
+        # No resolvable library (registry intentionally empty). Return a path that
+        # never exists and is never the shared top-level dir, so index reads yield
+        # empty and no operation ever touches STORY_LIBRARY_DIR itself.
+        return os.path.join(Config.STORY_LIBRARY_DIR, "__none__")
     return os.path.join(Config.STORY_LIBRARY_DIR, lid)
 
 
@@ -302,22 +303,63 @@ def _default_library_record() -> dict:
     }
 
 
+def _migrate_legacy_default_layout():
+    """Move legacy loose top-level ``clips/`` + ``index.json`` into ``default/``.
+
+    Historically the Default library's root WAS ``Config.STORY_LIBRARY_DIR`` itself.
+    Now every library (including default) lives under
+    ``Config.STORY_LIBRARY_DIR/<id>/``. This one-time move makes the default library
+    a normal, self-contained (and therefore deletable) folder. Idempotent and
+    crash-resumable: each of ``clips/`` and ``index.json`` is checked and moved
+    independently, and a same-volume ``shutil.move`` of a directory is a fast rename,
+    not a per-file copy.
+    """
+    root = Config.STORY_LIBRARY_DIR
+    legacy_clips = os.path.join(root, "clips")
+    legacy_index = os.path.join(root, "index.json")
+    if not os.path.isdir(legacy_clips) and not os.path.isfile(legacy_index):
+        return
+
+    default_dir = os.path.join(root, Config.STORY_LIBRARY_DEFAULT_ID)
+    os.makedirs(default_dir, exist_ok=True)
+
+    dest_clips = os.path.join(default_dir, "clips")
+    if os.path.isdir(legacy_clips) and not os.path.exists(dest_clips):
+        shutil.move(legacy_clips, dest_clips)
+
+    dest_index = os.path.join(default_dir, "index.json")
+    if os.path.isfile(legacy_index) and not os.path.exists(dest_index):
+        shutil.move(legacy_index, dest_index)
+
+
 def ensure_libraries_registry() -> dict:
-    """Create/repair libraries.json, guaranteeing a Default entry. Idempotent."""
+    """Ensure libraries.json exists, seeding a Default entry only on first init.
+
+    On a brand-new install (or an upgrade from the pre-multi-library era) the
+    registry file does not exist yet: any loose top-level clips are migrated into
+    ``default/`` and a Default entry is seeded. Once the file exists it is trusted
+    as-is — an intentionally emptied registry (user deleted every library) is left
+    empty rather than resurrecting a Default. Idempotent.
+    """
     with _registry_lock:
+        registry_existed = os.path.isfile(_registry_path())
+        _migrate_legacy_default_layout()
         data = _read_registry_raw()
-        libraries = data.get("libraries", [])
-        has_default = any(lib.get("isDefault") for lib in libraries)
-        if not os.path.isfile(_registry_path()) or not has_default:
-            if not has_default:
-                # Either no file at all, or a registry that lost its default.
-                if any(lib.get("id") == Config.STORY_LIBRARY_DEFAULT_ID for lib in libraries):
-                    for lib in libraries:
-                        if lib.get("id") == Config.STORY_LIBRARY_DEFAULT_ID:
-                            lib["isDefault"] = True
-                else:
-                    libraries = [_default_library_record()] + list(libraries)
-            data["libraries"] = libraries
+        if not registry_existed:
+            libraries = list(data.get("libraries", []))
+            if not any(
+                lib.get("id") == Config.STORY_LIBRARY_DEFAULT_ID for lib in libraries
+            ):
+                os.makedirs(
+                    os.path.join(
+                        Config.STORY_LIBRARY_DIR,
+                        Config.STORY_LIBRARY_DEFAULT_ID,
+                        "clips",
+                    ),
+                    exist_ok=True,
+                )
+                libraries = [_default_library_record()] + libraries
+                data["libraries"] = libraries
             _save_registry(data)
         return data
 
@@ -341,7 +383,16 @@ def get_library(library_id) -> dict | None:
 
 
 def get_default_library_id() -> str:
-    return Config.STORY_LIBRARY_DEFAULT_ID
+    """Id of the library currently flagged default.
+
+    Bootstraps a fresh install (see ``ensure_libraries_registry``) and returns "" when
+    the registry exists but holds no libraries (the user deleted them all).
+    """
+    data = ensure_libraries_registry()
+    for lib in data.get("libraries", []):
+        if lib.get("isDefault"):
+            return str(lib.get("id") or "")
+    return ""
 
 
 def _slugify(name: str) -> str:
@@ -425,8 +476,8 @@ def rename_library(library_id, name: str) -> dict:
 
 def delete_library(library_id, *, delete_clips: bool = True) -> dict:
     lid = str(library_id or "").strip()
-    if lid == Config.STORY_LIBRARY_DEFAULT_ID:
-        raise LibraryError("cannot_delete_default", "Không thể xóa thư viện mặc định.")
+    if not lid:
+        raise LibraryError("library_not_found", "Không tìm thấy thư viện.")
 
     with _registry_lock:
         data = ensure_libraries_registry()
@@ -434,6 +485,8 @@ def delete_library(library_id, *, delete_clips: bool = True) -> dict:
         target = next((lib for lib in libraries if lib.get("id") == lid), None)
         if target is None:
             raise LibraryError("library_not_found", "Không tìm thấy thư viện.")
+
+        was_default = bool(target.get("isDefault"))
 
         deleted_clips = 0
         if delete_clips:
@@ -443,16 +496,33 @@ def delete_library(library_id, *, delete_clips: bool = True) -> dict:
             deleted_clips = summary.get("deletedCount", 0)
 
         root = _library_root(lid)
-        # Defensive: never rmtree the shared default root.
+        # Defensive: never rmtree the shared top-level dir. Unreachable in normal flow
+        # now that every library (incl. default) has its own subfolder, but kept as a
+        # safety net against ever nuking libraries.json and every sibling library.
         if root and os.path.realpath(root) != os.path.realpath(Config.STORY_LIBRARY_DIR):
             shutil.rmtree(root, ignore_errors=True)
 
-        data["libraries"] = [lib for lib in libraries if lib.get("id") != lid]
+        remaining = [lib for lib in libraries if lib.get("id") != lid]
+
+        # If the deleted library was the default, promote the first remaining library
+        # (earliest createdAt, matching load_libraries' order) to be the new default.
+        new_default_id = ""
+        if was_default and remaining:
+            promoted = min(remaining, key=lambda lib: str(lib.get("createdAt") or ""))
+            promoted["isDefault"] = True
+            new_default_id = str(promoted.get("id") or "")
+
+        data["libraries"] = remaining
         _save_registry(data)
         with _library_locks_guard:
             _library_locks.pop(lid, None)
 
-        return {"deleted": True, "libraryId": lid, "deletedClips": deleted_clips}
+        return {
+            "deleted": True,
+            "libraryId": lid,
+            "deletedClips": deleted_clips,
+            "newDefaultLibraryId": new_default_id,
+        }
 
 
 # --------------------------------------------------------------------------- #

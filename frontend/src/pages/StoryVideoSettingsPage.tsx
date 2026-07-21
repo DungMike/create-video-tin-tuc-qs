@@ -1,5 +1,5 @@
 import { Check, Eye, Link as LinkIcon, Loader2, Save, Sparkles, Star, Trash2, Upload } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
 import { EmptyCard } from "@/components/empty-card";
@@ -116,6 +116,7 @@ const DEFAULT_FORM: WaveformForm = {
 
 type TVNoiseForm = {
   enabled: boolean;
+  blendMode: NonNullable<TVNoiseOverlay["blendMode"]>;
   opacity: string;
   tolerance: string;
   softness: string;
@@ -124,6 +125,7 @@ type TVNoiseForm = {
 
 const DEFAULT_NOISE_FORM: TVNoiseForm = {
   enabled: true,
+  blendMode: "alpha",
   opacity: "0.35",
   tolerance: "0.08",
   softness: "0.02",
@@ -175,10 +177,92 @@ function ctaFormFromOverlay(overlay?: CtaOverlay): CtaForm {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Visual position preview: mirrors backend _position_expr (margin px on a
+// 1920x1080 frame; overlay height is an estimate since ffmpeg scales it W:-2).
+// ---------------------------------------------------------------------------
+const PREVIEW_FRAME_W = 1920;
+const PREVIEW_FRAME_H = 1080;
+
+type OverlayCorner = NonNullable<WaveformOverlay["position"]>;
+
+interface OverlayPreviewBox {
+  label: string;
+  position: OverlayCorner;
+  margin: number;
+  scaleWidth: number;
+  heightRatio: number;
+  className: string;
+  active?: boolean;
+}
+
+function overlayPreviewBoxStyle(box: OverlayPreviewBox): CSSProperties {
+  const widthPct = Math.max(2, Math.min(90, (box.scaleWidth / PREVIEW_FRAME_W) * 100));
+  const heightPct = Math.max(2, Math.min(90, ((box.scaleWidth * box.heightRatio) / PREVIEW_FRAME_H) * 100));
+  const xPct = Math.min(90, (box.margin / PREVIEW_FRAME_W) * 100);
+  const yPct = Math.min(90, (box.margin / PREVIEW_FRAME_H) * 100);
+  const style: CSSProperties = { width: `${widthPct}%`, height: `${heightPct}%` };
+  if (box.position === "top_left" || box.position === "top_right") style.top = `${yPct}%`;
+  else style.bottom = `${yPct}%`;
+  if (box.position === "top_left" || box.position === "bottom_left") style.left = `${xPct}%`;
+  else style.right = `${xPct}%`;
+  return style;
+}
+
+const OVERLAY_PREVIEW_CORNERS: { corner: OverlayCorner; className: string }[] = [
+  { corner: "top_left", className: "left-1 top-1" },
+  { corner: "top_right", className: "right-1 top-1" },
+  { corner: "bottom_left", className: "bottom-1 left-1" },
+  { corner: "bottom_right", className: "bottom-1 right-1" },
+];
+
+function OverlayPositionPreview({
+  boxes,
+  onPickCorner,
+}: {
+  boxes: OverlayPreviewBox[];
+  onPickCorner: (corner: OverlayCorner) => void;
+}) {
+  const active = boxes.find((box) => box.active);
+  return (
+    <div className="grid gap-1">
+      <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-border/70 bg-zinc-800">
+        <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500">Khung video 16:9</div>
+        {boxes.map((box) => (
+          <div
+            key={box.label}
+            style={overlayPreviewBoxStyle(box)}
+            className={`absolute flex items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-medium text-white/90 ${box.className} ${
+              box.active ? "z-10" : "opacity-50"
+            }`}
+          >
+            <span className="truncate">{box.label}</span>
+          </div>
+        ))}
+        {OVERLAY_PREVIEW_CORNERS.map(({ corner, className }) => (
+          <button
+            key={corner}
+            type="button"
+            title={`Chuyển "${active?.label ?? "overlay"}" về góc này`}
+            onClick={() => onPickCorner(corner)}
+            className={`absolute z-20 size-5 rounded border border-dashed ${className} ${
+              active?.position === corner ? "border-primary bg-primary/50" : "border-white/40 bg-white/10 hover:bg-white/30"
+            }`}
+          />
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Mô phỏng vị trí theo Position / Margin / Width đang nhập (khung 1920×1080). Bấm ô vuông ở góc để đổi vị trí.
+      </p>
+    </div>
+  );
+}
+
 function formFromNoiseOverlay(overlay?: TVNoiseOverlay): TVNoiseForm {
   if (!overlay) return DEFAULT_NOISE_FORM;
   return {
     enabled: overlay.enabled ?? DEFAULT_NOISE_FORM.enabled,
+    blendMode: overlay.blendMode ?? DEFAULT_NOISE_FORM.blendMode,
     opacity: String(overlay.opacity ?? DEFAULT_NOISE_FORM.opacity),
     tolerance: String(overlay.tolerance ?? DEFAULT_NOISE_FORM.tolerance),
     softness: String(overlay.softness ?? DEFAULT_NOISE_FORM.softness),
@@ -443,6 +527,7 @@ export function StoryVideoSettingsPage() {
     try {
       const payload: Partial<TVNoiseOverlay> = {
         enabled: noiseForm.enabled,
+        blendMode: noiseForm.blendMode,
         opacity: Number(noiseForm.opacity),
         tolerance: Number(noiseForm.tolerance),
         softness: Number(noiseForm.softness),
@@ -877,7 +962,7 @@ export function StoryVideoSettingsPage() {
                 <StatusAlert title="TV noise preprocess failed" message={selectedNoise.error} variant="destructive" />
               ) : null}
 
-              <div className="grid gap-4 md:grid-cols-5">
+              <div className="grid gap-4 md:grid-cols-6">
                 <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
                   <input
                     type="checkbox"
@@ -887,16 +972,28 @@ export function StoryVideoSettingsPage() {
                   Enabled
                 </label>
                 <div className="grid gap-2">
+                  <Label>Blend</Label>
+                  <select
+                    value={noiseForm.blendMode}
+                    onChange={(event) => setNoiseForm((current) => ({ ...current, blendMode: event.target.value as TVNoiseForm["blendMode"] }))}
+                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                    title="Alpha: key nền đen thành trong suốt (nhiễu TV). Screen: cộng sáng — hợp texture nền đen như bụi bay, light leak, bokeh."
+                  >
+                    <option value="alpha">Alpha (key nền)</option>
+                    <option value="screen">Screen (cộng sáng)</option>
+                  </select>
+                </div>
+                <div className="grid gap-2">
                   <Label>Opacity</Label>
                   <Input type="number" min="0" max="1" step="0.01" value={noiseForm.opacity} onChange={(event) => setNoiseForm((current) => ({ ...current, opacity: event.target.value }))} />
                 </div>
                 <div className="grid gap-2">
                   <Label>Tolerance</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={noiseForm.tolerance} onChange={(event) => setNoiseForm((current) => ({ ...current, tolerance: event.target.value }))} />
+                  <Input type="number" min="0" max="1" step="0.01" disabled={noiseForm.blendMode === "screen"} value={noiseForm.tolerance} onChange={(event) => setNoiseForm((current) => ({ ...current, tolerance: event.target.value }))} />
                 </div>
                 <div className="grid gap-2">
                   <Label>Softness</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={noiseForm.softness} onChange={(event) => setNoiseForm((current) => ({ ...current, softness: event.target.value }))} />
+                  <Input type="number" min="0" max="1" step="0.01" disabled={noiseForm.blendMode === "screen"} value={noiseForm.softness} onChange={(event) => setNoiseForm((current) => ({ ...current, softness: event.target.value }))} />
                 </div>
                 <div className="grid gap-2">
                   <Label>Order</Label>
@@ -977,6 +1074,29 @@ export function StoryVideoSettingsPage() {
               {selected.relativePath ? (
                 <video src={`/media/${selected.relativePath}`} controls className="aspect-video w-full rounded-lg bg-black object-contain" />
               ) : null}
+
+              <OverlayPositionPreview
+                boxes={[
+                  {
+                    label: "Sóng âm",
+                    position: form.position,
+                    margin: Number(form.margin) || 0,
+                    scaleWidth: Number(form.scaleWidth) || 420,
+                    heightRatio: 0.3,
+                    className: "border-sky-300 bg-sky-500/70",
+                    active: true,
+                  },
+                  {
+                    label: ctaForm.enabled ? "CTA" : "CTA (tắt)",
+                    position: ctaForm.position,
+                    margin: Number(ctaForm.margin) || 0,
+                    scaleWidth: Number(ctaForm.scaleWidth) || 360,
+                    heightRatio: 0.6,
+                    className: "border-orange-300 bg-orange-500/60",
+                  },
+                ]}
+                onPickCorner={(corner) => setForm((current) => ({ ...current, position: corner }))}
+              />
 
               <div className="grid gap-4 md:grid-cols-3">
                 <div className="grid gap-2">
@@ -1123,6 +1243,29 @@ export function StoryVideoSettingsPage() {
                 />
                 Bật CTA overlay cho mọi video Story Video
               </label>
+
+              <OverlayPositionPreview
+                boxes={[
+                  {
+                    label: ctaForm.enabled ? "CTA" : "CTA (tắt)",
+                    position: ctaForm.position,
+                    margin: Number(ctaForm.margin) || 0,
+                    scaleWidth: Number(ctaForm.scaleWidth) || 360,
+                    heightRatio: 0.6,
+                    className: "border-orange-300 bg-orange-500/60",
+                    active: true,
+                  },
+                  {
+                    label: "Sóng âm",
+                    position: form.position,
+                    margin: Number(form.margin) || 0,
+                    scaleWidth: Number(form.scaleWidth) || 420,
+                    heightRatio: 0.3,
+                    className: "border-sky-300 bg-sky-500/70",
+                  },
+                ]}
+                onPickCorner={(corner) => setCtaForm((current) => ({ ...current, position: corner }))}
+              />
 
               <div className="grid gap-4 md:grid-cols-3">
                 <div className="grid gap-2">

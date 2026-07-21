@@ -78,7 +78,7 @@ def test_batch_runner_skips_cancelled_item_and_continues(story_storage, monkeypa
     started_story_ids: list[str] = []
 
     class FakePipelineRunner:
-        def __init__(self, story_id: str, _config: dict):
+        def __init__(self, story_id: str, _config: dict, **_kwargs):
             started_story_ids.append(story_id)
 
         def run(self):

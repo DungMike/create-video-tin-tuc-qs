@@ -565,6 +565,9 @@ export async function importSelectedStoryVideos(
         provider: item.provider,
         id: item.id,
         pageUrl: item.pageUrl,
+        // Gửi kèm download URL từ search để backend không phải resolve lại
+        // từng video (tránh 429 rate limit từ Pexels/Pixabay).
+        previewUrl: item.previewUrl,
       })),
       tags,
     }),
@@ -792,6 +795,7 @@ export async function generateSubtitlePreview(body: {
   maxCharsPerLine: number;
   maxLines: number;
   sampleClipId?: string;
+  styleOverrides?: { fontScale?: number };
 }) {
   return requestJson<{ previewPath: string }>("/api/story-video/subtitle-preview", {
     method: "POST",

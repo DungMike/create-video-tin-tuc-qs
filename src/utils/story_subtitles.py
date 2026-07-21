@@ -22,7 +22,13 @@ class SubtitleParseError(Exception):
 #   Colours are ASS &HAABBGGRR (alpha 00 = opaque -> FF = transparent).
 #   border_style: 1 = outline + drop shadow, 3 = opaque box (box colour = outline_colour).
 #   anim: "standard" -> use the static `inline` tag; "fade_dynamic" -> duration-aware
-#         \fade; "karaoke" -> per-syllable \kf via _render_karaoke_text.
+#         \fade; "karaoke" -> per-syllable \kf via _render_karaoke_text;
+#         "word_pop" -> each word revealed + bounced at its allocated time;
+#         "color_cycle" -> \1c animated through `cycle_colours` over the cue
+#         (cycle_mode "pulse" beats base->accent->base instead of a sweep);
+#         "karaoke_zoom" -> \kf fill plus per-word scale bounce.
+#   block_tags: extra override tags re-declared after each per-word \r reset
+#         (e.g. "\\blur5" for neon glows), used by word_pop / karaoke_zoom.
 _DEFAULT_STYLE = {
     "primary": "&H00FFFFFF",
     "secondary": "&H00FFFFFF",
@@ -90,6 +96,28 @@ SUBTITLE_PRESETS = [
     {"id": "karaoke_box", "name": "Karaoke nền", "description": "Karaoke vàng trên hộp đen mờ.",
      "style": {"anim": "karaoke", "primary": "&H0000FFFF", "secondary": "&H00FFFFFF",
                "border_style": 3, "outline_colour": "&H80000000", "outline": 8, "shadow": 0}},
+
+    # --- Chữ nhảy theo từng từ (word pop) ---
+    {"id": "word_bounce", "name": "Chữ nhảy", "description": "Từng từ bật to đúng lúc được đọc.",
+     "style": {"anim": "word_pop"}},
+    {"id": "word_bounce_box", "name": "Chữ nhảy nền", "description": "Chữ nhảy từng từ trên hộp đen mờ.",
+     "style": {"anim": "word_pop", "border_style": 3, "outline_colour": "&H80000000",
+               "outline": 8, "shadow": 0}},
+
+    # --- Đổi màu động (color cycle) ---
+    {"id": "rainbow_cycle", "name": "Đổi màu cầu vồng", "description": "Màu chữ chuyển dần qua dải màu trong lúc hiển thị.",
+     "style": {"anim": "color_cycle",
+               "cycle_colours": ["&H5D5DFF&", "&H00D7FF&", "&H79E3A5&", "&HFFB37D&", "&HE37DD4&"]}},
+    {"id": "color_pulse", "name": "Nhịp màu vàng", "description": "Chữ trắng nhấn nhịp sang vàng rồi về trắng.",
+     "style": {"anim": "color_cycle", "cycle_mode": "pulse",
+               "cycle_colours": ["&HFFFFFF&", "&H00FFFF&"]}},
+
+    # --- Karaoke nâng cao ---
+    {"id": "karaoke_zoom", "name": "Karaoke phóng to", "description": "Từ đang đọc phóng to và tô màu vàng.",
+     "style": {"anim": "karaoke_zoom", "primary": "&H0000FFFF", "secondary": "&H00FFFFFF"}},
+    {"id": "karaoke_neon", "name": "Karaoke neon", "description": "Karaoke tô vàng với quầng sáng neon cyan.",
+     "style": {"anim": "karaoke_zoom", "primary": "&H0000FFFF", "secondary": "&H00FFFFFF",
+               "outline_colour": "&H00FFFF00", "shadow": 0, "block_tags": "\\blur5"}},
 ]
 
 _SYSTEM_FONTS_DIR = "C:/Windows/Fonts"
@@ -453,12 +481,131 @@ def _render_karaoke_text(lines: list[str], duration: float) -> str:
     return "{\\fad(150,150)}" + "\\N".join(rendered_lines)
 
 
+def _word_time_blocks(lines: list[str], duration: float):
+    """Per-word (unit, start_ms, duration_ms) allocation shared by word animations.
+
+    Returns (line_units, iterator of (unit, t0_ms, dur_ms, cs)) or None when the
+    text has no units (caller falls back to a static line).
+    """
+    line_units = [(line, _karaoke_units(line)) for line in lines]
+    weights = [len(unit) for _, units in line_units for unit in units]
+    if not weights:
+        return None
+    total_cs = max(1, int(round(duration * 100)))
+    allocation = _allocate_centiseconds(total_cs, weights)
+    return line_units, iter(allocation)
+
+
+def _render_word_pop_text(lines: list[str], duration: float, style: dict) -> str:
+    """Reveal each word at its allocated time with a quick scale bounce.
+
+    All words are laid out from t=0 (stable line layout) but held transparent
+    until their start; \\r isolates each word's transforms from the next.
+    \\fad only ever adds transparency, so it cannot un-hide pending words.
+    """
+    allocated = _word_time_blocks(lines, duration)
+    if allocated is None:
+        return "{\\fad(150,150)}" + "\\N".join(_escape_ass_text(line) for line in lines)
+    line_units, allocation = allocated
+    block_tags = str(style.get("block_tags") or "")
+    rise_ms, settle_ms = 140, 140
+    elapsed_cs = 0
+    rendered_lines: list[str] = []
+    for line, units in line_units:
+        spaced = " " in line.strip()
+        parts: list[str] = []
+        for idx, unit in enumerate(units):
+            cs = next(allocation)
+            t0 = elapsed_cs * 10
+            elapsed_cs += cs
+            rise_end = t0 + rise_ms
+            settle_end = rise_end + settle_ms
+            tags = (
+                f"\\r{block_tags}\\alpha&HFF&"
+                f"\\t({t0},{t0 + 10},\\alpha&H00&)"
+                f"\\t({t0},{rise_end},\\fscx135\\fscy135)"
+                f"\\t({rise_end},{settle_end},\\fscx100\\fscy100)"
+            )
+            segment = "{" + tags + "}" + _escape_ass_text(unit)
+            if spaced and idx < len(units) - 1:
+                segment += " "
+            parts.append(segment)
+        rendered_lines.append("".join(parts))
+    return "{\\fad(150,150)}" + "\\N".join(rendered_lines)
+
+
+def _render_karaoke_zoom_text(lines: list[str], duration: float, style: dict) -> str:
+    """Karaoke \\kf fill plus a scale bounce on the word currently being read."""
+    allocated = _word_time_blocks(lines, duration)
+    if allocated is None:
+        return "{\\fad(150,150)}" + "\\N".join(_escape_ass_text(line) for line in lines)
+    line_units, allocation = allocated
+    block_tags = str(style.get("block_tags") or "")
+    elapsed_cs = 0
+    rendered_lines: list[str] = []
+    for line, units in line_units:
+        spaced = " " in line.strip()
+        parts: list[str] = []
+        for idx, unit in enumerate(units):
+            cs = next(allocation)
+            t0 = elapsed_cs * 10
+            elapsed_cs += cs
+            dur_ms = max(1, cs * 10)
+            rise = min(160, max(60, dur_ms // 2))
+            t_end = t0 + dur_ms
+            tags = (
+                f"\\r{block_tags}\\kf{cs}"
+                f"\\t({t0},{t0 + rise},\\fscx122\\fscy122)"
+                f"\\t({max(t0 + rise, t_end - rise)},{t_end},\\fscx100\\fscy100)"
+            )
+            segment = "{" + tags + "}" + _escape_ass_text(unit)
+            if spaced and idx < len(units) - 1:
+                segment += " "
+            parts.append(segment)
+        rendered_lines.append("".join(parts))
+    return "{\\fad(150,150)}" + "\\N".join(rendered_lines)
+
+
+def _render_color_cycle_text(lines: list[str], duration: float, style: dict) -> str:
+    """Animate the fill colour over the cue: sweep through cycle_colours, or
+    beat base->accent->base when cycle_mode is "pulse". Colours use the inline
+    \\1c form (&HBBGGRR&)."""
+    colours = [str(c) for c in (style.get("cycle_colours") or []) if str(c).strip()]
+    if len(colours) < 2:
+        colours = ["&HFFFFFF&", "&H00FFFF&"]
+    escaped = "\\N".join(_escape_ass_text(line) for line in lines)
+    duration_ms = max(1, int(round(duration * 1000)))
+    parts = [f"\\1c{colours[0]}"]
+    if str(style.get("cycle_mode") or "") == "pulse":
+        base, accent = colours[0], colours[1]
+        beats = max(1, duration_ms // 1200)
+        seg = duration_ms / (beats * 2)
+        t = 0.0
+        for _ in range(beats):
+            parts.append(f"\\t({int(t)},{int(t + seg)},\\1c{accent})")
+            parts.append(f"\\t({int(t + seg)},{int(t + 2 * seg)},\\1c{base})")
+            t += 2 * seg
+    else:
+        seg = duration_ms / (len(colours) - 1)
+        t = 0.0
+        for colour in colours[1:]:
+            parts.append(f"\\t({int(t)},{int(t + seg)},\\1c{colour})")
+            t += seg
+    return "{" + "".join(parts) + "\\fad(150,150)}" + escaped
+
+
 def _render_dialogue_text(text: str, preset_id: str, duration: float) -> str:
     lines = text.split("\n")
     style = get_preset_style(preset_id)
     anim = style["anim"]
     if anim == "karaoke":
         return _render_karaoke_text(lines, duration)
+    if anim == "word_pop":
+        return _render_word_pop_text(lines, duration, style)
+    if anim == "karaoke_zoom":
+        return _render_karaoke_zoom_text(lines, duration, style)
+    if anim == "color_cycle":
+        return _render_color_cycle_text(lines, duration, style)
     escaped = "\\N".join(_escape_ass_text(line) for line in lines)
     if anim == "fade_dynamic":
         duration_ms = int(round(duration * 1000))
@@ -479,6 +626,16 @@ def _coerce_style_int(value, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _coerce_style_float(value, default: float, minimum: float, maximum: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
 def _sanitize_font_family(font_family) -> str:
     # Commas shift Style fields, newlines inject arbitrary ASS lines.
     cleaned = re.sub(r"[,\r\n]+", " ", str(font_family))
@@ -497,7 +654,12 @@ def build_ass(
     scale = play_y / 1080.0
     overrides = style_overrides if isinstance(style_overrides, dict) else {}
     font_family = _sanitize_font_family(font_family)
-    font_size = _coerce_style_int(overrides.get("fontSize"), int(round(54 * scale)))
+    # `fontScale` multiplies the resolution-aware default so a chosen size looks the
+    # same in the 720p preview and the 1080p render; `fontSize` (absolute px) still
+    # wins when provided, for backward compatibility.
+    font_scale = _coerce_style_float(overrides.get("fontScale"), 1.0, 0.3, 4.0)
+    scaled_default = max(1, int(round(54 * scale * font_scale)))
+    font_size = _coerce_style_int(overrides.get("fontSize"), scaled_default)
     margin_v = _coerce_style_int(overrides.get("marginV"), int(round(60 * scale)))
     alignment = _coerce_style_int(overrides.get("alignment"), 2)
     margin_lr = max(10, int(round(40 * scale)))

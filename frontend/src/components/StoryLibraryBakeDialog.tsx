@@ -16,18 +16,14 @@ import {
   ApiError,
   bakeStoryLibrary,
   cancelStoryLibraryBakeJob,
-  getCtaOverlays,
   getStoryLibraryBakeJob,
   getTVEffectStyles,
-  getWaveformOverlays,
 } from "@/lib/api";
 import type {
-  CtaOverlay,
   StoryLibrary,
   StoryLibraryBakeJob,
   TVEffectParams,
   TVEffectStyle,
-  WaveformOverlay,
 } from "@/types/api";
 
 const CUSTOM_OPTION = "__custom__";
@@ -46,10 +42,6 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
   const [styles, setStyles] = useState<TVEffectStyle[]>([]);
   const [customParams, setCustomParams] = useState<TVEffectParams | null>(null);
   const [styleId, setStyleId] = useState("");
-  const [waveforms, setWaveforms] = useState<WaveformOverlay[]>([]);
-  const [ctas, setCtas] = useState<CtaOverlay[]>([]);
-  const [waveformId, setWaveformId] = useState("");
-  const [ctaId, setCtaId] = useState("");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -72,30 +64,21 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
 
   useEffect(() => stopPolling, [stopPolling]);
 
-  // Load styles + waveform + CTA options when the dialog opens.
+  // Load TV effect styles when the dialog opens. Waveform + CTA are NOT baked
+  // here anymore — they are added at render time — so only styles are needed.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     void (async () => {
       try {
-        const [styleRes, waveRes, ctaRes] = await Promise.all([
-          getTVEffectStyles(),
-          getWaveformOverlays(),
-          getCtaOverlays(),
-        ]);
+        const styleRes = await getTVEffectStyles();
         if (cancelled) return;
         const usable = styleRes.styles.filter((s) => s.id !== "none");
         setStyles(usable);
         setCustomParams(styleRes.customParams ?? null);
         setStyleId((prev) => prev || usable[0]?.id || "");
-        const waves = waveRes.overlays ?? [];
-        const ctaList = (ctaRes.overlays ?? []).filter((c) => c.enabled !== false);
-        setWaveforms(waves);
-        setCtas(ctaList);
-        setWaveformId((prev) => prev || waves.find((w) => w.isDefault)?.id || waves[0]?.id || "");
-        setCtaId((prev) => prev || ctaList.find((c) => c.isDefault)?.id || ctaList[0]?.id || "");
       } catch {
-        if (!cancelled) setError("Không tải được hiệu ứng / sóng âm / CTA.");
+        if (!cancelled) setError("Không tải được hiệu ứng.");
       }
     })();
     return () => {
@@ -139,10 +122,6 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
       setError("Hãy chọn một hiệu ứng để bake.");
       return;
     }
-    if (!waveformId || !ctaId) {
-      setError("Hãy chọn sóng âm và CTA để soạn tài nguyên.");
-      return;
-    }
     setBusy(true);
     setError(null);
     try {
@@ -151,10 +130,7 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
       const payload = {
         sourceLibraryId: source.id,
         name: trimmed,
-        mode: "full" as const,
-        waveformId,
-        ctaId,
-        unitSeconds: 10,
+        mode: "style" as const,
         ...styleField,
       };
       const res = await bakeStoryLibrary(payload);
@@ -236,8 +212,8 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
           <DialogHeader>
             <DialogTitle>Bake hiệu ứng → thư viện mới</DialogTitle>
             <DialogDescription>
-              Nung hiệu ứng TV + sóng âm + CTA vào clip của "{source?.name}" (ghép thành unit 10s) lưu thành
-              thư viện mới. Khi render chọn thư viện này chỉ còn ghi phụ đề — nhanh nhất.
+              Nung hiệu ứng TV vào từng clip 5s của "{source?.name}" và lưu thành thư viện mới. Khi render
+              chọn thư viện này sẽ bỏ qua bước style — sóng âm và CTA vẫn được thêm ở bước render.
             </DialogDescription>
           </DialogHeader>
 
@@ -262,48 +238,6 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
                   {customParams ? <option value={CUSTOM_OPTION}>Custom (cấu hình đã lưu)</option> : null}
                 </select>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="grid gap-1.5">
-                  <Label htmlFor="bake-wave" className="text-xs">
-                    Sóng âm
-                  </Label>
-                  <select
-                    id="bake-wave"
-                    value={waveformId}
-                    disabled={busy}
-                    onChange={(e) => setWaveformId(e.target.value)}
-                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-                  >
-                    {waveforms.length === 0 ? <option value="">(chưa có sóng âm)</option> : null}
-                    {waveforms.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                        {w.isDefault ? " (mặc định)" : ""}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="grid gap-1.5">
-                  <Label htmlFor="bake-cta" className="text-xs">
-                    CTA
-                  </Label>
-                  <select
-                    id="bake-cta"
-                    value={ctaId}
-                    disabled={busy}
-                    onChange={(e) => setCtaId(e.target.value)}
-                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-                  >
-                    {ctas.length === 0 ? <option value="">(chưa có CTA)</option> : null}
-                    {ctas.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                        {c.isDefault ? " (mặc định)" : ""}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
               <div className="grid gap-1.5">
                 <Label htmlFor="bake-name" className="text-xs">
                   Tên thư viện đích
@@ -317,9 +251,9 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
                 />
               </div>
               <p className="text-xs text-muted-foreground">
-                {source?.clipCount ?? 0} clip → ~{Math.ceil((source?.clipCount ?? 0) / 2)} unit 10s. Sóng âm/CTA sẽ
-                bị nung cố định (đổi sau phải bake lại). Tốn thời gian tương đương một lần render — nên chạy khi
-                không có batch nào đang chạy.
+                {source?.clipCount ?? 0} clip 5s sẽ được nung hiệu ứng và giữ nguyên số lượng. Sóng âm và CTA
+                không nung ở đây — chúng được thêm khi render. Tốn thời gian tương đương một lần render — nên chạy
+                khi không có batch nào đang chạy.
               </p>
               {error ? <p className="text-sm text-destructive">{error}</p> : null}
             </div>
@@ -353,7 +287,7 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
                 </Button>
                 <Button
                   type="button"
-                  disabled={busy || !styleId || !waveformId || !ctaId}
+                  disabled={busy || !styleId}
                   onClick={() => void handleStart()}
                 >
                   {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Sparkles className="mr-2 size-4" />}

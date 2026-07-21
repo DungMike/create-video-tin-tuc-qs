@@ -629,6 +629,8 @@ export interface StoryLibraryDeleteResponse {
   deleted: boolean;
   libraryId: string;
   deletedClips: number;
+  /** Library promoted to default when the deleted one was the default; "" if none. */
+  newDefaultLibraryId: string;
 }
 
 export interface StoryClip {
@@ -775,6 +777,8 @@ export interface TVNoiseOverlay {
   status: "processing" | "ready" | "failed";
   enabled: boolean;
   order: number;
+  // "alpha" (lumakey, default) or "screen" (black-background textures: dust, light leak...).
+  blendMode?: "alpha" | "screen";
   opacity: number;
   tolerance: number;
   softness: number;
@@ -837,6 +841,7 @@ export interface CreateStoryVideoRequest {
   subtitlePreset?: string;
   subtitleMaxCharsPerLine?: number;
   subtitleMaxLines?: number;
+  subtitleFontScale?: number;
 }
 
 export interface StoryVideoProgress {
@@ -870,6 +875,7 @@ export interface CreateStoryBatchRequest {
     subtitlePreset?: string;
     subtitleMaxCharsPerLine?: number;
     subtitleMaxLines?: number;
+    subtitleFontScale?: number;
   };
 }
 

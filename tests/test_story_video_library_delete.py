@@ -18,15 +18,21 @@ def _asset(clip_id: str) -> dict:
     }
 
 
+# The default library now lives in its own subfolder (STORY_LIBRARY_DIR/default/),
+# like every other library, so tests write/read there rather than the shared root.
+def _default_root(library_dir: Path) -> Path:
+    return library_dir / "default"
+
+
 def _write_library(library_dir: Path, clip_ids: list[str]) -> dict[str, Path]:
-    clips_dir = library_dir / "clips"
+    clips_dir = _default_root(library_dir) / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
     paths: dict[str, Path] = {}
     for clip_id in clip_ids:
         clip_path = clips_dir / f"{clip_id}.mp4"
         clip_path.write_bytes(clip_id.encode("utf-8"))
         paths[clip_id] = clip_path
-    (library_dir / "index.json").write_text(
+    (_default_root(library_dir) / "index.json").write_text(
         json.dumps({"assets": [_asset(clip_id) for clip_id in clip_ids]}),
         encoding="utf-8",
     )
@@ -34,7 +40,7 @@ def _write_library(library_dir: Path, clip_ids: list[str]) -> dict[str, Path]:
 
 
 def _read_assets(library_dir: Path) -> list[dict]:
-    data = json.loads((library_dir / "index.json").read_text(encoding="utf-8"))
+    data = json.loads((_default_root(library_dir) / "index.json").read_text(encoding="utf-8"))
     return data["assets"]
 
 
@@ -85,7 +91,7 @@ def test_bulk_delete_ids_only_removes_requested_clips(story_library, client):
 
 def test_bulk_delete_all_clears_index_and_orphan_files(story_library, client):
     paths = _write_library(story_library, ["one", "two"])
-    orphan_path = story_library / "clips" / "orphan.mp4"
+    orphan_path = _default_root(story_library) / "clips" / "orphan.mp4"
     orphan_path.write_bytes(b"orphan")
 
     response = client.post("/api/story-video/library/bulk-delete", json={"scope": "all"})

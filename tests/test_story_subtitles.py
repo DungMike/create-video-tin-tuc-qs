@@ -336,6 +336,78 @@ def test_build_ass_preset_karaoke_pop_timing_and_colors():
     assert abs(sum(kf_values2) - 200) <= 1
 
 
+def test_build_ass_preset_word_bounce_reveals_each_word():
+    ass_text = ss.build_ass(
+        [{"start": 0.0, "end": 3.0, "text": "một hai ba bốn"}], "Arial", "word_bounce"
+    )
+    line = _dialogue_lines(ass_text)[0]
+    # One reset + hidden-alpha block per word, revealed via \t and bounced via \fscx.
+    assert line.count("\\r") == 4
+    assert line.count("\\alpha&HFF&") == 4
+    assert line.count("\\t(") == 12  # 3 transforms per word
+    assert "\\fscx135" in line and "\\fscx100" in line
+    # Word start times cover the cue: first word at 0, later words strictly increasing.
+    starts = [int(m) for m in re.findall(r"\\alpha&HFF&\\t\((\d+),", line)]
+    assert starts[0] == 0
+    assert starts == sorted(starts)
+    assert starts[-1] < 3000
+
+
+def test_build_ass_preset_word_bounce_box_style():
+    ass_text = ss.build_ass([{"start": 0.0, "end": 2.0, "text": "abc def"}], "Arial", "word_bounce_box")
+    fields = _style_line(ass_text)[len("Style: "):].split(",")
+    assert fields[15] == "3"  # BorderStyle = opaque box
+    assert fields[5] == "&H80000000"
+
+
+def test_build_ass_preset_rainbow_cycle_sweeps_colours():
+    ass_text = ss.build_ass(
+        [{"start": 0.0, "end": 4.0, "text": "chuyện kể đêm khuya"}], "Arial", "rainbow_cycle"
+    )
+    line = _dialogue_lines(ass_text)[0]
+    # Starts at the first colour then sweeps through the remaining four.
+    assert "\\1c&H5D5DFF&" in line
+    assert line.count("\\t(") == 4
+    assert "\\1c&HE37DD4&" in line
+    assert "\\fad(150,150)" in line
+
+
+def test_build_ass_preset_color_pulse_beats_scale_with_duration():
+    long = ss.build_ass([{"start": 0.0, "end": 6.0, "text": "abc"}], "Arial", "color_pulse")
+    long_line = _dialogue_lines(long)[0]
+    short = ss.build_ass([{"start": 0.0, "end": 1.0, "text": "abc"}], "Arial", "color_pulse")
+    short_line = _dialogue_lines(short)[0]
+    # Each beat is a pair of transforms; longer cues pulse more times.
+    assert short_line.count("\\t(") == 2
+    assert long_line.count("\\t(") == 10  # 5 beats at ~1.2s per beat
+    assert "\\1c&H00FFFF&" in long_line and "\\1c&HFFFFFF&" in long_line
+
+
+def test_build_ass_preset_karaoke_zoom_keeps_kf_timing():
+    ass_text = ss.build_ass(
+        [{"start": 0.0, "end": 3.0, "text": "một hai ba"}], "Arial", "karaoke_zoom"
+    )
+    line = _dialogue_lines(ass_text)[0]
+    kf_values = [int(value) for value in re.findall(r"\\kf(\d+)", line)]
+    assert len(kf_values) == 3
+    assert abs(sum(kf_values) - 300) <= 1
+    # Every word gets its own reset + zoom-in/out pair.
+    assert line.count("\\r") == 3
+    assert line.count("\\fscx122") == 3
+    assert line.count("\\fscx100") == 3
+
+
+def test_build_ass_preset_karaoke_neon_redeclares_blur_per_word():
+    ass_text = ss.build_ass(
+        [{"start": 0.0, "end": 2.0, "text": "abc def"}], "Arial", "karaoke_neon"
+    )
+    line = _dialogue_lines(ass_text)[0]
+    # \r resets overrides, so the glow must be re-declared inside every block.
+    assert line.count("\\blur5") == 2
+    fields = _style_line(ass_text)[len("Style: "):].split(",")
+    assert fields[5] == "&H00FFFF00"  # cyan glow outline
+
+
 def test_build_ass_preset_emphasis_bold():
     ass_text = ss.build_ass([{"start": 0.0, "end": 2.0, "text": "abc"}], "Arial", "emphasis_bold")
     line = _dialogue_lines(ass_text)[0]

@@ -56,11 +56,19 @@ export function useActiveStoryLibrary(): UseActiveStoryLibraryResult {
     void refresh();
   }, [refresh]);
 
-  // Effective active id: the persisted choice if it still exists, otherwise Default.
+  // Effective active id. Prefer the persisted choice. While the library list is
+  // still loading (initial mount, or the refresh right after creating a library)
+  // KEEP showing the persisted id instead of snapping to Default — snapping made
+  // the picker "jump" to another library mid-flow and wiped the current search
+  // selection. Only resolve to Default once we know (loaded, non-empty list) that
+  // the persisted id is genuinely absent, or when nothing has been chosen yet.
+  const persistedResolving = isLoading || libraries.length === 0;
   const activeId =
     persistedId && libraries.some((lib) => lib.id === persistedId)
       ? persistedId
-      : defaultLibraryId;
+      : persistedId && persistedResolving
+        ? persistedId
+        : defaultLibraryId;
 
   // Repair a stale persisted id once libraries have loaded.
   useEffect(() => {
@@ -68,9 +76,22 @@ export function useActiveStoryLibrary(): UseActiveStoryLibraryResult {
       return;
     }
     const stillValid = persistedId && libraries.some((lib) => lib.id === persistedId);
-    if (!stillValid && readActiveLibraryId() !== activeId) {
-      writeActiveLibraryId(activeId);
+    if (stillValid || readActiveLibraryId() === activeId) {
+      return;
     }
+    // Defer the repair one tick and re-validate against the freshest state. A
+    // just-created / just-selected library id can momentarily be absent from
+    // this render's `libraries` while its refresh is still in flight; if that
+    // refresh lands in between, this effect re-runs and cancels the timer, so we
+    // never clobber a valid selection back to the default.
+    const timer = window.setTimeout(() => {
+      const current = readActiveLibraryId();
+      if (current === activeId || (current && libraries.some((lib) => lib.id === current))) {
+        return;
+      }
+      writeActiveLibraryId(activeId);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [isLoading, libraries, persistedId, activeId]);
 
   const setActiveId = useCallback((libraryId: string) => {

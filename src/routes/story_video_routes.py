@@ -460,8 +460,16 @@ def import_selected_story_videos():
         provider = str(item.get("provider") or "").strip().lower()
         video_id = str(item.get("id") or "").strip()
         page_url = str(item.get("pageUrl") or "").strip()
+        # Download URL từ kết quả search (previewUrl) để bỏ qua bước resolve
+        # từng video — giảm mạnh số API call, tránh 429 rate limit.
+        download_url = str(item.get("downloadUrl") or item.get("previewUrl") or "").strip()
         if provider in {"pixabay", "pexels"} and video_id:
-            items.append({"provider": provider, "id": video_id, "pageUrl": page_url})
+            items.append({
+                "provider": provider,
+                "id": video_id,
+                "pageUrl": page_url,
+                "downloadUrl": download_url,
+            })
 
     if not items:
         return _error("Khong co video hop le de import.", code="no_valid_items")
@@ -696,7 +704,6 @@ def delete_library_route(library_id: str):
     except LibraryError as exc:
         status = {
             "library_not_found": 404,
-            "cannot_delete_default": 409,
         }.get(exc.code, 400)
         return _error(exc.message, code=exc.code, status=status)
     return jsonify(result)
@@ -745,53 +752,19 @@ def _resolve_bake_style(data: dict):
     return style_id, style_label, params, style_filter
 
 
-def _resolve_bake_overlays(waveform_id: str, cta_id: str):
-    """Resolve the picked waveform + CTA for a full bake.
-
-    Returns ``(wave_path, wave_xy, wave_label, cta_path, cta_xy, cta_label)`` or
-    an ``_error()`` response tuple.
-    """
-    from src.utils.story_cta_overlay import (
-        load_cta_index,
-        overlay_position_expr as cta_pos,
-        processed_abs_path as cta_path_of,
-    )
-    from src.utils.waveform_overlays import (
-        load_waveform_index,
-        overlay_position_expr as wave_pos,
-        processed_abs_path as wave_path_of,
-    )
-
-    wave = next((o for o in load_waveform_index().get("overlays", []) if o.get("id") == waveform_id), None)
-    if not wave:
-        return _error("Không tìm thấy sóng âm đã chọn.", code="waveform_not_found", status=404)
-    wpath = wave_path_of(wave)
-    if not wpath:
-        return _error("Sóng âm chưa được xử lý (thiếu file alpha).", code="waveform_not_processed")
-
-    cta = next((o for o in load_cta_index().get("overlays", []) if o.get("id") == cta_id), None)
-    if not cta:
-        return _error("Không tìm thấy CTA đã chọn.", code="cta_not_found", status=404)
-    cpath = cta_path_of(cta)
-    if not cpath:
-        return _error("CTA chưa được xử lý (thiếu file alpha).", code="cta_not_processed")
-
-    return (wpath, wave_pos(wave), str(wave.get("name") or waveform_id),
-            cpath, cta_pos(cta), str(cta.get("name") or cta_id))
-
-
 @story_video_bp.route("/api/story-video/library/bake", methods=["POST"])
 def bake_story_library():
-    """Bake a TV style (and, in 'full' mode, waveform + CTA) into a new library."""
+    """Bake a TV style (style-only) into a new library.
+
+    Only the TV effect is burned into each 5s clip; waveform + CTA stay runtime
+    overlays added at the render step (no clip pairing / 10s units).
+    """
     from src.utils.story_library import _utc_now_iso, set_library_metadata
     from src.utils.story_library_bake import StoryLibraryBakeRunner
 
     data = request.get_json(silent=True) or {}
     source_library_id = str(data.get("sourceLibraryId", "") or "").strip()
     target_name = str(data.get("name", "") or "").strip()
-    mode = (str(data.get("mode") or "full")).strip().lower()
-    if mode not in {"style", "full"}:
-        mode = "full"
 
     source = get_library_record(source_library_id) or (
         get_library_record(get_default_library_id())
@@ -811,30 +784,6 @@ def bake_story_library():
     if not isinstance(resolved, tuple) or len(resolved) != 4:
         return resolved  # already an _error() response tuple
     style_id, style_label, style_params, style_filter = resolved
-
-    runner_kwargs: dict = {"mode": mode}
-    extra_meta: dict = {}
-    if mode == "full":
-        waveform_id = str(data.get("waveformId", "") or "").strip()
-        cta_id = str(data.get("ctaId", "") or "").strip()
-        if not waveform_id or not cta_id:
-            return _error("Chế độ full-bake cần chọn sóng âm và CTA.", code="missing_overlays")
-        ov = _resolve_bake_overlays(waveform_id, cta_id)
-        if not isinstance(ov, tuple) or len(ov) != 6:
-            return ov  # _error() response tuple
-        wpath, wxy, wlabel, cpath, cxy, clabel = ov
-        try:
-            unit_seconds = int(data.get("unitSeconds", 10))
-        except (TypeError, ValueError):
-            unit_seconds = 10
-        unit_seconds = max(5, min(30, unit_seconds))
-        runner_kwargs.update(
-            waveform_path=wpath, waveform_xy=wxy, cta_path=cpath, cta_xy=cxy, unit_seconds=unit_seconds
-        )
-        extra_meta = dict(
-            fullyBaked=True, clipDuration=unit_seconds,
-            waveformId=waveform_id, waveformLabel=wlabel, ctaId=cta_id, ctaLabel=clabel,
-        )
 
     if _has_active_library_session(source_library_id):
         return _error(
@@ -858,7 +807,6 @@ def bake_story_library():
         styleParams=style_params,
         sourceLibraryId=source_library_id,
         bakedAt=_utc_now_iso(),
-        **extra_meta,
     )
 
     job_id = f"bake-{str(uuid.uuid4())[:8]}"
@@ -870,11 +818,10 @@ def bake_story_library():
         style_filter=style_filter,
         style_id=style_id,
         style_label=style_label,
-        **runner_kwargs,
     )
     runner.start_async()
     logger.info(
-        f"[StoryBake] Started bake job={job_id} mode={mode} -> library={target_library_id}"
+        f"[StoryBake] Started bake job={job_id} (style-only) -> library={target_library_id}"
     )
     return jsonify({"jobId": job_id, "targetLibraryId": target_library_id}), 202
 
@@ -944,24 +891,9 @@ def generate_crt_demo():
     settings = data.get("settings", {})
     sample_clip_id = data.get("sampleClipId")
 
-    # Find sample image/video for demo
-    sample_path = None
-    if sample_clip_id:
-        index = _load_library_index()
-        clip = next((a for a in index.get("assets", []) if a.get("id") == sample_clip_id), None)
-        if clip:
-            sample_path = os.path.join(Config.STORY_LIBRARY_DIR, clip.get("relative_path", ""))
-
-    # If no sample found, use first clip in library or generate a test pattern
-    if not sample_path or not os.path.isfile(sample_path):
-        index = _load_library_index()
-        assets = index.get("assets", [])
-        for a in assets:
-            p = os.path.join(Config.STORY_LIBRARY_DIR, a.get("relative_path", ""))
-            if os.path.isfile(p):
-                sample_path = p
-                break
-
+    # Find a sample video for the demo. _find_sample_clip resolves the clip's own
+    # library root (default lib now lives under default/, not the shared top-level dir).
+    sample_path = _find_sample_clip(sample_clip_id, data.get("libraryId"))
     if not sample_path or not os.path.isfile(sample_path):
         return _error("Không có clip mẫu trong thư viện. Hãy thêm clip trước.", code="no_sample", status=404)
 
@@ -1156,6 +1088,16 @@ def _subtitle_config_from_payload(payload: dict) -> dict:
     if not get_subtitle_preset(preset_id):
         preset_id = "clean"
 
+    style_overrides: dict = {}
+    font_scale_raw = payload.get("subtitleFontScale")
+    if font_scale_raw is not None:
+        try:
+            font_scale = float(font_scale_raw)
+        except (TypeError, ValueError):
+            font_scale = 0.0
+        if font_scale > 0:
+            style_overrides["fontScale"] = max(0.3, min(4.0, font_scale))
+
     return {
         "subtitle_font": str(payload.get("subtitleFont", "")).strip(),
         "subtitle_preset": preset_id,
@@ -1165,6 +1107,7 @@ def _subtitle_config_from_payload(payload: dict) -> dict:
         "subtitle_max_lines": _positive_int(
             payload.get("subtitleMaxLines"), Config.STORY_SUBTITLE_MAX_LINES
         ),
+        "subtitle_style_overrides": style_overrides,
     }
 
 
@@ -1371,11 +1314,13 @@ def get_story_result(story_id: str):
     if not video_path:
         return _error("Video chưa sẵn sàng.", code="video_not_ready", status=404)
 
-    abs_path = video_path if os.path.isabs(video_path) else os.path.join(Config.STORAGE_DIR, video_path)
+    from src.utils.file_manager import storage_absolute_path, storage_relative_path
+
+    abs_path = storage_absolute_path(video_path)
     if not os.path.isfile(abs_path):
         return _error("Video chua san sang.", code="video_not_ready", status=404)
 
-    rel = video_path.replace("\\", "/") if not os.path.isabs(video_path) else os.path.relpath(abs_path, Config.STORAGE_DIR).replace("\\", "/")
+    rel = storage_relative_path(abs_path)
     return jsonify({"videoPath": rel})
 
 
@@ -2049,7 +1994,7 @@ def update_tv_noise_overlay_config(overlay_id: str):
     data = request.get_json(silent=True) or {}
     updates = {}
     try:
-        for key in ("enabled", "name", "order", "opacity", "tolerance", "softness"):
+        for key in ("enabled", "name", "order", "opacity", "tolerance", "softness", "blendMode"):
             if key in data:
                 updates[key] = data.get(key)
         overlay, should_regenerate = update_tv_noise_overlay(overlay_id, updates)
@@ -2080,7 +2025,12 @@ def delete_tv_noise_overlay(overlay_id: str):
 @story_video_bp.route("/api/story-video/tv-noise-demo", methods=["POST"])
 def generate_tv_noise_demo():
     from src.utils.ffmpeg_helper import FFmpegHelper
-    from src.utils.story_tv_noise_overlays import get_active_tv_noise_overlays, get_tv_noise_overlay, processed_abs_path
+    from src.utils.story_tv_noise_overlays import (
+        get_active_tv_noise_overlays,
+        get_tv_noise_overlay,
+        overlay_blend_mode,
+        processed_abs_path,
+    )
 
     data = request.get_json(silent=True) or {}
     overlay_id = str(data.get("overlayId") or "").strip()
@@ -2096,21 +2046,9 @@ def generate_tv_noise_demo():
     if not ready_overlays:
         return _error("Chua co TV noise overlay san sang de tao demo.", code="no_ready_tv_noise", status=404)
 
-    sample_path = None
-    if sample_clip_id:
-        index = _load_library_index()
-        clip = next((a for a in index.get("assets", []) if a.get("id") == sample_clip_id), None)
-        if clip:
-            sample_path = os.path.join(Config.STORY_LIBRARY_DIR, clip.get("relative_path", ""))
-
-    if not sample_path or not os.path.isfile(sample_path):
-        index = _load_library_index()
-        for asset in index.get("assets", []):
-            candidate = os.path.join(Config.STORY_LIBRARY_DIR, asset.get("relative_path", ""))
-            if os.path.isfile(candidate):
-                sample_path = candidate
-                break
-
+    # _find_sample_clip resolves the clip's own library root (default lib now lives
+    # under default/, not the shared top-level dir).
+    sample_path = _find_sample_clip(sample_clip_id or None, data.get("libraryId"))
     if not sample_path or not os.path.isfile(sample_path):
         return _error("Khong co clip mau trong thu vien Story Video.", code="no_sample", status=404)
 
@@ -2128,14 +2066,23 @@ def generate_tv_noise_demo():
         f"crop={width}:{height},fps={Config.TARGET_FPS},setsar=1[base]"
     ]
     chain_label = "[base]"
-    for index, _item in enumerate(ready_overlays):
+    for index, item in enumerate(ready_overlays):
         input_idx = index + 1
         noise_label = f"noise{index}"
         out_label = f"tvn{index}"
-        filter_parts.append(f"[{input_idx}:v]setpts=PTS-STARTPTS[{noise_label}]")
-        filter_parts.append(
-            f"{chain_label}[{noise_label}]overlay=0:0:format=auto:eof_action=repeat:eval=init[{out_label}]"
-        )
+        if overlay_blend_mode(item) == "screen":
+            opacity = max(0.0, min(1.0, float(item.get("opacity") or Config.STORY_TV_NOISE_OPACITY)))
+            filter_parts.append(f"[{input_idx}:v]setpts=PTS-STARTPTS,format=yuv420p[{noise_label}]")
+            filter_parts.append(f"{chain_label}format=yuv420p[{noise_label}base]")
+            filter_parts.append(
+                f"[{noise_label}base][{noise_label}]"
+                f"blend=all_mode=screen:all_opacity={opacity}:eof_action=repeat[{out_label}]"
+            )
+        else:
+            filter_parts.append(f"[{input_idx}:v]setpts=PTS-STARTPTS[{noise_label}]")
+            filter_parts.append(
+                f"{chain_label}[{noise_label}]overlay=0:0:format=auto:eof_action=repeat:eval=init[{out_label}]"
+            )
         chain_label = f"[{out_label}]"
     filter_parts.append(f"{chain_label}format=yuv420p[v]")
 

@@ -20,6 +20,32 @@ from src.utils.story_library import (
 
 _TARGET_PROVIDER_VIDEO_HEIGHT = 1080
 
+# Provider APIs (Pexels 200 req/h, Pixabay 100 req/min) trả 429 khi vượt quota.
+# Retry với exponential backoff, tôn trọng Retry-After nếu server gửi kèm.
+_RATE_LIMIT_MAX_RETRIES = 4
+_RATE_LIMIT_BASE_DELAY = 2.0  # giây
+
+
+def _get_with_rate_limit_retry(url, *, headers=None, params=None, timeout=30):
+    """GET có retry/backoff cho HTTP 429. Trả về Response hoặc raise ở lần cuối."""
+    for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
+        resp = requests.get(url, headers=headers, params=params, timeout=timeout)
+        if resp.status_code != 429 or attempt == _RATE_LIMIT_MAX_RETRIES:
+            resp.raise_for_status()
+            return resp
+        retry_after = resp.headers.get("Retry-After")
+        try:
+            delay = float(retry_after) if retry_after else _RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+        except (TypeError, ValueError):
+            delay = _RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+        logger.warning(
+            f"Rate limited (429) on {url} — retry {attempt + 1}/{_RATE_LIMIT_MAX_RETRIES} sau {delay:.1f}s"
+        )
+        time.sleep(delay)
+    # Không thể tới đây, nhưng để an toàn kiểu trả về:
+    resp.raise_for_status()
+    return resp
+
 
 def _ensure_dirs(library_id=None):
     os.makedirs(Config.STORY_RAW_DIR, exist_ok=True)
@@ -63,8 +89,7 @@ def _resolve_pixabay_download_url(video_id: str) -> str | None:
         return None
     api_url = f"https://pixabay.com/api/videos/?key={api_key}&id={video_id}"
     try:
-        resp = requests.get(api_url, timeout=30)
-        resp.raise_for_status()
+        resp = _get_with_rate_limit_retry(api_url, timeout=30)
         data = resp.json()
         hits = data.get("hits", [])
         if not hits:
@@ -88,8 +113,7 @@ def _resolve_pexels_download_url(video_id: str) -> str | None:
         return None
     api_url = f"https://api.pexels.com/videos/videos/{video_id}"
     try:
-        resp = requests.get(api_url, headers={"Authorization": api_key}, timeout=30)
-        resp.raise_for_status()
+        resp = _get_with_rate_limit_retry(api_url, headers={"Authorization": api_key}, timeout=30)
         data = resp.json()
         video_files = data.get("video_files", [])
         if not video_files:
@@ -329,8 +353,70 @@ def split_into_clips(video_path: str, clip_duration: int | None = None) -> list[
         for f in os.listdir(output_dir)
         if f.startswith(f"{base_name}_clip_") and f.endswith(".mp4")
     ])
-    logger.info(f"Split {video_path} into {len(clips)} clips (segment={duration}s)")
-    return clips
+
+    # The segment muxer leaves a remainder clip shorter than the segment time
+    # (e.g. a 28s source yields 5x5s + 3s). Short clips would otherwise flow
+    # into the library/bake and pollute it, so drop them here.
+    min_duration = duration - 0.1
+    kept: list[str] = []
+    for clip_path in clips:
+        clip_len = FFmpegHelper.probe_duration(clip_path)
+        if clip_len >= min_duration:
+            kept.append(clip_path)
+            continue
+        try:
+            os.remove(clip_path)
+        except OSError as exc:
+            logger.warning(f"Could not delete short clip {clip_path}: {exc}")
+        logger.info(
+            f"Dropped short clip {os.path.basename(clip_path)} "
+            f"({clip_len:.2f}s < {min_duration:.2f}s)"
+        )
+
+    logger.info(
+        f"Split {video_path} into {len(kept)} clips "
+        f"(segment={duration}s, dropped {len(clips) - len(kept)} short)"
+    )
+    return kept
+
+
+def _ingest_clips(
+    clips: list[str],
+    source_type: str,
+    tags: list[str] | None = None,
+    library_id=None,
+    session_id: str | None = None,
+    progress_callback=None,
+    current: int = 0,
+    total: int = 0,
+) -> list[dict]:
+    """Route freshly split clips into the target library.
+
+    Styled/baked libraries re-bake the clips (style + waveform + CTA) with the
+    library's own stored metadata so new clips match existing baked units; normal
+    libraries store the raw clips as-is.
+    """
+    from src.utils.story_library import get_library
+
+    record = get_library(library_id) if library_id else None
+    if record and record.get("styled"):
+        from src.utils.story_library_bake import bake_and_append_clips
+
+        if progress_callback:
+            progress_callback({
+                "stage": "baking",
+                "current": current,
+                "total": total,
+                "message": f"Đang bake video {current}/{total} theo hiệu ứng thư viện...",
+            })
+        return bake_and_append_clips(
+            library_id,
+            clips,
+            extra_tags=tags,
+            source_type=source_type,
+            session_id=session_id,
+        )
+    return add_clips_to_library(clips, source_type, tags, library_id=library_id)
 
 
 def add_clips_to_library(
@@ -436,7 +522,11 @@ def download_from_links(
         clips = split_into_clips(dest_path)
         if clips:
             clip_tags = [source_type, f"session:{session_id}", *(tags or [])]
-            added = add_clips_to_library(clips, source_type, clip_tags, library_id=library_id)
+            added = _ingest_clips(
+                clips, source_type, clip_tags, library_id=library_id,
+                session_id=session_id, progress_callback=progress_callback,
+                current=idx + 1, total=total,
+            )
             all_added.extend(added)
 
     if progress_callback:
@@ -479,7 +569,11 @@ def download_from_provider_items(
                 "message": f"Downloading {provider} video {idx + 1}/{total}: {video_id}",
             })
 
-        download_url = _resolve_provider_download_url(provider, video_id)
+        # Ưu tiên URL download đã có sẵn từ kết quả search để tránh gọi lại
+        # API resolve từng video (nguyên nhân chính gây 429 rate limit).
+        download_url = str(item.get("downloadUrl") or "").strip()
+        if not download_url:
+            download_url = _resolve_provider_download_url(provider, video_id)
         if not download_url:
             logger.warning(f"Skipping unresolvable {provider} video: {video_id}")
             continue
@@ -500,7 +594,11 @@ def download_from_provider_items(
         clips = split_into_clips(dest_path)
         if clips:
             clip_tags = [provider, f"session:{session_id}", *(tags or [])]
-            added = add_clips_to_library(clips, provider, clip_tags, library_id=library_id)
+            added = _ingest_clips(
+                clips, provider, clip_tags, library_id=library_id,
+                session_id=session_id, progress_callback=progress_callback,
+                current=idx + 1, total=total,
+            )
             all_added.extend(added)
 
     if progress_callback:
@@ -561,7 +659,11 @@ def process_local_uploads(
         clips = split_into_clips(dest_path)
         if clips:
             clip_tags = ["local_upload", f"session:{session_id}", *(tags or [])]
-            added = add_clips_to_library(clips, "local_upload", clip_tags, library_id=library_id)
+            added = _ingest_clips(
+                clips, "local_upload", clip_tags, library_id=library_id,
+                session_id=session_id, progress_callback=progress_callback,
+                current=idx + 1, total=total,
+            )
             all_added.extend(added)
 
     if progress_callback:

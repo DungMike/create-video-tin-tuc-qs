@@ -16,7 +16,12 @@ from src.processors.audio_utils import get_audio_duration, validate_audio
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.file_manager import storage_absolute_path, storage_relative_path
 from src.utils.logger import logger
-from src.utils.story_library import load_story_library_index, story_library_root
+from src.utils.story_clip_bag import SharedClipBag
+from src.utils.story_library import (
+    load_story_library_index,
+    resolve_library_id,
+    story_library_root,
+)
 from src.utils.tts_audio import (
     TTSAudioError,
     create_audio_from_google_doc,
@@ -92,8 +97,10 @@ def _load_story_library_index(library_id=None) -> dict:
 class StoryVideoPipelineRunner:
     """Runs the simple story video pipeline for a single story."""
 
-    def __init__(self, story_id: str, config_dict: dict):
+    def __init__(self, story_id: str, config_dict: dict, clip_bag: SharedClipBag | None = None):
         self.story_id = story_id
+        # Deck shared by every video of a batch; None for standalone renders.
+        self.clip_bag = clip_bag
         self.input_type = config_dict.get("input_type", "script_url")
         self.input_value = config_dict.get("input_value", "")
         self.output_name = config_dict.get("output_name", "")
@@ -112,6 +119,10 @@ class StoryVideoPipelineRunner:
         self.subtitle_max_lines = self._coerce_positive_int(
             config_dict.get("subtitle_max_lines"),
             Config.STORY_SUBTITLE_MAX_LINES,
+        )
+        raw_style_overrides = config_dict.get("subtitle_style_overrides")
+        self.subtitle_style_overrides = (
+            dict(raw_style_overrides) if isinstance(raw_style_overrides, dict) else {}
         )
         self._subtitle_ass_path = ""
         self._seg_dur_cache: int | None = None
@@ -388,18 +399,33 @@ class StoryVideoPipelineRunner:
         selected: list[str] = []
         selected_duration = 0.0
 
-        while selected_duration < target_duration:
-            self._raise_if_cancel_requested()
-            shuffled = list(pool)
-            random.shuffle(shuffled)
-            for clip_path, duration in shuffled:
+        if self.clip_bag is not None:
+            # Batch mode: draw without replacement from the deck shared by the
+            # whole batch, so a clip repeats only after the entire pool has
+            # been used at least once (ceil(picks/pool) cap instead of the
+            # unbounded overlap independent shuffles produce).
+            key = SharedClipBag.pool_key(resolve_library_id(self.library_id), self.clip_tags)
+            picked: set[str] = set()
+            while selected_duration < target_duration:
+                self._raise_if_cancel_requested()
+                clip_path, duration = self.clip_bag.draw(key, pool, exclude=picked)
+                picked.add(clip_path)
                 selected.append(clip_path)
                 selected_duration += min(duration, float(segment_duration))
-                if selected_duration >= target_duration:
-                    break
+        else:
+            while selected_duration < target_duration:
+                self._raise_if_cancel_requested()
+                shuffled = list(pool)
+                random.shuffle(shuffled)
+                for clip_path, duration in shuffled:
+                    selected.append(clip_path)
+                    selected_duration += min(duration, float(segment_duration))
+                    if selected_duration >= target_duration:
+                        break
 
+        mode = "shared shuffle-bag" if self.clip_bag is not None else "per-video shuffle"
         logger.info(
-            f"[StoryPipeline:{self.story_id}] Selected {len(selected)} clips, "
+            f"[StoryPipeline:{self.story_id}] Selected {len(selected)} clips ({mode}), "
             f"selected_duration={selected_duration:.1f}s, audio={audio_duration:.1f}s"
         )
         return selected
@@ -513,6 +539,7 @@ class StoryVideoPipelineRunner:
             font_family=self.subtitle_font or Config.STORY_SUBTITLE_DEFAULT_FONT,
             preset_id=self.subtitle_preset or "clean",
             play_res=(width, height),
+            style_overrides=self.subtitle_style_overrides or None,
         )
         ass_path = os.path.abspath(
             os.path.join(_temp_dir(self.story_id), f"subs_{self.story_id}.ass")
@@ -663,6 +690,7 @@ class StoryVideoPipelineRunner:
         from src.utils.story_overlay_packs import get_or_create_story_overlay_pack
         from src.utils.story_tv_noise_overlays import (
             get_active_tv_noise_overlays,
+            overlay_blend_mode,
             processed_abs_path as tv_noise_processed_abs_path,
         )
         from src.utils.waveform_overlays import (
@@ -714,8 +742,14 @@ class StoryVideoPipelineRunner:
         # Precompose only when there are full-frame noise layers to merge. With
         # just the small waveform, a direct overlay is much cheaper than
         # blending a full-frame alpha pack every frame (~4% vs 100% of pixels).
+        # Screen-blend overlays cannot be premerged into an alpha pack (screen
+        # math needs the underlying video), so their presence forces the
+        # direct-chain path.
+        has_screen_noise = any(
+            overlay_blend_mode(record) == "screen" for record, _path in tv_noise_paths
+        )
         pack_path = None
-        if tv_noise_paths:
+        if tv_noise_paths and not has_screen_noise:
             pack_path = get_or_create_story_overlay_pack(
                 tv_noise_paths,
                 waveform_record if waveform_path else None,
@@ -759,14 +793,29 @@ class StoryVideoPipelineRunner:
         if style_filter:
             filter_parts.append(f"[0:v]{style_filter}[styled]")
             chain_label = "[styled]"
-        for index, (_record, _overlay_path) in enumerate(tv_noise_paths):
+        for index, (record, _overlay_path) in enumerate(tv_noise_paths):
             input_index = index + 1
             noise_label = f"tvnoise{index}"
             out_label = f"tvnoiseout{index}"
-            filter_parts.append(f"[{input_index}:v]setpts=PTS-STARTPTS[{noise_label}]")
-            filter_parts.append(
-                f"{chain_label}[{noise_label}]overlay=0:0:format=auto:eof_action=repeat:eval=init[{out_label}]"
-            )
+            if overlay_blend_mode(record) == "screen":
+                opacity = max(
+                    0.0,
+                    min(1.0, float(record.get("opacity") or Config.STORY_TV_NOISE_OPACITY)),
+                )
+                # blend needs matching pixel formats on both inputs.
+                filter_parts.append(
+                    f"[{input_index}:v]setpts=PTS-STARTPTS,format=yuv420p[{noise_label}]"
+                )
+                filter_parts.append(f"{chain_label}format=yuv420p[{noise_label}base]")
+                filter_parts.append(
+                    f"[{noise_label}base][{noise_label}]"
+                    f"blend=all_mode=screen:all_opacity={opacity}:eof_action=repeat[{out_label}]"
+                )
+            else:
+                filter_parts.append(f"[{input_index}:v]setpts=PTS-STARTPTS[{noise_label}]")
+                filter_parts.append(
+                    f"{chain_label}[{noise_label}]overlay=0:0:format=auto:eof_action=repeat:eval=init[{out_label}]"
+                )
             chain_label = f"[{out_label}]"
 
         if waveform_path and waveform_record and waveform_input_index is not None:
@@ -1070,7 +1119,13 @@ class StoryVideoPipelineRunner:
         return None
 
     def _finalize(self, current_video: str) -> str:
-        """Copy the rendered video to final output and clean temp files."""
+        """Copy the rendered video to final output and purge the per-story cache dir.
+
+        The story dir (temp/, renders/, uploaded originals) is pure working cache;
+        the only thing that must survive is progress.json for status polling, and
+        that gets rewritten right after this call by the "completed" progress update,
+        which recreates the dir via _story_dir()'s makedirs.
+        """
         safe_name = self.output_name.strip() if self.output_name else f"story_{self.story_id}"
         safe_name = Path(safe_name).stem
         if not safe_name:
@@ -1086,9 +1141,9 @@ class StoryVideoPipelineRunner:
         shutil.copy2(current_video, final_path)
         logger.info(f"[StoryPipeline:{self.story_id}] Final output: {final_path}")
 
-        temp = _temp_dir(self.story_id)
+        story_dir = _story_dir(self.story_id)
         try:
-            shutil.rmtree(temp, ignore_errors=True)
+            shutil.rmtree(story_dir, ignore_errors=True)
         except OSError:
             pass
 

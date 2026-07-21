@@ -123,15 +123,45 @@ def _target_size() -> tuple[int, int]:
     return int(width), int(height)
 
 
+def overlay_blend_mode(record: dict) -> str:
+    """"alpha" (lumakey + uniform alpha, the default) or "screen" (blended at
+    render time — right for black-background textures: light leaks, dust, bokeh)."""
+    mode = str(record.get("blendMode") or "alpha").strip().lower()
+    return mode if mode in {"alpha", "screen"} else "alpha"
+
+
 def preprocess_tv_noise_overlay(source_path: str, record: dict) -> str:
     overlay_id = str(record["id"])
+    width, height = _target_size()
+    target_fps = max(1, int(Config.TARGET_FPS))
+
+    if overlay_blend_mode(record) == "screen":
+        # Screen blending needs no alpha: just normalize size/fps. Opacity is
+        # applied at render time (blend all_opacity), so it never forces a re-encode.
+        processed_filename = f"{overlay_id}_screen.mp4"
+        output_path = _absolute(processed_filename)
+        filter_str = (
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},"
+            f"fps={target_fps},"
+            "format=yuv420p"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-i", source_path, "-vf", filter_str, "-an",
+            "-c:v", "libx264", "-crf", "18", "-preset", "veryfast", output_path,
+        ]
+        logger.info(f"[StoryTVNoise] Preprocessing screen-blend MP4: {output_path}")
+        if not FFmpegHelper.run_command(cmd):
+            raise RuntimeError("FFmpeg failed to preprocess TV noise overlay.")
+        if not os.path.isfile(output_path):
+            raise RuntimeError("Processed TV noise overlay was not created.")
+        return processed_filename
+
     processed_filename = f"{overlay_id}_alpha.mov"
     output_path = _absolute(processed_filename)
-    width, height = _target_size()
     tolerance = _float_setting(record, "tolerance", Config.STORY_TV_NOISE_TOLERANCE)
     softness = _float_setting(record, "softness", Config.STORY_TV_NOISE_SOFTNESS)
     opacity = _float_setting(record, "opacity", Config.STORY_TV_NOISE_OPACITY)
-    target_fps = max(1, int(Config.TARGET_FPS))
 
     filter_str = (
         f"scale={width}:{height}:force_original_aspect_ratio=increase,"
@@ -185,6 +215,7 @@ def create_tv_noise_overlay(file_storage) -> dict:
             "status": "processing",
             "enabled": True,
             "order": _next_order(overlays),
+            "blendMode": "alpha",
             "opacity": Config.STORY_TV_NOISE_OPACITY,
             "tolerance": Config.STORY_TV_NOISE_TOLERANCE,
             "softness": Config.STORY_TV_NOISE_SOFTNESS,
@@ -215,6 +246,7 @@ def create_tv_noise_placeholder(name: str, source_url: str = "") -> dict:
             "status": "processing",
             "enabled": True,
             "order": _next_order(overlays),
+            "blendMode": "alpha",
             "opacity": Config.STORY_TV_NOISE_OPACITY,
             "tolerance": Config.STORY_TV_NOISE_TOLERANCE,
             "softness": Config.STORY_TV_NOISE_SOFTNESS,
@@ -324,12 +356,23 @@ def update_tv_noise_overlay(overlay_id: str, updates: dict) -> tuple[dict | None
         if not record:
             return None, False
 
+        if "blendMode" in updates and updates["blendMode"] is not None:
+            mode = str(updates["blendMode"]).strip().lower()
+            if mode not in {"alpha", "screen"}:
+                raise ValueError(f"Invalid blendMode: {mode}")
+            if overlay_blend_mode(record) != mode:
+                record["blendMode"] = mode
+                regenerate = True
+
+        # In screen mode the processed file depends on none of these (opacity is
+        # applied at render time), so tweaking them never forces a re-encode.
+        settings_affect_file = overlay_blend_mode(record) != "screen"
         for key in ("opacity", "tolerance", "softness"):
             if key in updates and updates[key] is not None:
                 value = max(0.0, min(1.0, float(updates[key])))
                 if record.get(key) != value:
                     record[key] = value
-                    regenerate = True
+                    regenerate = regenerate or settings_affect_file
 
         if "enabled" in updates:
             record["enabled"] = bool(updates["enabled"])

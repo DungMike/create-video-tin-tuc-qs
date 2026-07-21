@@ -2044,7 +2044,17 @@ def media(relative_path: str):
     normalized = os.path.normpath(relative_path).replace("\\", "/")
     if normalized.startswith(".."):
         abort(404)
-    return send_from_directory(os.path.abspath(Config.STORAGE_DIR), normalized, as_attachment=False)
+    # "output/..." paths live under OUTPUT_DIR, which may be on a different drive
+    # than STORAGE_DIR. Serve them from OUTPUT_DIR; everything else from STORAGE_DIR.
+    if normalized == "output" or normalized.startswith("output/"):
+        base_dir = os.path.abspath(Config.OUTPUT_DIR)
+        sub_path = normalized[len("output"):].lstrip("/")
+    else:
+        base_dir = os.path.abspath(Config.STORAGE_DIR)
+        sub_path = normalized
+    if not sub_path:
+        abort(404)
+    return send_from_directory(base_dir, sub_path, as_attachment=False)
 
 
 @app.route("/", defaults={"path": ""})

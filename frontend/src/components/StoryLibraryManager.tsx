@@ -289,13 +289,16 @@ export function StoryLibraryManager({
     }
   }, [loadLibrary]);
 
-  // Reset view state when switching libraries (skip the initial mount).
-  const didMountRef = useRef(false);
+  // Reset view state ONLY on a genuine switch between two real libraries. Empty
+  // or transient ids (during the library-list load) and no-op re-renders are
+  // ignored, so paginating search results or switching provider tabs never wipes
+  // the in-progress provider selection.
+  const prevLibraryRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!didMountRef.current) {
-      didMountRef.current = true;
-      return;
-    }
+    if (!activeLibraryId) return;
+    const prev = prevLibraryRef.current;
+    prevLibraryRef.current = activeLibraryId;
+    if (prev === null || prev === activeLibraryId) return;
     setPage(1);
     setSelectedTagFilter([]);
     setSelectedProviderVideos({});
@@ -546,7 +549,7 @@ export function StoryLibraryManager({
             libraries={libraries}
             value={activeLibraryId}
             onChange={setActiveLibraryId}
-            onLibrariesChanged={() => void refreshLibraries()}
+            onLibrariesChanged={refreshLibraries}
             manage
             disabled={bulkActionsDisabled}
           />
@@ -633,6 +636,15 @@ export function StoryLibraryManager({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {activeLibrary?.styled ? (
+        <div className="rounded-lg border border-primary/40 bg-primary/5 px-4 py-3 text-sm text-muted-foreground">
+          🎞 Thư viện <span className="font-medium text-foreground">"{activeLibrary.name}"</span> đã được bake
+          {activeLibrary.styleLabel ? ` theo hiệu ứng "${activeLibrary.styleLabel}"` : ""}. Video mới thêm vào sẽ được
+          tự động bake lại {activeLibrary.fullyBaked ? "kèm sóng âm + CTA " : ""}theo đúng hiệu ứng của thư viện để đồng
+          bộ với các clip có sẵn (quá trình xử lý sẽ lâu hơn bình thường).
+        </div>
+      ) : null}
 
       <Tabs defaultValue="pixabay" className="grid min-w-0 gap-3">
         <TabsList className="w-fit">

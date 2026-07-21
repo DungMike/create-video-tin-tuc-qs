@@ -123,6 +123,55 @@ TV_EFFECT_STYLES = [
         "description": "Màu fade kiểu phim hiện đại: đen không sâu hẳn, màu dịu, hạt cực mịn — trung tính, dễ xem dài.",
         "params": {"tone": "fade", "saturation": 0.9, "noise": 4, "vignette": 0.35},
     },
+    # --- Nhom moods ke chuyen mo rong (2026-07) ---
+    {
+        "id": "mystic_fog",
+        "name": "Sương Khói Bí Ẩn",
+        "description": "Lạnh, mềm và mờ ảo như phủ sương — hợp chuyện bí ẩn, creepypasta, tâm linh.",
+        "params": {"tone": "cool", "saturation": 0.8, "contrast": 1.02, "noise": 5, "vignette": 0.6, "soften": 0.5},
+    },
+    {
+        "id": "horror_night",
+        "name": "Kinh Dị Đêm Tối",
+        "description": "Tối, tương phản gắt, viền đen sâu, nhiễu rõ và nhấp nháy chậm — hợp chuyện kinh dị.",
+        "params": {"saturation": 0.75, "contrast": 1.15, "brightness": -0.06, "noise": 10, "vignette": 0.85, "flicker": 0.015, "flickerSpeed": 2.5},
+    },
+    {
+        "id": "pastel_dream",
+        "name": "Giấc Mơ Pastel",
+        "description": "Sáng, màu nhạt và mềm mại — hợp chuyện nhẹ nhàng, chữa lành, thiếu nhi.",
+        "params": {"saturation": 0.8, "contrast": 0.92, "brightness": 0.06, "gamma": 1.05, "noise": 3, "vignette": 0.2, "soften": 0.6},
+    },
+    {
+        "id": "film_8mm",
+        "name": "Phim 8mm",
+        "description": "Phim gia đình 8mm: màu vintage, hạt dày, viền tối và chớp sáng chậm — hợp hồi ký, ký ức xa.",
+        "params": {"tone": "vintage", "saturation": 0.85, "contrast": 1.04, "noise": 14, "vignette": 0.6, "flicker": 0.018, "flickerSpeed": 2},
+    },
+    {
+        "id": "digital_glitch",
+        "name": "Glitch Kỹ Thuật Số",
+        "description": "Chroma lệch mạnh, scanline dày, nhấp nháy nhanh — hợp sci-fi, chuyện công nghệ, analog horror.",
+        "params": {"saturation": 1.05, "contrast": 1.08, "chromaShift": 6, "noise": 6, "scanlines": 0.15, "vignette": 0.3, "flicker": 0.05, "flickerSpeed": 12},
+    },
+    {
+        "id": "sunset_nostalgia",
+        "name": "Hoàng Hôn Hoài Niệm",
+        "description": "Ấm rực như nắng chiều, viền tối nhẹ — hợp chuyện tình, thanh xuân, tiếc nuối.",
+        "params": {"tone": "warm", "saturation": 1.1, "contrast": 1.03, "brightness": 0.02, "noise": 4, "vignette": 0.45},
+    },
+    {
+        "id": "frozen_blue",
+        "name": "Băng Giá",
+        "description": "Xanh lạnh sâu, màu rút bớt, tương phản nhỉnh — hợp chuyện buồn, cô đơn, mùa đông.",
+        "params": {"tone": "cool", "saturation": 0.7, "contrast": 1.1, "brightness": -0.02, "noise": 5, "vignette": 0.55},
+    },
+    {
+        "id": "sepia_letter",
+        "name": "Sepia Thư Cũ",
+        "description": "Nâu sepia mềm như trang thư ố vàng — hợp đọc thư, nhật ký, chuyện kể lại.",
+        "params": {"tone": "sepia", "contrast": 1.02, "brightness": 0.02, "noise": 5, "vignette": 0.45, "soften": 0.4},
+    },
 ]
 
 _STYLE_PROCESS_WIDTH = 960
