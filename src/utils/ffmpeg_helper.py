@@ -4,6 +4,27 @@ import time
 from src.utils.logger import logger
 from src.config import Config
 
+
+def _boost_priority_if_batch_active(pid: int):
+    """Bump a freshly-spawned ffmpeg process to Above-Normal OS priority while a
+    batch render is active, so it's preferred over any competing process that
+    wasn't (or couldn't be) suspended by RenderResourcePriority. Windows-only;
+    silently no-ops elsewhere or if anything about this fails -- never worth
+    breaking a render over a scheduling hint."""
+    if not Config.RENDER_BOOST_FFMPEG_PRIORITY:
+        return
+    try:
+        from src.utils.render_priority import is_batch_render_active
+
+        if not is_batch_render_active():
+            return
+        import psutil
+
+        psutil.Process(pid).nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+    except Exception:
+        pass
+
+
 class FFmpegHelper:
     @staticmethod
     def run_command(
@@ -77,6 +98,7 @@ class FFmpegHelper:
                 text=True,
                 bufsize=1,
             )
+            _boost_priority_if_batch_active(process.pid)
 
             def _drain_stderr():
                 if not process or not process.stderr:
@@ -152,6 +174,30 @@ class FFmpegHelper:
             return ["-c:v", "h264_nvenc", "-preset", Config.FFMPEG_PRESET, "-b:v", Config.VIDEO_BITRATE]
         else:
             return ["-c:v", "libx264", "-preset", "fast", "-b:v", Config.VIDEO_BITRATE]
+
+    _cuda_overlay_available: bool | None = None
+
+    @classmethod
+    def cuda_overlay_available(cls) -> bool:
+        """True when this FFmpeg build exposes the CUDA overlay filters the GPU
+        overlay pipeline needs (overlay_cuda/scale_cuda/hwupload_cuda). Probed once
+        via `ffmpeg -filters` and cached; safe fallback to False on any error."""
+        if cls._cuda_overlay_available is None:
+            required = {"overlay_cuda", "scale_cuda", "hwupload_cuda"}
+            try:
+                result = subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-filters"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=15,
+                )
+                text = f"{result.stdout}\n{result.stderr}"
+                cls._cuda_overlay_available = all(name in text for name in required)
+            except Exception as exc:
+                logger.warning(f"Could not probe ffmpeg for CUDA overlay filters: {exc}")
+                cls._cuda_overlay_available = False
+        return cls._cuda_overlay_available
 
     @staticmethod
     def probe_duration(media_path: str) -> float:

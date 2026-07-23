@@ -1,0 +1,24 @@
+CSV -> F:\CRAWL VIDEO - AUDIO - QS\tests\benchmarks\results\metrics_20260722_155641.csv
+
+=== SCENARIO par10: 2 job(s) -> ['sample_10a', 'sample_10b'] ===
+  submitted sample_10a -> sv-d89c56f1
+  submitted sample_10b -> sv-85c0224a
+  [sv-d89c56f1] -> prepare_audio (5%) @ 15:56:45
+  [sv-85c0224a] -> prepare_audio (5%) @ 15:56:45
+  [sv-d89c56f1] -> select_clips (15%) @ 15:56:46
+  [sv-85c0224a] -> select_clips (15%) @ 15:56:46
+  [sv-d89c56f1] -> render_video (35%) @ 15:56:48
+  [sv-85c0224a] -> render_video (35%) @ 15:56:48
+  [sv-d89c56f1] -> story_overlays (90%) @ 15:58:43
+  [sv-85c0224a] -> story_overlays (90%) @ 15:58:53
+  [sv-d89c56f1] -> None (None%) @ 16:04:00
+  [sv-d89c56f1] -> story_overlays (92.1%) @ 16:04:02
+  [sv-85c0224a] -> finalize (98%) @ 16:14:04
+  [sv-85c0224a] -> completed (100%) @ 16:14:08
+  [sv-d89c56f1] -> completed (100%) @ 16:14:18
+  WALL=1053.6s  RTF=1.14x  (total video 1200s)
+
+=== SCENARIO single30: 1 job(s) -> ['sample_30a'] ===
+  submitted sample_30a -> sv-7d68c90d
+  [sv-7d68c90d] -> prepare_audio (5%) @ 16:14:26
+  [sv-7d68c90d] -> render_video (35%) @ 16:14:28

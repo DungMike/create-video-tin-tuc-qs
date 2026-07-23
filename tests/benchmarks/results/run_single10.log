@@ -1,0 +1,16 @@
+CSV -> F:\CRAWL VIDEO - AUDIO - QS\tests\benchmarks\results\metrics_20260722_154137.csv
+
+=== SCENARIO single10: 1 job(s) -> ['sample_10a'] ===
+  submitted sample_10a -> sv-540571a3
+  [sv-540571a3] -> prepare_audio (5%) @ 15:41:40
+  [sv-540571a3] -> render_video (35%) @ 15:41:42
+  [sv-540571a3] -> story_overlays (90%) @ 15:42:40
+  [sv-540571a3] -> finalize (98%) @ 15:50:48
+  [sv-540571a3] -> completed (100%) @ 15:50:51
+  WALL=550.8s  RTF=1.09x  (total video 600s)
+
+SUMMARY -> F:\CRAWL VIDEO - AUDIO - QS\tests\benchmarks\results\summary_20260722_154137.json
+
+[single10] wall=550.8s rtf=1.09x
+   GPU util mean/max = 9.1/42.0%  ENC 13.8/45.0%  mem 3634.0MB  pow 33.8W  temp 71.0C
+   CPU sys mean/max = 51.2/100.0%  ffmpeg 175.1%  RAM 63.5%

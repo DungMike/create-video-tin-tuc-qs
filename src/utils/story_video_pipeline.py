@@ -6,6 +6,7 @@ Processes one story video: audio -> random 5-second clip sequence -> audio mux -
 import json
 import os
 import random
+import re
 import shutil
 import threading
 from datetime import datetime
@@ -13,6 +14,7 @@ from pathlib import Path
 
 from src.config import Config
 from src.processors.audio_utils import get_audio_duration, validate_audio
+from src.utils.clip_spec_validation import filter_valid_clips
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.file_manager import storage_absolute_path, storage_relative_path
 from src.utils.logger import logger
@@ -84,6 +86,80 @@ def _output_dir() -> str:
     path = os.path.join(Config.OUTPUT_DIR, "story-video")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _overlay_max_concurrent() -> int:
+    """Max overlay-pass ffmpeg processes allowed to run at once, app-wide.
+
+    Defaults to (physical cores - 1) so at least one core stays free for the OS and
+    the per-frame GPU<->CPU handoff. Overriding via OVERLAY_MAX_CONCURRENT wins."""
+    configured = int(getattr(Config, "OVERLAY_MAX_CONCURRENT", 0) or 0)
+    if configured > 0:
+        return configured
+    return max(1, (os.cpu_count() or 2) - 1)
+
+
+# One shared budget of "overlay slots" across the whole process. Every heavy overlay
+# ffmpeg (single-pass or a parallel segment) acquires a slot before running, so batch
+# workers x segments can never oversubscribe the CPU — extras queue instead of thrash.
+_OVERLAY_SLOTS = threading.BoundedSemaphore(_overlay_max_concurrent())
+
+
+def _run_overlay_ffmpeg(cmd: list, **kwargs) -> bool:
+    """Run an overlay-pass ffmpeg while holding one global overlay slot."""
+    with _OVERLAY_SLOTS:
+        return FFmpegHelper.run_command(cmd, **kwargs)
+
+
+_ASS_TS_RE = re.compile(r"^\s*(\d+):(\d\d):(\d\d)\.(\d\d)\s*$")
+
+
+def _parse_ass_ts(value: str) -> float:
+    match = _ASS_TS_RE.match(value)
+    if not match:
+        return 0.0
+    h, m, s, cs = (int(g) for g in match.groups())
+    return h * 3600 + m * 60 + s + cs / 100.0
+
+
+def _fmt_ass_ts(seconds: float) -> str:
+    cs = max(0, int(round(seconds * 100)))
+    h, cs = divmod(cs, 360000)
+    m, cs = divmod(cs, 6000)
+    s, cs = divmod(cs, 100)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def _rebase_ass_file(src_ass: str, start: float, dur: float, out_ass: str) -> None:
+    """Write a copy of `src_ass` whose Dialogue events are shifted to a segment.
+
+    Events are moved by -start, clipped to [0, dur], and dropped when they fall
+    entirely outside the window. Header/style lines are copied verbatim so the
+    burned-in subtitle looks identical to the single-pass render."""
+    with open(src_ass, "r", encoding="utf-8-sig") as handle:
+        lines = handle.readlines()
+
+    out_lines: list[str] = []
+    for line in lines:
+        if not line.startswith("Dialogue:"):
+            out_lines.append(line)
+            continue
+        # Dialogue: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+        body = line[len("Dialogue:"):]
+        fields = body.split(",", 9)
+        if len(fields) < 10:
+            out_lines.append(line)
+            continue
+        new_start = _parse_ass_ts(fields[1]) - start
+        new_end = _parse_ass_ts(fields[2]) - start
+        if new_end <= 0 or new_start >= dur:
+            continue
+        fields[1] = _fmt_ass_ts(max(0.0, new_start))
+        fields[2] = _fmt_ass_ts(min(dur, new_end))
+        out_lines.append("Dialogue:" + ",".join(fields))
+
+    with open(out_ass, "w", encoding="utf-8") as handle:
+        handle.writelines(out_lines)
 
 
 def load_story_progress(story_id: str) -> dict | None:
@@ -388,6 +464,24 @@ class StoryVideoPipelineRunner:
             if duration > 0:
                 valid_clips.append((clip_path, duration))
 
+        # Drop clips whose resolution doesn't match the pipeline target: a base
+        # concatenated from mismatched clips breaks the CUDA-only overlay filter
+        # chain mid-stream (NVDEC hits the parameter change and scale_cuda/
+        # overlay_cuda can't reconfigure -> "Function not implemented"). Excluding
+        # them here just shrinks the pool the random draw below picks from, so a
+        # different clip is used in its place automatically.
+        valid_clips, excluded_clips = filter_valid_clips(
+            story_library_root(self.library_id), valid_clips
+        )
+        if excluded_clips:
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] Excluded {len(excluded_clips)} clip(s) with "
+                f"mismatched resolution/pix_fmt/color tags (expected {Config.TARGET_RESOLUTION} "
+                f"{Config.CLIP_EXPECTED_PIX_FMT}/{Config.CLIP_EXPECTED_COLOR_RANGE}/"
+                f"{Config.CLIP_EXPECTED_COLOR_SPACE}): "
+                f"{excluded_clips[:3]}{' ...' if len(excluded_clips) > 3 else ''}"
+            )
+
         if not valid_clips:
             logger.error(f"[StoryPipeline:{self.story_id}] No valid clips found in story library.")
             return []
@@ -611,7 +705,7 @@ class StoryVideoPipelineRunner:
                 "Dang ap dung song am...",
             )
 
-        ok = FFmpegHelper.run_command(
+        ok = _run_overlay_ffmpeg(
             cmd,
             progress_callback=_progress,
             progress_total_seconds=audio_duration,
@@ -654,16 +748,231 @@ class StoryVideoPipelineRunner:
         """NVDEC decode flags for the base video input (CPU fallback handled by caller)."""
         return ["-hwaccel", "cuda"] if Config.USE_GPU_NVENC else []
 
-    def _ass_filter_suffix(self) -> str:
-        """Subtitle burn-in snippet ("ass=<path>,") chained right before the final format=yuv420p."""
-        if not self._subtitle_ass_path:
+    def _ass_filter_suffix(self, ass_path: str = "") -> str:
+        """Subtitle burn-in snippet ("ass=<path>,") chained right before the final format=yuv420p.
+
+        Defaults to the story's subtitle .ass; pass `ass_path` to burn a per-segment
+        rebased .ass instead (parallel-segment overlay path)."""
+        path = ass_path or self._subtitle_ass_path
+        if not path:
             return ""
         from src.utils.story_subtitles import _list_font_files, ass_filter_path
 
-        ass_value = f"ass={ass_filter_path(self._subtitle_ass_path)}"
+        ass_value = f"ass={ass_filter_path(path)}"
         if _list_font_files(Config.STORY_FONTS_DIR):
             ass_value += f":fontsdir={ass_filter_path(Config.STORY_FONTS_DIR)}"
         return f"{ass_value},"
+
+    def _gpu_overlay_enabled(self) -> bool:
+        """Whether the overlay pass may use the GPU (overlay_cuda) pipeline.
+
+        Requires the feature flag, NVENC enabled, and an FFmpeg build that actually
+        exposes the CUDA overlay filters. Callers additionally exclude passes that
+        need CPU-only filters (screen blend, CPU TV style)."""
+        return (
+            Config.OVERLAY_USE_GPU_PIPELINE
+            and Config.USE_GPU_NVENC
+            and FFmpegHelper.cuda_overlay_available()
+        )
+
+    def _gpu_overlay_tail(self, chain_label: str, ass_path: str = "") -> str:
+        """Closing filter node for a GPU overlay chain.
+
+        With subtitles we must drop back to system memory (no CUDA ass filter):
+        hwdownload -> burn ass on CPU -> yuv420p. Without subtitles the frames stay
+        on the GPU (scale_cuda=format=yuv420p) and feed h264_nvenc directly."""
+        ass_suffix = self._ass_filter_suffix(ass_path)
+        if ass_suffix:
+            return f"{chain_label}hwdownload,format=yuv420p,{ass_suffix}format=yuv420p[v]"
+        return f"{chain_label}scale_cuda=format=yuv420p[v]"
+
+    def _build_story_overlays_gpu_cmd(
+        self,
+        current_video: str,
+        output_path: str,
+        audio_duration: float,
+        tv_noise_paths: list,
+        waveform_path,
+        waveform_record,
+        cta_path,
+        cta_record,
+        *,
+        ss: float | None = None,
+        ass_path: str = "",
+        with_audio: bool = True,
+    ) -> list:
+        """GPU (overlay_cuda) variant of the direct overlay chain.
+
+        Input order mirrors the CPU command (base, tv-noise..., waveform, cta) so the
+        filter input indices line up. Only alpha overlays reach here — screen-blend
+        noise and CPU TV style keep the CPU path (see caller eligibility check).
+
+        For a parallel time-segment, pass `ss` (input seek start), a rebased `ass_path`,
+        and `with_audio=False` (audio is muxed back once after concatenation)."""
+        from src.utils.story_cta_overlay import overlay_position_expr as cta_position_expr
+        from src.utils.waveform_overlays import overlay_position_expr
+
+        cmd = ["ffmpeg", "-y", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+        if ss is not None:
+            cmd.extend(["-ss", str(ss)])
+        cmd.extend(["-i", current_video])
+        for _record, overlay_path in tv_noise_paths:
+            cmd.extend(["-stream_loop", "-1", "-i", overlay_path])
+
+        waveform_input_index = None
+        if waveform_path:
+            waveform_input_index = 1 + len(tv_noise_paths)
+            cmd.extend(["-stream_loop", "-1", "-i", waveform_path])
+
+        cta_input_index = None
+        if cta_path:
+            cta_input_index = 1 + len(tv_noise_paths) + (1 if waveform_path else 0)
+            cmd.extend(["-stream_loop", "-1", "-i", cta_path])
+
+        filter_parts = ["[0:v]scale_cuda=format=yuv420p[base]"]
+        chain_label = "[base]"
+        for index, (_record, _overlay_path) in enumerate(tv_noise_paths):
+            input_index = index + 1
+            noise_label = f"tvnoise{index}"
+            out_label = f"tvnoiseout{index}"
+            filter_parts.append(
+                f"[{input_index}:v]setpts=PTS-STARTPTS,format=yuva420p,hwupload_cuda[{noise_label}]"
+            )
+            filter_parts.append(
+                f"{chain_label}[{noise_label}]overlay_cuda=0:0:eof_action=repeat:eval=init[{out_label}]"
+            )
+            chain_label = f"[{out_label}]"
+
+        if waveform_path and waveform_record and waveform_input_index is not None:
+            x_expr, y_expr = overlay_position_expr(waveform_record)
+            filter_parts.append(
+                f"[{waveform_input_index}:v]setpts=PTS-STARTPTS,format=yuva420p,hwupload_cuda[wave]"
+            )
+            filter_parts.append(
+                f"{chain_label}[wave]overlay_cuda={x_expr}:{y_expr}:eof_action=repeat:eval=init[waveout]"
+            )
+            chain_label = "[waveout]"
+
+        if cta_path and cta_record and cta_input_index is not None:
+            cx_expr, cy_expr = cta_position_expr(cta_record)
+            filter_parts.append(
+                f"[{cta_input_index}:v]setpts=PTS-STARTPTS,format=yuva420p,hwupload_cuda[cta]"
+            )
+            filter_parts.append(
+                f"{chain_label}[cta]overlay_cuda={cx_expr}:{cy_expr}:eof_action=repeat:eval=init[ctaout]"
+            )
+            chain_label = "[ctaout]"
+
+        filter_parts.append(self._gpu_overlay_tail(chain_label, ass_path))
+
+        cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", "[v]"])
+        if with_audio:
+            cmd.extend(["-map", "0:a?"])
+        cmd.extend(["-t", str(audio_duration)])
+        cmd.extend(FFmpegHelper.get_nvenc_flags())
+        if with_audio:
+            cmd.extend(["-c:a", "copy"])
+        else:
+            cmd.append("-an")
+        cmd.extend(["-movflags", "+faststart", output_path])
+        return cmd
+
+    def _apply_story_overlays_gpu_segmented(
+        self,
+        current_video: str,
+        audio_duration: float,
+        tv_noise_paths: list,
+        waveform_path,
+        waveform_record,
+        cta_path,
+        cta_record,
+        segments: int,
+    ) -> str | None:
+        """Run the GPU overlay+subtitle pass as N parallel time-segments, then concat.
+
+        The single-threaded libass subtitle burn is the bottleneck while the GPU sits
+        mostly idle; rendering several segments at once parallelises libass across CPU
+        cores and fills the GPU. Each segment seeks the base (`-ss`) and burns its own
+        rebased .ass; the video-only segments are concatenated and the base audio is
+        muxed back once. Returns the overlay output path, or None to let the caller
+        fall back to the single-pass overlay."""
+        temp = _temp_dir(self.story_id)
+        seg_dur = audio_duration / segments
+        seg_cmds: list[list] = []
+        seg_outputs: list[str] = []
+        for i in range(segments):
+            start = i * seg_dur
+            dur = seg_dur if i < segments - 1 else (audio_duration - start)
+            seg_ass = os.path.join(temp, f"segsub_{i}_{self.story_id}.ass")
+            _rebase_ass_file(self._subtitle_ass_path, start, dur, seg_ass)
+            seg_out = os.path.join(temp, f"segpart_{i}_{self.story_id}.mp4")
+            seg_cmds.append(
+                self._build_story_overlays_gpu_cmd(
+                    current_video, seg_out, dur,
+                    tv_noise_paths, waveform_path, waveform_record, cta_path, cta_record,
+                    ss=start, ass_path=seg_ass, with_audio=False,
+                )
+            )
+            seg_outputs.append(seg_out)
+
+        self._update_progress(
+            "story_overlays", 92,
+            f"Dang ap dung overlay + phu de ({segments} luong song song)...",
+        )
+
+        results: list[bool] = [False] * segments
+
+        def _worker(idx: int):
+            results[idx] = _run_overlay_ffmpeg(
+                seg_cmds[idx],
+                cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+            )
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(segments)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self._raise_if_cancel_requested()
+        if not all(results) or not all(os.path.isfile(path) for path in seg_outputs):
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] A parallel overlay segment failed; "
+                f"falling back to single-pass overlay."
+            )
+            return None
+
+        # Concat the video-only segments (all share codec/params -> stream copy).
+        concat_list = os.path.join(temp, f"segconcat_{self.story_id}.txt")
+        with open(concat_list, "w", encoding="utf-8") as handle:
+            for path in seg_outputs:
+                handle.write(f"file '{os.path.abspath(path).replace(os.sep, '/')}'\n")
+        concat_video = os.path.join(temp, f"segvideo_{self.story_id}.mp4")
+        ok = FFmpegHelper.run_command(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
+             "-c", "copy", "-movflags", "+faststart", concat_video],
+            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+        )
+        if not ok or not os.path.isfile(concat_video):
+            logger.warning(f"[StoryPipeline:{self.story_id}] Overlay segment concat failed.")
+            return None
+
+        # Mux the base audio back onto the concatenated video.
+        output_path = os.path.join(temp, f"story_overlays_{self.story_id}.mp4")
+        ok = FFmpegHelper.run_command(
+            ["ffmpeg", "-y", "-i", concat_video, "-i", current_video,
+             "-map", "0:v:0", "-map", "1:a:0?", "-c", "copy", "-t", str(audio_duration),
+             "-movflags", "+faststart", output_path],
+            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+        )
+        if not ok or not os.path.isfile(output_path):
+            logger.warning(f"[StoryPipeline:{self.story_id}] Overlay segment audio mux failed.")
+            return None
+
+        logger.info(
+            f"[StoryPipeline:{self.story_id}] Applied story overlays via {segments} parallel GPU segments."
+        )
+        return output_path
 
     def _apply_story_overlays(self, current_video: str, audio_duration: float) -> str | None:
         """Overlay TV noise layers and the configured waveform in a single FFmpeg pass."""
@@ -865,23 +1174,81 @@ class StoryVideoPipelineRunner:
                 "Dang ap dung TV noise va song am...",
             )
 
-        ok = FFmpegHelper.run_command(
-            cmd,
-            progress_callback=_progress,
-            progress_total_seconds=audio_duration,
-            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+        use_gpu = (
+            self._gpu_overlay_enabled()
+            and not has_screen_noise
+            and not style_filter
         )
-        if not ok and hwaccel_flags:
-            self._raise_if_cancel_requested()
-            logger.warning(
-                f"[StoryPipeline:{self.story_id}] CUDA decode failed for overlay pass; retrying with CPU decode."
+        ok = False
+
+        # Parallel-segment GPU path: only worthwhile when a subtitle burn (the
+        # single-threaded libass bottleneck) is present on a long-enough clip.
+        segments = max(1, int(Config.OVERLAY_PARALLEL_SEGMENTS))
+        if (
+            use_gpu
+            and self._subtitle_ass_path
+            and segments > 1
+            and audio_duration >= Config.OVERLAY_SEGMENT_MIN_SECONDS
+        ):
+            seg_output = self._apply_story_overlays_gpu_segmented(
+                current_video,
+                audio_duration,
+                tv_noise_paths,
+                waveform_path,
+                waveform_record,
+                cta_path,
+                cta_record,
+                segments,
             )
-            ok = FFmpegHelper.run_command(
-                cmd[:2] + cmd[2 + len(hwaccel_flags):],
+            if seg_output and os.path.isfile(seg_output):
+                return seg_output
+            self._raise_if_cancel_requested()
+            # segmented path bailed; continue to the single-pass overlay below
+
+        if use_gpu:
+            gpu_cmd = self._build_story_overlays_gpu_cmd(
+                current_video,
+                output_path,
+                audio_duration,
+                tv_noise_paths,
+                waveform_path,
+                waveform_record,
+                cta_path,
+                cta_record,
+            )
+            logger.info(
+                f"[StoryPipeline:{self.story_id}] Applying story overlays on GPU (overlay_cuda)."
+            )
+            ok = _run_overlay_ffmpeg(
+                gpu_cmd,
                 progress_callback=_progress,
                 progress_total_seconds=audio_duration,
                 cancel_callback=lambda: is_story_cancel_requested(self.story_id),
             )
+            if not ok:
+                self._raise_if_cancel_requested()
+                logger.warning(
+                    f"[StoryPipeline:{self.story_id}] GPU overlay pass failed; falling back to CPU overlay."
+                )
+
+        if not ok:
+            ok = _run_overlay_ffmpeg(
+                cmd,
+                progress_callback=_progress,
+                progress_total_seconds=audio_duration,
+                cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+            )
+            if not ok and hwaccel_flags:
+                self._raise_if_cancel_requested()
+                logger.warning(
+                    f"[StoryPipeline:{self.story_id}] CUDA decode failed for overlay pass; retrying with CPU decode."
+                )
+                ok = _run_overlay_ffmpeg(
+                    cmd[:2] + cmd[2 + len(hwaccel_flags):],
+                    progress_callback=_progress,
+                    progress_total_seconds=audio_duration,
+                    cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+                )
         if ok and os.path.isfile(output_path):
             return output_path
 
@@ -895,6 +1262,52 @@ class StoryVideoPipelineRunner:
             error="Story overlay pass failed.",
         )
         return None
+
+    def _build_pack_overlay_gpu_cmd(
+        self,
+        current_video: str,
+        output_path: str,
+        audio_duration: float,
+        pack_path: str,
+    ) -> list:
+        """GPU (overlay_cuda) variant of the precomposed alpha-pack overlay.
+
+        Only reached when there is no CPU TV style filter (see caller). The pack is
+        a single alpha layer composited on the base with overlay_cuda."""
+        fps = max(1, int(Config.TARGET_FPS))
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hwaccel",
+            "cuda",
+            "-hwaccel_output_format",
+            "cuda",
+            "-i",
+            current_video,
+            "-stream_loop",
+            "-1",
+            "-i",
+            pack_path,
+        ]
+        filter_parts = [
+            "[0:v]scale_cuda=format=yuv420p[base]",
+            f"[1:v]setpts=N/{fps}/TB,format=yuva420p,hwupload_cuda[pack]",
+            "[base][pack]overlay_cuda=0:0:eof_action=repeat:eval=init[packed]",
+        ]
+        filter_parts.append(self._gpu_overlay_tail("[packed]"))
+        cmd.extend([
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[v]",
+            "-map",
+            "0:a?",
+            "-t",
+            str(audio_duration),
+        ])
+        cmd.extend(FFmpegHelper.get_nvenc_flags())
+        cmd.extend(["-c:a", "copy", "-movflags", "+faststart", output_path])
+        return cmd
 
     def _apply_precomposed_story_overlay(
         self,
@@ -955,23 +1368,45 @@ class StoryVideoPipelineRunner:
                 "Dang ap dung overlay pack...",
             )
 
-        ok = FFmpegHelper.run_command(
-            cmd,
-            progress_callback=_progress,
-            progress_total_seconds=audio_duration,
-            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
-        )
-        if not ok and hwaccel_flags:
-            self._raise_if_cancel_requested()
-            logger.warning(
-                f"[StoryPipeline:{self.story_id}] CUDA decode failed for pack overlay; retrying with CPU decode."
+        use_gpu = self._gpu_overlay_enabled() and not style_filter
+        ok = False
+        if use_gpu:
+            gpu_cmd = self._build_pack_overlay_gpu_cmd(
+                current_video, output_path, audio_duration, pack_path
             )
-            ok = FFmpegHelper.run_command(
-                cmd[:2] + cmd[2 + len(hwaccel_flags):],
+            logger.info(
+                f"[StoryPipeline:{self.story_id}] Applying overlay pack on GPU (overlay_cuda)."
+            )
+            ok = _run_overlay_ffmpeg(
+                gpu_cmd,
                 progress_callback=_progress,
                 progress_total_seconds=audio_duration,
                 cancel_callback=lambda: is_story_cancel_requested(self.story_id),
             )
+            if not ok:
+                self._raise_if_cancel_requested()
+                logger.warning(
+                    f"[StoryPipeline:{self.story_id}] GPU pack overlay failed; falling back to CPU overlay."
+                )
+
+        if not ok:
+            ok = _run_overlay_ffmpeg(
+                cmd,
+                progress_callback=_progress,
+                progress_total_seconds=audio_duration,
+                cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+            )
+            if not ok and hwaccel_flags:
+                self._raise_if_cancel_requested()
+                logger.warning(
+                    f"[StoryPipeline:{self.story_id}] CUDA decode failed for pack overlay; retrying with CPU decode."
+                )
+                ok = _run_overlay_ffmpeg(
+                    cmd[:2] + cmd[2 + len(hwaccel_flags):],
+                    progress_callback=_progress,
+                    progress_total_seconds=audio_duration,
+                    cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+                )
         if ok and os.path.isfile(output_path):
             logger.info(f"[StoryPipeline:{self.story_id}] Applied precomposed overlay pack: {pack_path}")
             return output_path
@@ -1017,7 +1452,7 @@ class StoryVideoPipelineRunner:
                 "Dang ap dung hieu ung TV...",
             )
 
-        ok = FFmpegHelper.run_command(
+        ok = _run_overlay_ffmpeg(
             cmd,
             progress_callback=_progress,
             progress_total_seconds=audio_duration,
@@ -1028,7 +1463,7 @@ class StoryVideoPipelineRunner:
             logger.warning(
                 f"[StoryPipeline:{self.story_id}] CUDA decode failed for TV effect pass; retrying with CPU decode."
             )
-            ok = FFmpegHelper.run_command(
+            ok = _run_overlay_ffmpeg(
                 cmd[:2] + cmd[2 + len(hwaccel_flags):],
                 progress_callback=_progress,
                 progress_total_seconds=audio_duration,
@@ -1087,7 +1522,7 @@ class StoryVideoPipelineRunner:
                 "Dang ghi phu de vao video...",
             )
 
-        ok = FFmpegHelper.run_command(
+        ok = _run_overlay_ffmpeg(
             cmd,
             progress_callback=_progress,
             progress_total_seconds=audio_duration,
@@ -1098,7 +1533,7 @@ class StoryVideoPipelineRunner:
             logger.warning(
                 f"[StoryPipeline:{self.story_id}] CUDA decode failed for subtitle pass; retrying with CPU decode."
             )
-            ok = FFmpegHelper.run_command(
+            ok = _run_overlay_ffmpeg(
                 cmd[:2] + cmd[2 + len(hwaccel_flags):],
                 progress_callback=_progress,
                 progress_total_seconds=audio_duration,

@@ -82,9 +82,53 @@ class Config:
     OVERLAY_NVENC_PRESET = os.getenv("OVERLAY_NVENC_PRESET", "p1")
     # CPU threads for overlay filter pass (0=auto). More threads = faster overlay.
     OVERLAY_CPU_THREADS = int(os.getenv("OVERLAY_CPU_THREADS", "0"))
-    # Use GPU full-pipeline (overlay_cuda): requires FFmpeg libnpp support
-    # Set false if overlay_cuda returns 'Function not implemented'
+    # Use GPU overlay pipeline (overlay_cuda) for the story-video overlay pass.
+    # Needs an FFmpeg build exposing overlay_cuda/scale_cuda/hwupload_cuda; this is
+    # auto-detected at runtime (FFmpegHelper.cuda_overlay_available). Each render
+    # tries the GPU command and falls back to the CPU overlay path if it fails, so
+    # enabling this is safe even on builds/machines without working CUDA filters.
     OVERLAY_USE_GPU_PIPELINE = os.getenv("OVERLAY_USE_GPU_PIPELINE", "false").lower() == "true"
+    # Split the GPU overlay+subtitle pass into N parallel time-segments (concatenated
+    # afterwards). The subtitle burn (libass) is single-threaded and CPU-bound while the
+    # GPU sits mostly idle; running several segments at once parallelises libass across
+    # cores and fills the GPU. Measured ~2x on a 10-min render at 3 segments (GTX 1060).
+    # 1 disables segmentation. Only applied to the GPU overlay path when a subtitle is
+    # present and the audio is at least OVERLAY_SEGMENT_MIN_SECONDS long; any failure
+    # falls back to the single-pass overlay.
+    OVERLAY_PARALLEL_SEGMENTS = int(os.getenv("OVERLAY_PARALLEL_SEGMENTS", "3"))
+    OVERLAY_SEGMENT_MIN_SECONDS = float(os.getenv("OVERLAY_SEGMENT_MIN_SECONDS", "90"))
+    # Global cap on concurrent overlay-pass ffmpeg processes across the whole app
+    # (batch workers x segments). The overlay libass burn is CPU-heavy and single-
+    # threaded; more concurrent overlay processes than CPU cores saturates the CPU and
+    # starves the GPU. 0 = auto (physical cores - 1). Segments/workers beyond the cap
+    # queue rather than thrash.
+    OVERLAY_MAX_CONCURRENT = int(os.getenv("OVERLAY_MAX_CONCURRENT", "0"))
+
+    # Comma-separated process names (e.g. anti-detect browser farm tools) to suspend
+    # for the duration of a story-video BATCH render, so the render gets the CPU
+    # instead of competing with them; they are resumed as soon as the batch ends
+    # (success, failure, or cancel). Empty = feature disabled (nothing suspended).
+    # Chrome Remote Desktop's remoting_host.exe is always excluded regardless of this
+    # list, since suspending a remote-access channel could strand a remote operator.
+    # See src/utils/render_priority.py; escape hatch: tests/benchmarks/resume_all.py.
+    RENDER_SUSPEND_PROCESS_NAMES = os.getenv("RENDER_SUSPEND_PROCESS_NAMES", "")
+    # While a batch render is active, bump spawned ffmpeg processes to Above-Normal
+    # OS scheduling priority so the render is preferred over any process that wasn't
+    # suspended (e.g. one spawned after the last suspend-scan). Windows-only; no-op
+    # elsewhere.
+    RENDER_BOOST_FFMPEG_PRIORITY = os.getenv("RENDER_BOOST_FFMPEG_PRIORITY", "true").lower() == "true"
+
+    # Story-library clips must match ALL of TARGET_RESOLUTION + these exactly (pix_fmt,
+    # color_range, color_space) to be selected for a render. A concatenated base with
+    # mismatched clips can crash the GPU overlay pass mid-stream when NVDEC hits the
+    # boundary (filter-graph "Reconfiguring..." event the static CUDA-only filter chain
+    # can't bridge) -- excluded clips are simply skipped in favor of another from the
+    # pool. Strict by design: defaults are the dominant combo measured on the production
+    # library; clips tagged "unknown" or anything else are excluded, not assumed OK.
+    # See src/utils/clip_spec_validation.py.
+    CLIP_EXPECTED_PIX_FMT = os.getenv("CLIP_EXPECTED_PIX_FMT", "yuv420p")
+    CLIP_EXPECTED_COLOR_RANGE = os.getenv("CLIP_EXPECTED_COLOR_RANGE", "tv")
+    CLIP_EXPECTED_COLOR_SPACE = os.getenv("CLIP_EXPECTED_COLOR_SPACE", "bt709")
 
     # Decor Image Overlay (banner phía dưới video kèm tiêu đề tin)
     DECOR_IMAGE_ENABLED = os.getenv("DECOR_IMAGE_ENABLED", "true").lower() == "true"

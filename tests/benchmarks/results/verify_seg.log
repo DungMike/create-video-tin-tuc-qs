@@ -1,0 +1,27 @@
+2026-07-22 18:04:16,876 - INFO - [StoryPipeline:sv-vgpu18256] Audio file validated: ./storage\story_video\sv-vgpu18256\temp\audio_sample_10a.mp3
+2026-07-22 18:04:17,974 - INFO - [StoryPipeline:sv-vgpu18256] Selected 201 clips (per-video shuffle), selected_duration=603.0s, audio=600.0s
+2026-07-22 18:05:07,677 - INFO - [StoryPipeline:sv-vgpu18256] Subtitle ASS ready: F:\CRAWL VIDEO - AUDIO - QS\storage\story_video\sv-vgpu18256\temp\subs_sv-vgpu18256.ass
+2026-07-22 18:05:07,745 - INFO - [StoryPipeline:sv-vgpu18256] Styled library selected; skipping TV style pass.
+2026-07-22 18:08:00,920 - INFO - [StoryPipeline:sv-vgpu18256] Applied story overlays via 3 parallel GPU segments.
+2026-07-22 18:08:01,332 - INFO - [StoryPipeline:sv-vgpu18256] Final output: F:/THAI/output\story-video\verify_gpu_sample_10a_2.mp4
+2026-07-22 18:08:01,677 - INFO - [StoryPipeline:sv-vgpu18256] Pipeline completed: F:/THAI/output\story-video\verify_gpu_sample_10a_2.mp4
+OVERLAY_USE_GPU_PIPELINE = True
+cuda_overlay_available   = True
+
+=== RESULT ===
+status      : completed
+output      : F:/THAI/output\story-video\verify_gpu_sample_10a_2.mp4
+wall        : 224.9s
+  stage select_clips    :    1.0s
+  stage render_video    :   49.1s
+  stage story_overlays  :  173.7s
+
+GPU during overlay (134 samples):
+  gpu_util mean/max = 19.8/44%
+  enc_util mean/max = 28.7/84%
+  gpu_mem max       = 4685 MB
+
+story_overlays stage = 173.7s  (CPU baseline was ~487s)
+
+OUTPUT OK: F:/THAI/output\story-video\verify_gpu_sample_10a_2.mp4
+  duration=600.000000s size=610MB

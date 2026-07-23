@@ -1,0 +1,4 @@
+Logging batch sb-521aca7d -> F:\CRAWL VIDEO - AUDIO - QS\tests\benchmarks\results\hwlog_sb-521aca7d.csv (every 5.0s). Stop-file: F:\CRAWL VIDEO - AUDIO - QS\tests\benchmarks\results\hwlog_sb-521aca7d.stop
+[22:25:49] stage ->  (%)  status=cancelling  done=1 run=0 pend=0  gpu=24% enc=0% dec=0% mem=4020MB cpu=96.9%
+stop-file seen, exiting.
+CSV -> F:\CRAWL VIDEO - AUDIO - QS\tests\benchmarks\results\hwlog_sb-521aca7d.csv

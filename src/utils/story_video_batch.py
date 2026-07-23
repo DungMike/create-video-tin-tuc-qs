@@ -12,6 +12,7 @@ from datetime import datetime
 
 from src.config import Config
 from src.utils.logger import logger
+from src.utils.render_priority import RenderResourcePriority
 from src.utils.story_clip_bag import SharedClipBag
 from src.utils.story_video_pipeline import (
     StoryVideoPipelineRunner,
@@ -290,14 +291,15 @@ class StoryVideoBatchRunner:
         total = len(self.story_configs)
         self._update_progress("running", 0, f"Bat dau xu ly batch {total} video...")
 
-        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
-            futures = {
-                executor.submit(self._run_single_story, i, config): i
-                for i, config in enumerate(self.story_configs)
-            }
-            for future in as_completed(futures):
-                # _run_single_story never raises, but surface anything unexpected.
-                future.result()
+        with RenderResourcePriority(label=f":{self.batch_id}"):
+            with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+                futures = {
+                    executor.submit(self._run_single_story, i, config): i
+                    for i, config in enumerate(self.story_configs)
+                }
+                for future in as_completed(futures):
+                    # _run_single_story never raises, but surface anything unexpected.
+                    future.result()
 
         completed_count = self.completed_count
         failed_count = self.failed_count
