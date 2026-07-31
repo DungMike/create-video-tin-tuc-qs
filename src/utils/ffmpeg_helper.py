@@ -54,6 +54,7 @@ class FFmpegHelper:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                errors="replace",
                 timeout=timeout,
             )
             if result.returncode != 0:
@@ -96,6 +97,7 @@ class FFmpegHelper:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                errors="replace",
                 bufsize=1,
             )
             _boost_priority_if_batch_active(process.pid)
@@ -212,7 +214,10 @@ class FFmpegHelper:
             media_path,
         ]
         try:
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            result = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, errors="replace", check=True,
+            )
             return float(result.stdout.strip())
         except Exception as exc:
             logger.warning(f"Could not probe duration for {media_path}: {exc}")

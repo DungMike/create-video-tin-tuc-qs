@@ -102,7 +102,11 @@ def probe_clip_spec(path: str) -> dict | None:
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=" + ",".join(fields),
              "-of", "default=noprint_wrappers=1:nokey=1", path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            # errors="replace": a stray non-UTF-8 byte in ffprobe's stderr (seen on
+            # sources carrying cp1252 metadata) otherwise kills the reader thread and
+            # loses the probe for an otherwise fine file.
+            text=True, errors="replace", timeout=15,
         )
         lines = [line for line in result.stdout.splitlines() if line.strip()]
         if len(lines) != len(fields):
@@ -125,6 +129,88 @@ def _matches_expected(spec: dict | None, expected: dict) -> bool:
     return all(spec.get(key) == value for key, value in expected.items())
 
 
+def matches_expected_spec(spec: dict | None) -> bool:
+    """True when a probed spec matches `expected_spec()` on every field."""
+    return _matches_expected(spec, expected_spec())
+
+
+_SPEC_FIELDS = ("w", "h", "pix_fmt", "color_range", "color_space")
+
+
+def probe_specs_cached(
+    library_dir: str,
+    paths: list[str],
+    *,
+    max_workers: int = 8,
+) -> dict[str, dict | None]:
+    """Probed spec per path, reusing the per-library on-disk cache.
+
+    An unreadable/missing file maps to None. Newly probed entries are written back
+    to the cache (path + mtime + schema-version keyed) so the next caller — a
+    render's `filter_valid_clips` or a normalize scan — pays nothing for them.
+    """
+    lock = _cache_lock(library_dir)
+    with lock:
+        cache = _load_cache(library_dir)
+
+    specs: dict[str, dict | None] = {}
+    to_probe: list[tuple[str, float]] = []
+    for path in paths:
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            specs[path] = None
+            continue
+        entry = cache.get(path)
+        if entry and entry.get("mtime") == mtime and entry.get("schema") == _CACHE_SCHEMA_VERSION:
+            cached_spec = {key: entry[key] for key in _SPEC_FIELDS if key in entry}
+            specs[path] = cached_spec if len(cached_spec) == len(_SPEC_FIELDS) else None
+        else:
+            to_probe.append((path, mtime))
+
+    if to_probe:
+        def _probe_one(item: tuple[str, float]):
+            path, mtime = item
+            return path, mtime, probe_clip_spec(path)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for path, mtime, spec in executor.map(_probe_one, to_probe):
+                specs[path] = spec
+                cache[path] = {
+                    "schema": _CACHE_SCHEMA_VERSION,
+                    "mtime": mtime,
+                    "ok": _matches_expected(spec, expected_spec()),
+                    **(spec or {}),
+                }
+
+        with lock:
+            _save_cache(library_dir, cache)
+
+    return specs
+
+
+def store_spec(library_dir: str, path: str, spec: dict | None):
+    """Record a freshly written clip's spec in the cache.
+
+    Called after a clip is re-encoded in place (normalize): without it the render's
+    next scan would re-probe every repaired clip just to learn what we already know.
+    """
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return
+    lock = _cache_lock(library_dir)
+    with lock:
+        cache = _load_cache(library_dir)
+        cache[path] = {
+            "schema": _CACHE_SCHEMA_VERSION,
+            "mtime": mtime,
+            "ok": _matches_expected(spec, expected_spec()),
+            **(spec or {}),
+        }
+        _save_cache(library_dir, cache)
+
+
 def filter_valid_clips(
     library_dir: str,
     candidates: list[tuple[str, float]],
@@ -139,48 +225,14 @@ def filter_valid_clips(
     (kept_candidates, excluded_absolute_paths). Uses a per-library on-disk cache
     (path + mtime + schema-version keyed) so unchanged clips are never re-probed.
     """
-    expected = expected_spec()
-    lock = _cache_lock(library_dir)
-    with lock:
-        cache = _load_cache(library_dir)
-
-    ok_by_path: dict[str, bool] = {}
-    to_probe: list[tuple[str, float]] = []
-    for path, _duration in candidates:
-        try:
-            mtime = os.path.getmtime(path)
-        except OSError:
-            ok_by_path[path] = False
-            continue
-        entry = cache.get(path)
-        if entry and entry.get("mtime") == mtime and entry.get("schema") == _CACHE_SCHEMA_VERSION:
-            ok_by_path[path] = bool(entry.get("ok"))
-        else:
-            to_probe.append((path, mtime))
-
-    if to_probe:
-        def _probe_one(item: tuple[str, float]):
-            path, mtime = item
-            spec = probe_clip_spec(path)
-            return path, mtime, spec, _matches_expected(spec, expected)
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for path, mtime, spec, ok in executor.map(_probe_one, to_probe):
-                ok_by_path[path] = ok
-                cache[path] = {
-                    "schema": _CACHE_SCHEMA_VERSION,
-                    "mtime": mtime,
-                    "ok": ok,
-                    **(spec or {}),
-                }
-
-        with lock:
-            _save_cache(library_dir, cache)
+    specs = probe_specs_cached(
+        library_dir, [path for path, _duration in candidates], max_workers=max_workers
+    )
 
     kept: list[tuple[str, float]] = []
     excluded: list[str] = []
     for path, duration in candidates:
-        if ok_by_path.get(path, False):
+        if matches_expected_spec(specs.get(path)):
             kept.append((path, duration))
         else:
             excluded.append(path)

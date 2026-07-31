@@ -6,6 +6,7 @@ import { EmptyCard } from "@/components/empty-card";
 import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
 import { StoryLibraryManager } from "@/components/StoryLibraryManager";
+import { StoryLibraryNormalizePanel } from "@/components/StoryLibraryNormalizePanel";
 import { TopNav } from "@/components/top-nav";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -305,6 +306,9 @@ export function StoryVideoSettingsPage() {
   const [isGeneratingNoiseDemo, setIsGeneratingNoiseDemo] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Bumped after a normalize run so the clip grid remounts and re-reads the
+  // re-encoded files instead of showing browser-cached copies.
+  const [libraryRefreshKey, setLibraryRefreshKey] = useState(0);
 
   const selected = useMemo(
     () => overlays.find((overlay) => overlay.id === selectedId) ?? overlays.find((overlay) => overlay.isDefault),
@@ -1319,13 +1323,18 @@ export function StoryVideoSettingsPage() {
       </PageSection>
 
       <PageSection>
+        <StoryLibraryNormalizePanel onNormalized={() => setLibraryRefreshKey((current) => current + 1)} />
+      </PageSection>
+
+      <PageSection>
         <div className="mb-4 space-y-1">
-          <h2 className="text-base font-semibold text-foreground">Thu vien clip 5 giay</h2>
+          <h2 className="text-base font-semibold text-foreground">Thu vien clip</h2>
           <p className="text-sm text-muted-foreground">
-            Upload video nguon hoac nhap link Pixabay/Pexels de he thong tai ve va cat thanh clip 5 giay dung chung cho Story Video.
+            Upload video nguon hoac nhap link Pixabay/Pexels de he thong tai ve, cat thanh clip ngan va chuan hoa ve
+            dung dinh dang render dung chung cho Story Video.
           </p>
         </div>
-        <StoryLibraryManager showBulkDeleteActions />
+        <StoryLibraryManager key={libraryRefreshKey} showBulkDeleteActions />
       </PageSection>
     </AppShell>
   );

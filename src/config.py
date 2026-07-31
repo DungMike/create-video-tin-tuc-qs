@@ -104,15 +104,15 @@ class Config:
     # queue rather than thrash.
     OVERLAY_MAX_CONCURRENT = int(os.getenv("OVERLAY_MAX_CONCURRENT", "0"))
 
-    # Comma-separated process names (e.g. anti-detect browser farm tools) to suspend
-    # for the duration of a story-video BATCH render, so the render gets the CPU
-    # instead of competing with them; they are resumed as soon as the batch ends
-    # (success, failure, or cancel). Empty = feature disabled (nothing suspended).
-    # Chrome Remote Desktop's remoting_host.exe is always excluded regardless of this
-    # list, since suspending a remote-access channel could strand a remote operator.
+    # Comma-separated process names (e.g. anti-detect browser farm tools) that a batch
+    # render may suspend to reclaim the CPU. Only takes effect when a batch is started
+    # with optimize mode ON (per-batch toggle); they are resumed as soon as that batch
+    # ends (success, failure, or cancel). Empty = nothing to suspend even in optimize
+    # mode. Chrome Remote Desktop's remoting_host.exe is always excluded regardless of
+    # this list, since suspending a remote-access channel could strand a remote operator.
     # See src/utils/render_priority.py; escape hatch: tests/benchmarks/resume_all.py.
     RENDER_SUSPEND_PROCESS_NAMES = os.getenv("RENDER_SUSPEND_PROCESS_NAMES", "")
-    # While a batch render is active, bump spawned ffmpeg processes to Above-Normal
+    # In an optimize-mode batch render, bump spawned ffmpeg processes to Above-Normal
     # OS scheduling priority so the render is preferred over any process that wasn't
     # suspended (e.g. one spawned after the last suspend-scan). Windows-only; no-op
     # elsewhere.
@@ -129,6 +129,11 @@ class Config:
     CLIP_EXPECTED_PIX_FMT = os.getenv("CLIP_EXPECTED_PIX_FMT", "yuv420p")
     CLIP_EXPECTED_COLOR_RANGE = os.getenv("CLIP_EXPECTED_COLOR_RANGE", "tv")
     CLIP_EXPECTED_COLOR_SPACE = os.getenv("CLIP_EXPECTED_COLOR_SPACE", "bt709")
+    # Primaries/transfer aren't part of the render's exclusion check, but every clip
+    # written by src/utils/clip_canonical.py is tagged with them so the whole library
+    # carries one identical VUI. See src/utils/clip_canonical.py.
+    CLIP_EXPECTED_COLOR_PRIMARIES = os.getenv("CLIP_EXPECTED_COLOR_PRIMARIES", "bt709")
+    CLIP_EXPECTED_COLOR_TRC = os.getenv("CLIP_EXPECTED_COLOR_TRC", "bt709")
 
     # Decor Image Overlay (banner phía dưới video kèm tiêu đề tin)
     DECOR_IMAGE_ENABLED = os.getenv("DECOR_IMAGE_ENABLED", "true").lower() == "true"
@@ -193,9 +198,16 @@ class Config:
     # --- Story Video ---
     PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "")
     PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
-    STORY_CLIP_DURATION = int(os.getenv("STORY_CLIP_DURATION", "5"))
+    # Length of one library clip / one render segment. Downloads are cut into clips
+    # of exactly this length, and the render trims each clip to it (concat outpoint),
+    # so a library built at 3s and a render at 3s stay in lockstep. A library can
+    # override it via its own `clipDuration` (see story_library.library_clip_duration).
+    STORY_CLIP_DURATION = int(os.getenv("STORY_CLIP_DURATION", "3"))
     STORY_LIBRARY_DIR = os.path.join(STORAGE_DIR, "story_library")
     STORY_VIDEO_DIR = os.path.join(STORAGE_DIR, "story_video")
+    # Intro-video library: short opening clips prepended to each batch video.
+    # Each intro is normalized to the pipeline's canonical output spec on upload.
+    STORY_INTRO_DIR = os.path.join(STORY_VIDEO_DIR, "intros")
     STORY_OVERLAY_PACK_DIR = os.path.join(STORAGE_DIR, "story_overlay_packs")
     STORY_OVERLAY_PRECOMPOSE_ENABLED = os.getenv("STORY_OVERLAY_PRECOMPOSE_ENABLED", "true").lower() == "true"
     STORY_OVERLAY_PACK_DURATION_SECONDS = int(os.getenv("STORY_OVERLAY_PACK_DURATION_SECONDS", "80"))

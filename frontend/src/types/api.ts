@@ -571,6 +571,13 @@ export interface StoryLibrary {
   clipDuration?: number;
   waveformLabel?: string;
   ctaLabel?: string;
+  // Bake state, carried on the library so a paused bake can be resumed from the
+  // library list even after the server restarted. A paused library is usable —
+  // it just holds fewer clips than its source until the bake finishes.
+  bakeStatus?: StoryLibraryBakeStatus;
+  bakeJobId?: string;
+  bakeCompleted?: number;
+  bakeTotal?: number;
 }
 
 export interface BakeStoryLibraryRequest {
@@ -590,18 +597,34 @@ export interface BakeStoryLibraryResponse {
   targetLibraryId: string;
 }
 
+export type StoryLibraryBakeStatus =
+  | "pending"
+  | "running"
+  | "pausing"
+  | "paused"
+  | "cancelling"
+  | "completed"
+  | "partial"
+  | "cancelled"
+  | "failed";
+
 export interface StoryLibraryBakeJob {
   jobId: string;
-  status: "pending" | "running" | "cancelling" | "completed" | "partial" | "cancelled" | "failed";
+  status: StoryLibraryBakeStatus;
   sourceLibraryId: string;
   targetLibraryId: string;
   targetName: string;
   styleId: string;
   styleLabel: string;
+  /** Clips in the whole source library — stable across pause/resume. */
   total: number;
+  /** Clips baked so far, including earlier runs of the same job. */
   completed: number;
+  /** Clips left in the current run. */
+  remaining?: number;
   failed: number;
   percent: number;
+  resumed?: boolean;
   message: string;
   error?: string;
   startedAt: string;
@@ -611,6 +634,23 @@ export interface StoryLibraryBakeJob {
 export interface StoryLibrariesResponse {
   libraries: StoryLibrary[];
   defaultLibraryId: string;
+}
+
+// Intro clips prepended to the front of each batch video.
+export interface StoryIntro {
+  id: string;
+  name: string;
+  relativePath: string;
+  duration: number;
+  createdAt: string;
+}
+
+export interface StoryIntrosResponse {
+  intros: StoryIntro[];
+}
+
+export interface StoryIntroMutationResponse {
+  intro: StoryIntro;
 }
 
 export interface CreateStoryLibraryRequest {
@@ -677,6 +717,46 @@ export interface StoryLibraryStats {
   totalClips: number;
   totalDuration: number;
   bySource: Record<string, number>;
+  clipDurationSeconds: number;
+}
+
+export interface StoryLibraryNormalizeCombo {
+  spec: string;
+  count: number;
+}
+
+export interface StoryLibraryNormalizeLibraryScan {
+  libraryId: string;
+  name: string;
+  totalClips: number;
+  mismatchedClips: number;
+  combos: StoryLibraryNormalizeCombo[];
+}
+
+export interface StoryLibraryNormalizeScan {
+  expected: string;
+  libraries: StoryLibraryNormalizeLibraryScan[];
+  totalClips: number;
+  mismatchedClips: number;
+}
+
+export interface StoryLibraryNormalizeJob {
+  jobId: string;
+  status: "pending" | "running" | "cancelling" | "completed" | "partial" | "cancelled" | "failed";
+  libraryIds: string[];
+  expected: string;
+  total: number;
+  completed: number;
+  failed: number;
+  percent: number;
+  message: string;
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface StartStoryLibraryNormalizeResponse {
+  jobId: string;
+  total: number;
 }
 
 export type StoryLibraryBulkDeleteRequest =
@@ -867,6 +947,9 @@ export interface CreateStoryBatchRequest {
   items: CreateStoryBatchItem[];
   sharedConfig: {
     libraryId?: string;
+    introId?: string;
+    /** Optimize mode: suspend competing apps + boost ffmpeg priority for this batch. */
+    optimizeMode?: boolean;
     clipTags?: string[];
     crtSettings?: CRTSettings;
     waveformOverlayId?: string;

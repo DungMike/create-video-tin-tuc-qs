@@ -5,6 +5,7 @@ import { EmptyCard } from "@/components/empty-card";
 import { PaginationBar } from "@/components/pagination-bar";
 import { StatusAlert } from "@/components/status-alert";
 import { StoryLibraryBakeDialog } from "@/components/StoryLibraryBakeDialog";
+import { StoryLibraryResumeBake } from "@/components/StoryLibraryResumeBake";
 import { StoryLibrarySelect } from "@/components/StoryLibrarySelect";
 import {
   AlertDialog,
@@ -592,7 +593,7 @@ export function StoryLibraryManager({
           ) : null}
           {stats ? (
             <span className="text-sm text-muted-foreground">
-              {totalClips} clips | {Math.round(stats.totalDuration)}s total
+              {totalClips} clips | {Math.round(stats.totalDuration)}s total | clip moi cat {stats.clipDurationSeconds}s
             </span>
           ) : null}
         </div>
@@ -636,6 +637,12 @@ export function StoryLibraryManager({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <StoryLibraryResumeBake
+        library={activeLibrary}
+        onChanged={() => void refreshLibraries()}
+        disabled={bulkActionsDisabled}
+      />
 
       {activeLibrary?.styled ? (
         <div className="rounded-lg border border-primary/40 bg-primary/5 px-4 py-3 text-sm text-muted-foreground">

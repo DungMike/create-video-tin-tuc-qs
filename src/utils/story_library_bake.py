@@ -7,7 +7,23 @@ for a styled library. Clips keep their 5s length (no pairing into longer units).
 
 Concurrency mirrors ``StoryVideoBatchRunner``: a daemon thread drives a bounded
 ``ThreadPoolExecutor`` (``Config.STORY_BAKE_MAX_WORKERS``); progress is persisted
-to JSON for UI polling and a ``cancel.requested`` marker stops it.
+to JSON for UI polling and marker files stop it.
+
+Stopping comes in two flavours, because a full bake takes hours and rarely fits
+one idle window:
+
+- **cancel** (``cancel.requested``) — abandon: the partial target library is
+  deleted, nothing is kept.
+- **pause** (``pause.requested``) — park: the target library is kept and stays
+  usable for renders with however many clips it already has. ``resume_bake_job``
+  later bakes only what is missing.
+
+Resume needs no bookkeeping of its own: a baked clip keeps the *source clip's
+id*, so "what is left" is exactly the source ids absent from the target index.
+That is only true because finished clips are appended to that index every
+``_CHECKPOINT_EVERY`` clips instead of once at the end — which is also what makes
+a half-baked library renderable and what limits the loss from a hard crash to the
+last checkpoint.
 """
 
 import os
@@ -17,15 +33,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from src.config import Config
+from src.utils.clip_canonical import canonical_output_args, canonical_video_filter
+from src.utils.clip_spec_validation import probe_clip_spec
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.logger import logger
 from src.utils.story_library import (
+    _index_lock,
     delete_library,
     load_story_library_index,
     save_story_library_index,
+    set_library_metadata,
     story_library_root,
 )
 from src.utils.story_video_pipeline import _load_json, _save_json
+
+# Sentinel: a clip that was skipped because a pause/cancel arrived, not one that
+# failed. Kept distinct so draining the queue never inflates the error count.
+_STOPPED = "__stopped__"
 
 
 def _utc_now() -> str:
@@ -49,9 +73,16 @@ def _run_ffmpeg_with_fallback(cmd: list, hwaccel_len: int, cancel_cb) -> bool:
 
 
 def _style_only_cmd(src_path: str, out_path: str, style_filter: str, hwaccel: list) -> list:
+    """Bake the style, then land on the canonical clip spec.
+
+    Without the canonical tail a bake inherits whatever color tags the source clip
+    carried, so an off-spec source produced an off-spec baked clip and the render
+    excluded both copies. See src/utils/clip_canonical.py.
+    """
     cmd = ["ffmpeg", "-y", *hwaccel, "-i", src_path,
-           "-vf", f"{style_filter},format=yuv420p", "-an"]
+           "-vf", canonical_video_filter(probe_clip_spec(src_path), prefix=style_filter), "-an"]
     cmd.extend(FFmpegHelper.get_nvenc_flags())
+    cmd.extend(canonical_output_args())
     cmd.extend(["-movflags", "+faststart", out_path])
     return cmd
 
@@ -70,6 +101,18 @@ def _bake_cancel_path(job_id: str) -> str:
     return os.path.join(_bake_dir(job_id), "cancel.requested")
 
 
+def _bake_pause_path(job_id: str) -> str:
+    return os.path.join(_bake_dir(job_id), "pause.requested")
+
+
+# States a job can no longer be steered out of.
+TERMINAL_BAKE_STATUSES = {"completed", "failed", "cancelled"}
+# States a paused/interrupted job can be resumed from. "partial" and "failed"
+# are included so a run that hit errors can be retried without redoing the clips
+# that already succeeded.
+RESUMABLE_BAKE_STATUSES = {"paused", "pausing", "partial", "failed", "interrupted"}
+
+
 def load_bake_progress(job_id: str) -> dict | None:
     return _load_json(_bake_progress_path(job_id))
 
@@ -78,12 +121,28 @@ def is_bake_cancel_requested(job_id: str) -> bool:
     return os.path.isfile(_bake_cancel_path(job_id))
 
 
+def is_bake_pause_requested(job_id: str) -> bool:
+    return os.path.isfile(_bake_pause_path(job_id))
+
+
+def is_bake_stop_requested(job_id: str) -> bool:
+    """Either kind of stop. Workers use this; only the finish path tells them apart."""
+    return is_bake_cancel_requested(job_id) or is_bake_pause_requested(job_id)
+
+
+def _clear_marker(path: str):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def request_bake_cancel(job_id: str) -> dict | None:
-    """Persist a cancellation request so the running bake job stops."""
+    """Stop the job and DISCARD its target library (see request_bake_pause to keep it)."""
     progress = load_bake_progress(job_id)
     if not progress:
         return None
-    if progress.get("status") not in {"completed", "failed", "partial", "cancelled"}:
+    if progress.get("status") not in TERMINAL_BAKE_STATUSES:
         with open(_bake_cancel_path(job_id), "w", encoding="utf-8") as file_obj:
             file_obj.write(_utc_now())
         progress["status"] = "cancelling"
@@ -93,13 +152,39 @@ def request_bake_cancel(job_id: str) -> dict | None:
     return progress
 
 
+def request_bake_pause(job_id: str) -> dict | None:
+    """Stop the job but KEEP everything baked so far.
+
+    The target library stays registered and usable — every clip already written
+    is in its index — and ``resume_bake_job`` picks up exactly what is missing.
+    """
+    progress = load_bake_progress(job_id)
+    if not progress:
+        return None
+    if progress.get("status") not in TERMINAL_BAKE_STATUSES | {"paused"}:
+        with open(_bake_pause_path(job_id), "w", encoding="utf-8") as file_obj:
+            file_obj.write(_utc_now())
+        progress["status"] = "pausing"
+        progress["message"] = "Đang tạm dừng, chờ các clip đang xử lý hoàn tất..."
+        progress["updatedAt"] = _utc_now()
+        _save_json(_bake_progress_path(job_id), progress)
+    return progress
+
+
 class StoryLibraryBakeRunner:
     """Bakes a TV style (style-only) into a new target library.
 
     The target library is created synchronously by the route (so duplicate-name
-    errors surface immediately). On cancellation or a total failure the runner
-    deletes the partial target library so no broken library lingers.
+    errors surface immediately). Cancelling deletes the partial target library;
+    pausing keeps it — see the module docstring.
+
+    Baked clips are appended to the target index every ``_CHECKPOINT_EVERY``
+    clips rather than once at the end, so a paused (or crashed) job leaves a
+    library that is immediately usable for renders, and ``resume_bake_job`` can
+    tell what is left purely by diffing ids against that index.
     """
+
+    _CHECKPOINT_EVERY = 100
 
     def __init__(
         self,
@@ -124,9 +209,25 @@ class StoryLibraryBakeRunner:
         self._max_workers = max(1, int(Config.STORY_BAKE_MAX_WORKERS))
         self.completed_count = 0
         self.failed_count = 0
+        self.stopped_count = 0
+        self._pending_records: list[dict] = []
 
         assets = load_story_library_index(source_library_id).get("assets", [])
+        # Anything already in the target index is done: a fresh bake sees an empty
+        # index and takes everything, a resumed one takes only the remainder.
+        self._already_baked = {
+            str(a.get("id") or "")
+            for a in load_story_library_index(target_library_id).get("assets", [])
+            if a.get("id")
+        }
+        # Frozen count of what earlier runs finished. `_already_baked` keeps growing
+        # as checkpoints land, so it must never be added to `completed_count` (which
+        # already counts those same clips) -- that double-counts every checkpointed
+        # clip and reports >100%.
+        self._baseline_baked = len(self._already_baked)
+        self.source_total = len([a for a in assets if a.get("id")])
         self._items = self._build_items(list(assets))
+        self.resumed = bool(self._already_baked)
 
         self.progress = {
             "jobId": job_id,
@@ -137,10 +238,14 @@ class StoryLibraryBakeRunner:
             "targetName": target_name,
             "styleId": style_id,
             "styleLabel": style_label,
-            "total": len(self._items),
-            "completed": 0,
+            # `total`/`completed` count the WHOLE library across every run, so a
+            # resumed job continues the same progress bar instead of restarting at 0.
+            "total": self.source_total,
+            "completed": self._baseline_baked,
+            "remaining": len(self._items),
             "failed": 0,
-            "percent": 0,
+            "percent": round(min(100, self._baseline_baked / max(1, self.source_total) * 100), 1),
+            "resumed": self.resumed,
             "message": "Chờ xử lý...",
             "startedAt": _utc_now(),
             "updatedAt": _utc_now(),
@@ -148,31 +253,40 @@ class StoryLibraryBakeRunner:
         self._save_progress()
 
     def _build_items(self, assets: list[dict]) -> list[dict]:
-        """One work item per source clip — each 5s clip is baked style-only,
-        keeping its own id (no pairing into longer units)."""
-        return [{"out_id": str(a.get("id") or ""), "srcs": [a]} for a in assets if a.get("id")]
+        """One work item per source clip still missing from the target library."""
+        return [
+            {"out_id": str(a.get("id") or ""), "srcs": [a]}
+            for a in assets
+            if a.get("id") and str(a.get("id")) not in self._already_baked
+        ]
 
     def _save_progress(self):
         with self._lock:
             self.progress["updatedAt"] = _utc_now()
             _save_json(_bake_progress_path(self.job_id), self.progress)
 
+    def _baked_total(self) -> int:
+        """Clips this library has baked overall: earlier runs plus the current one."""
+        return self._baseline_baked + self.completed_count
+
     def _emit_progress(self, *, status: str | None = None, message: str | None = None):
         with self._lock:
             total = self.progress["total"] or 1
-            finished = self.completed_count + self.failed_count
-            self.progress["completed"] = self.completed_count
+            done = self._baked_total()
+            self.progress["completed"] = done
             self.progress["failed"] = self.failed_count
-            self.progress["percent"] = round(min(100, max(0, (finished / total) * 100)), 1)
+            self.progress["remaining"] = max(0, len(self._items) - self.completed_count
+                                             - self.failed_count - self.stopped_count)
+            self.progress["percent"] = round(min(100, max(0, (done / total) * 100)), 1)
             if status:
                 self.progress["status"] = status
             elif is_bake_cancel_requested(self.job_id):
                 self.progress["status"] = "cancelling"
+            elif is_bake_pause_requested(self.job_id):
+                self.progress["status"] = "pausing"
             else:
                 self.progress["status"] = "running"
-            self.progress["message"] = message or (
-                f"Đã bake {finished}/{self.progress['total']} clip..."
-            )
+            self.progress["message"] = message or f"Đã bake {done}/{total} clip..."
             self.progress["updatedAt"] = _utc_now()
             _save_json(_bake_progress_path(self.job_id), self.progress)
 
@@ -180,8 +294,9 @@ class StoryLibraryBakeRunner:
         thread = threading.Thread(target=self._run, daemon=True)
         thread.start()
         logger.info(
-            f"[StoryBake:{self.job_id}] Started baking {len(self._items)} clips "
-            f"(style-only, style={self.style_id}, "
+            f"[StoryBake:{self.job_id}] "
+            f"{'Resuming' if self.resumed else 'Started'} bake: {len(self._items)} clip(s) "
+            f"remaining of {self.source_total} (style={self.style_id}, "
             f"source={self.source_library_id} -> {self.target_library_id}, "
             f"max_workers={self._max_workers})."
         )
@@ -198,10 +313,15 @@ class StoryLibraryBakeRunner:
             cmd, hwaccel_len, lambda: is_bake_cancel_requested(self.job_id)
         )
 
-    def _bake_one(self, item: dict) -> dict | None:
-        """Bake one 5s clip style-only. Returns the new asset record or None."""
-        if is_bake_cancel_requested(self.job_id):
-            return None
+    def _bake_one(self, item: dict) -> dict | None | str:
+        """Bake one clip style-only.
+
+        Returns the new asset record, ``None`` on failure, or ``_STOPPED`` when a
+        pause/cancel is in flight — the caller must not count a stopped clip as a
+        failure, otherwise draining a 30k-item queue reports 30k "errors".
+        """
+        if is_bake_stop_requested(self.job_id):
+            return _STOPPED
 
         out_id = item["out_id"]
         srcs = [a for a in item["srcs"] if a]
@@ -230,14 +350,52 @@ class StoryLibraryBakeRunner:
             "styled_from": self.source_library_id,
         }
 
+    def _flush_records(self, *, force: bool = False):
+        """Append finished clips to the target index (the checkpoint).
+
+        Everything written here is immediately renderable, which is what makes a
+        paused library usable and a resume able to skip what is done.
+        """
+        with self._lock:
+            if not self._pending_records:
+                return
+            if not force and len(self._pending_records) < self._CHECKPOINT_EVERY:
+                return
+            records, self._pending_records = self._pending_records, []
+
+        try:
+            with _index_lock(self.target_library_id):
+                index = load_story_library_index(self.target_library_id)
+                index.setdefault("assets", []).extend(records)
+                save_story_library_index(index, self.target_library_id)
+            with self._lock:
+                self._already_baked.update(str(r["id"]) for r in records)
+        except Exception as exc:  # noqa: BLE001 - keep the clips, retry next checkpoint
+            logger.error(
+                f"[StoryBake:{self.job_id}] Checkpoint failed ({len(records)} clip(s) "
+                f"held for the next flush): {exc}"
+            )
+            with self._lock:
+                self._pending_records = records + self._pending_records
+
     def _run(self):
         if not self._items:
-            self._finish_failed("Thư viện nguồn không có clip nào để bake.")
+            if self._already_baked:
+                self._sync_library_state("completed")
+                self._emit_progress(
+                    status="completed",
+                    message=f"Thư viện đã bake đủ {self._baseline_baked} clip.",
+                )
+            else:
+                self._finish_failed("Thư viện nguồn không có clip nào để bake.")
             return
 
-        self._emit_progress(status="running", message="Bắt đầu bake...")
+        self._emit_progress(
+            status="running",
+            message="Tiếp tục bake..." if self.resumed else "Bắt đầu bake...",
+        )
+        self._sync_library_state("running")
 
-        results: dict[int, dict] = {}
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
             futures = {executor.submit(self._bake_one, item): idx for idx, item in enumerate(self._items)}
             for future in as_completed(futures):
@@ -248,12 +406,18 @@ class StoryLibraryBakeRunner:
                     logger.error(f"[StoryBake:{self.job_id}] Unit {idx} raised: {exc}", exc_info=True)
                     record = None
                 with self._lock:
+                    if record is _STOPPED:
+                        self.stopped_count += 1
+                        continue
                     if record is not None:
-                        results[idx] = record
+                        self._pending_records.append(record)
                         self.completed_count += 1
                     else:
                         self.failed_count += 1
+                self._flush_records()
                 self._emit_progress()
+
+        self._flush_records(force=True)
 
         if is_bake_cancel_requested(self.job_id):
             self._cleanup_target()
@@ -261,24 +425,52 @@ class StoryLibraryBakeRunner:
             logger.info(f"[StoryBake:{self.job_id}] Cancelled; partial library removed.")
             return
 
-        if not results:
+        if is_bake_pause_requested(self.job_id):
+            done = self._baked_total()
+            self._sync_library_state("paused")
+            self._emit_progress(
+                status="paused",
+                message=(
+                    f"Đã tạm dừng ở {done}/{self.source_total} clip. "
+                    "Thư viện dùng được ngay; bấm Tiếp tục để bake nốt."
+                ),
+            )
+            logger.info(
+                f"[StoryBake:{self.job_id}] Paused at {done}/{self.source_total}; "
+                f"target library kept."
+            )
+            return
+
+        if not self._already_baked:
             self._cleanup_target()
             self._finish_failed("Bake thất bại cho toàn bộ clip.")
             return
 
-        ordered = [results[idx] for idx in sorted(results)]
-        save_story_library_index({"assets": ordered}, self.target_library_id)
-
         status = "completed" if self.failed_count == 0 else "partial"
         message = (
-            f"Bake hoàn tất: {self.completed_count} clip"
+            f"Bake hoàn tất: {self._baked_total()}/{self.source_total} clip"
             + (f", {self.failed_count} lỗi." if self.failed_count else ".")
         )
+        self._sync_library_state(status)
         self._emit_progress(status=status, message=message)
         logger.info(
-            f"[StoryBake:{self.job_id}] Finished: completed={self.completed_count}, "
+            f"[StoryBake:{self.job_id}] Finished: baked={self._baked_total()}, "
             f"failed={self.failed_count}, target={self.target_library_id}"
         )
+
+    def _sync_library_state(self, status: str):
+        """Mirror bake state onto the library record so the UI can offer Resume
+        for a job whose runner is long gone (e.g. after an app restart)."""
+        try:
+            set_library_metadata(
+                self.target_library_id,
+                bakeJobId=self.job_id,
+                bakeStatus=status,
+                bakeCompleted=self._baked_total(),
+                bakeTotal=self.source_total,
+            )
+        except Exception as exc:  # noqa: BLE001 - metadata is a convenience, not state
+            logger.warning(f"[StoryBake:{self.job_id}] Could not update library state: {exc}")
 
     def _cleanup_target(self):
         try:
@@ -294,6 +486,48 @@ class StoryLibraryBakeRunner:
             self.progress["updatedAt"] = _utc_now()
             _save_json(_bake_progress_path(self.job_id), self.progress)
         logger.error(f"[StoryBake:{self.job_id}] {message}")
+
+
+def resume_bake_job(job_id: str) -> "StoryLibraryBakeRunner | None":
+    """Restart a paused/partial bake, baking only what the target library lacks.
+
+    Rebuilds the style filter from the target library's own stored metadata, so a
+    resume works even after an app restart when the original runner is gone.
+    Returns None when the job is unknown or not in a resumable state.
+    """
+    from src.processors.crt_effect_processor import _target_resolution
+    from src.utils.story_library import get_library
+
+    progress = load_bake_progress(job_id)
+    if not progress or progress.get("status") not in RESUMABLE_BAKE_STATUSES:
+        return None
+
+    target_library_id = progress.get("targetLibraryId")
+    record = get_library(target_library_id) if target_library_id else None
+    if not record:
+        logger.error(f"[StoryBake:{job_id}] Target library {target_library_id!r} no longer exists.")
+        return None
+
+    width, height = _target_resolution()
+    style_filter = _style_filter_from_record(record, width, height)
+    if not style_filter:
+        logger.error(f"[StoryBake:{job_id}] Could not rebuild style filter for resume.")
+        return None
+
+    _clear_marker(_bake_pause_path(job_id))
+    _clear_marker(_bake_cancel_path(job_id))
+
+    runner = StoryLibraryBakeRunner(
+        job_id,
+        source_library_id=progress.get("sourceLibraryId"),
+        target_library_id=target_library_id,
+        target_name=progress.get("targetName") or record.get("name") or "",
+        style_filter=style_filter,
+        style_id=progress.get("styleId") or record.get("styleId") or "",
+        style_label=progress.get("styleLabel") or record.get("styleLabel") or "",
+    )
+    runner.start_async()
+    return runner
 
 
 # --------------------------------------------------------------------------- #

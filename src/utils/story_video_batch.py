@@ -8,6 +8,7 @@ import os
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from datetime import datetime
 
 from src.config import Config
@@ -98,9 +99,14 @@ class StoryVideoBatchRunner:
     output is identical to sequential rendering — only the scheduling differs.
     """
 
-    def __init__(self, batch_id: str, story_configs: list[dict]):
+    def __init__(self, batch_id: str, story_configs: list[dict], *, optimize_mode: bool = False):
         self.batch_id = batch_id
         self.story_configs = story_configs
+        # Optimize mode (per-batch toggle): when True, suspend configured competing
+        # apps and boost ffmpeg priority for this batch's duration; when False, render
+        # alongside everything else. Defaults off so batches don't freeze other apps
+        # unless the caller opts in.
+        self._optimize_mode = bool(optimize_mode)
         # RLock so a locked section can safely call another locked helper.
         self._lock = threading.RLock()
         self._max_workers = max(1, min(Config.STORY_BATCH_MAX_WORKERS, len(story_configs) or 1))
@@ -123,6 +129,7 @@ class StoryVideoBatchRunner:
             "cancelled": 0,
             "current": 0,
             "percent": 0,
+            "optimizeMode": self._optimize_mode,
             "message": "Cho xu ly...",
             "stories": [],
             "results": [],
@@ -143,6 +150,7 @@ class StoryVideoBatchRunner:
                 "clip_tags": config.get("clip_tags", []),
                 "library_id": config.get("library_id", ""),
                 "voice_id": config.get("voice_id", ""),
+                "intro_video_path": config.get("intro_video_path", ""),
                 "subtitle_path": config.get("subtitle_path", ""),
                 "subtitle_font": config.get("subtitle_font", ""),
                 "subtitle_preset": config.get("subtitle_preset", "clean"),
@@ -291,7 +299,15 @@ class StoryVideoBatchRunner:
         total = len(self.story_configs)
         self._update_progress("running", 0, f"Bat dau xu ly batch {total} video...")
 
-        with RenderResourcePriority(label=f":{self.batch_id}"):
+        # Optimize mode: suspend configured competing apps + boost ffmpeg for the whole
+        # batch; the guard always resumes them on exit (even on exception). Off = a
+        # no-op nullcontext so other apps keep running alongside the render.
+        resource_guard = (
+            RenderResourcePriority(label=f":{self.batch_id}")
+            if self._optimize_mode
+            else nullcontext()
+        )
+        with resource_guard:
             with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
                 futures = {
                     executor.submit(self._run_single_story, i, config): i
