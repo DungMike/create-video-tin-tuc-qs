@@ -16,6 +16,17 @@ tests/test-transcript/*
 !tests/benchmarks/
 !tests/benchmarks/**
 
+# File media nang trong benchmarks (video/audio render ra duoc, khong day len git)
+tests/benchmarks/render_output/*.mp4
+tests/benchmarks/samples/*.mp3
+tests/benchmarks/samples/*.wav
+tests/benchmarks/**/*.mp4
+tests/benchmarks/**/*.mp3
+tests/benchmarks/**/*.wav
+tests/benchmarks/**/*.mkv
+tests/benchmarks/**/*.mov
+tests/benchmarks/**/*.m4a
+
 # Python cache
 __pycache__/
 *.py[cod]

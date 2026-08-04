@@ -186,6 +186,9 @@ class StoryVideoPipelineRunner:
         self.waveform_overlay_id = str(config_dict.get("waveform_overlay_id", "") or "").strip()
         self.tv_effect_style_id = str(config_dict.get("tv_effect_style_id", "") or "").strip()
         self.subtitle_path = str(config_dict.get("subtitle_path", "") or "").strip()
+        # Optional intro clip (already normalized to the canonical output spec on
+        # upload) prepended to the front of the finished video. "" = no intro.
+        self.intro_video_path = str(config_dict.get("intro_video_path", "") or "").strip()
         self.subtitle_font = str(config_dict.get("subtitle_font", "") or "").strip()
         self.subtitle_preset = str(config_dict.get("subtitle_preset", "") or "").strip() or "clean"
         self.subtitle_max_chars_per_line = self._coerce_positive_int(
@@ -337,6 +340,11 @@ class StoryVideoPipelineRunner:
             self._raise_if_cancel_requested()
             if not output_video:
                 return None
+
+            if self.intro_video_path:
+                self._update_progress("story_overlays", 97, "Dang gan intro...")
+                output_video = self._prepend_intro(output_video, audio_duration)
+                self._raise_if_cancel_requested()
 
             self._update_progress("finalize", 98, "Dang hoan tat...")
             self._raise_if_cancel_requested()
@@ -558,6 +566,10 @@ class StoryVideoPipelineRunner:
             "copy",
             "-c:a",
             "aac",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
             "-b:a",
             "192k",
             "-t",
@@ -1552,6 +1564,76 @@ class StoryVideoPipelineRunner:
             error="Subtitle burn-in pass failed.",
         )
         return None
+
+    def _prepend_intro(self, video_path: str, audio_duration: float) -> str:
+        """Prepend the batch intro to the finished video.
+
+        The intro was normalized to the pipeline's canonical spec on upload, so the
+        fast path is a concat-demuxer *stream copy* (I/O only, no re-encode). If that
+        yields a bad/short file (e.g. a codec-parameter mismatch the demuxer can't
+        copy across), fall back to a concat *filter* re-encode which is robust to any
+        source. On total failure the un-prefixed video is returned unchanged.
+        """
+        if not self.intro_video_path or not os.path.isfile(self.intro_video_path):
+            return video_path
+
+        temp = _temp_dir(self.story_id)
+        intro_duration = FFmpegHelper.probe_duration(self.intro_video_path)
+        expected_min = max(0.0, audio_duration + intro_duration - 1.0)
+
+        # Fast path: concat demuxer, stream copy.
+        concat_file = os.path.join(temp, "intro_concat.txt")
+        with open(concat_file, "w", encoding="utf-8") as file_obj:
+            for path in (self.intro_video_path, video_path):
+                clean = os.path.abspath(path).replace("\\", "/").replace("'", "'\\''")
+                file_obj.write(f"file '{clean}'\n")
+
+        copy_out = os.path.join(temp, f"with_intro_{self.story_id}.mp4")
+        copy_cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0", "-i", concat_file,
+            "-c", "copy", "-movflags", "+faststart",
+            copy_out,
+        ]
+        ok = FFmpegHelper.run_command(
+            copy_cmd,
+            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+        )
+        if ok and os.path.isfile(copy_out) and FFmpegHelper.probe_duration(copy_out) >= expected_min:
+            return copy_out
+
+        logger.warning(
+            f"[StoryPipeline:{self.story_id}] Intro stream-copy concat failed or produced a "
+            f"short file; falling back to re-encode."
+        )
+
+        # Fallback: concat filter, re-encode (robust to any intro params).
+        reencode_out = os.path.join(temp, f"with_intro_reencode_{self.story_id}.mp4")
+        reencode_cmd = [
+            "ffmpeg", "-y",
+            "-i", self.intro_video_path,
+            "-i", video_path,
+            "-filter_complex",
+            "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
+            "-map", "[v]", "-map", "[a]",
+        ]
+        reencode_cmd.extend(FFmpegHelper.get_nvenc_flags())
+        reencode_cmd.extend([
+            "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k",
+            "-movflags", "+faststart",
+            reencode_out,
+        ])
+        ok = FFmpegHelper.run_command(
+            reencode_cmd,
+            cancel_callback=lambda: is_story_cancel_requested(self.story_id),
+        )
+        if ok and os.path.isfile(reencode_out):
+            return reencode_out
+
+        logger.error(
+            f"[StoryPipeline:{self.story_id}] Could not prepend intro; using video without intro."
+        )
+        return video_path
 
     def _finalize(self, current_video: str) -> str:
         """Copy the rendered video to final output and purge the per-story cache dir.

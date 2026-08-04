@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import unicodedata
 import uuid
 from datetime import datetime, timezone
@@ -32,6 +33,11 @@ _library_locks_guard = threading.Lock()
 _library_locks: dict[str, threading.RLock] = {}
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+# Mirrors file_manager.remove_file_with_retries: Windows can transiently deny a
+# rename/delete while another handle (often an antivirus scan) is open.
+_INDEX_REPLACE_RETRIES = 5
+_INDEX_REPLACE_DELAY_SECONDS = 0.4
 
 
 # --------------------------------------------------------------------------- #
@@ -138,7 +144,13 @@ def load_story_library_index(library_id=None) -> dict:
 
 
 def save_story_library_index(data: dict, library_id=None):
-    """Save a Story Video library index atomically under that library's lock."""
+    """Save a Story Video library index atomically under that library's lock.
+
+    The final rename is retried: on Windows ``os.replace`` raises WinError 5 when
+    anything holds the target open for even a moment (observed with an antivirus
+    scanning the freshly written .tmp during a bulk import). One transient lock
+    would otherwise lose a whole batch of freshly ingested clips.
+    """
     with _index_lock(library_id):
         root = _library_root(library_id)
         os.makedirs(root, exist_ok=True)
@@ -146,7 +158,21 @@ def save_story_library_index(data: dict, library_id=None):
         tmp_path = index_path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as file_obj:
             json.dump(data, file_obj, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, index_path)
+
+        last_error: OSError | None = None
+        for attempt in range(_INDEX_REPLACE_RETRIES):
+            try:
+                os.replace(tmp_path, index_path)
+                return
+            except PermissionError as exc:
+                last_error = exc
+                if attempt < _INDEX_REPLACE_RETRIES - 1:
+                    time.sleep(_INDEX_REPLACE_DELAY_SECONDS)
+        logger.error(
+            f"Could not replace library index after {_INDEX_REPLACE_RETRIES} "
+            f"attempts: {index_path} | {last_error}"
+        )
+        raise last_error
 
 
 def count_library_clips(library_id=None) -> int:

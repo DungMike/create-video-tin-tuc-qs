@@ -7,3 +7,7 @@ python-dotenv>=1.0
 imagehash>=4.3
 Flask>=3.0
 waitress>=3.0
+# Suspend/resume competing apps + ffmpeg priority boost during a batch render
+# (src/utils/render_priority.py, src/utils/ffmpeg_helper.py).
+psutil>=5.9
+pytest>=8.0

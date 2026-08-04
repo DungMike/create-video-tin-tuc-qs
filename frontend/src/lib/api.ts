@@ -261,8 +261,13 @@ import type {
   StoryLibraryBulkDeleteResponse,
   StoryLibraryDeleteResponse,
   StoryLibraryMutationResponse,
+  StoryLibraryNormalizeJob,
+  StoryLibraryNormalizeScan,
   StoryLibraryResponse,
   StoryLibraryStats,
+  StartStoryLibraryNormalizeResponse,
+  StoryIntroMutationResponse,
+  StoryIntrosResponse,
   StoryProviderVideo,
   UpdateStoryLibraryRequest,
   StoryProviderVideoSearchResponse,
@@ -491,6 +496,33 @@ export async function deleteStoryLibrary(libraryId: string) {
   });
 }
 
+// === Story Video Intros (opening clips) ===
+
+export async function getStoryIntros() {
+  return requestJson<StoryIntrosResponse>("/api/story-video/intros");
+}
+
+export async function uploadStoryIntro(file: File, name: string) {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("name", name);
+  return requestJson<StoryIntroMutationResponse>("/api/story-video/intros", { method: "POST", body: fd });
+}
+
+export async function renameStoryIntro(introId: string, name: string) {
+  return requestJson<StoryIntroMutationResponse>(`/api/story-video/intros/${introId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteStoryIntro(introId: string) {
+  return requestJson<{ deleted: boolean; introId: string }>(`/api/story-video/intros/${introId}`, {
+    method: "DELETE",
+  });
+}
+
 export async function bakeStoryLibrary(payload: BakeStoryLibraryRequest) {
   return requestJson<BakeStoryLibraryResponse>("/api/story-video/library/bake", {
     method: "POST",
@@ -503,9 +535,26 @@ export async function getStoryLibraryBakeJob(jobId: string) {
   return requestJson<StoryLibraryBakeJob>(`/api/story-video/library/bake/${jobId}`);
 }
 
+/** Abandon a bake — the partial target library is deleted. Use pause to keep it. */
 export async function cancelStoryLibraryBakeJob(jobId: string) {
   return requestJson<{ jobId: string; status: string }>(
     `/api/story-video/library/bake/${jobId}/cancel`,
+    { method: "POST" },
+  );
+}
+
+/** Park a bake, keeping every clip baked so far (library stays renderable). */
+export async function pauseStoryLibraryBakeJob(jobId: string) {
+  return requestJson<{ jobId: string; status: string; completed: number; total: number }>(
+    `/api/story-video/library/bake/${jobId}/pause`,
+    { method: "POST" },
+  );
+}
+
+/** Continue a paused bake, processing only the clips the target library lacks. */
+export async function resumeStoryLibraryBakeJob(jobId: string) {
+  return requestJson<{ jobId: string; status: string; completed: number; total: number; remaining: number }>(
+    `/api/story-video/library/bake/${jobId}/resume`,
     { method: "POST" },
   );
 }
@@ -601,6 +650,36 @@ export async function updateStoryClipTags(libraryId: string, clipId: string, tag
 export async function getStoryLibraryStats(libraryId: string) {
   const params = new URLSearchParams({ libraryId });
   return requestJson<StoryLibraryStats>(`/api/story-video/library/stats?${params}`);
+}
+
+// === Story Video Library normalization (canonical clip format) ===
+
+export async function scanStoryLibraryNormalize(libraryId?: string) {
+  const params = new URLSearchParams(libraryId ? { libraryId } : { scope: "all" });
+  return requestJson<StoryLibraryNormalizeScan>(`/api/story-video/library/normalize/scan?${params}`);
+}
+
+export async function startStoryLibraryNormalize(payload: {
+  libraryId?: string;
+  scope?: "all";
+  includeAll?: boolean;
+}) {
+  return requestJson<StartStoryLibraryNormalizeResponse>("/api/story-video/library/normalize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getStoryLibraryNormalizeJob(jobId: string) {
+  return requestJson<StoryLibraryNormalizeJob>(`/api/story-video/library/normalize/${jobId}`);
+}
+
+export async function cancelStoryLibraryNormalizeJob(jobId: string) {
+  return requestJson<{ jobId: string; status: string }>(
+    `/api/story-video/library/normalize/${jobId}/cancel`,
+    { method: "POST" },
+  );
 }
 
 // === CRT Effect ===

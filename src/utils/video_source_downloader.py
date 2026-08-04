@@ -9,11 +9,18 @@ from urllib.parse import urlparse
 import requests
 
 from src.config import Config
+from src.utils.clip_canonical import (
+    canonical_output_args,
+    canonical_video_filter,
+    keyframe_args,
+)
+from src.utils.clip_spec_validation import probe_clip_spec
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.logger import logger
 from src.utils.story_library import (
     _clips_dir,
     _index_lock,
+    library_clip_duration,
     load_story_library_index,
     save_story_library_index,
 )
@@ -50,6 +57,17 @@ def _get_with_rate_limit_retry(url, *, headers=None, params=None, timeout=30):
 def _ensure_dirs(library_id=None):
     os.makedirs(Config.STORY_RAW_DIR, exist_ok=True)
     os.makedirs(_clips_dir(library_id), exist_ok=True)
+
+
+def _target_clip_duration(library_id=None) -> int:
+    """Clip length to cut for the library being filled.
+
+    A library that recorded its own `clipDuration` wins; everything else follows
+    Config.STORY_CLIP_DURATION. Either way new clips come out the same length as
+    the segment the render trims each clip to, so a library that moved from 5s to
+    3s doesn't keep accumulating 5s clips.
+    """
+    return max(1, library_clip_duration(library_id, max(1, int(Config.STORY_CLIP_DURATION))))
 
 
 def _detect_source(url: str) -> str:
@@ -315,34 +333,33 @@ def _resolve_provider_download_url(provider: str, video_id: str) -> str | None:
 
 
 def split_into_clips(video_path: str, clip_duration: int | None = None) -> list[str]:
+    """Cut a downloaded/uploaded source video into canonical library clips.
+
+    The source's own resolution/pix_fmt/color tags are probed first so the encode
+    can convert them (not just relabel them) to the one spec the render accepts —
+    otherwise a Pixabay clip tagged smpte170m or full-range lands in the library
+    and is silently excluded from every render. See src/utils/clip_canonical.py.
+    """
     duration = clip_duration or Config.STORY_CLIP_DURATION
-    target_fps = max(1, int(Config.TARGET_FPS))
-    keyframe_interval = max(1, int(round(duration * target_fps)))
     output_dir = os.path.dirname(video_path)
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     clip_pattern = os.path.join(output_dir, f"{base_name}_clip_%03d.mp4")
-    width, height = Config.TARGET_RESOLUTION.split("x")
-    filter_str = (
-        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},fps={Config.TARGET_FPS},"
-        "format=yuv420p,setsar=1"
-    )
+    source_spec = probe_clip_spec(video_path)
 
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
-        "-vf", filter_str,
+        "-vf", canonical_video_filter(source_spec),
         "-an",
-        "-force_key_frames", f"expr:gte(t,n_forced*{duration})",
-        "-g", str(keyframe_interval),
-        "-keyint_min", str(keyframe_interval),
+        *keyframe_args(duration),
         "-f", "segment",
         "-segment_time", str(duration),
         "-segment_time_delta", "0.05",
         "-reset_timestamps", "1",
     ]
     cmd.extend(FFmpegHelper.get_nvenc_flags())
-    cmd.extend(["-pix_fmt", "yuv420p", clip_pattern])
+    cmd.extend(canonical_output_args())
+    cmd.append(clip_pattern)
 
     if not FFmpegHelper.run_command(cmd):
         logger.error(f"Failed to split video into clips: {video_path}")
@@ -519,7 +536,7 @@ def download_from_links(
                 "message": f"Splitting {idx + 1}/{total} into clips",
             })
 
-        clips = split_into_clips(dest_path)
+        clips = split_into_clips(dest_path, _target_clip_duration(library_id))
         if clips:
             clip_tags = [source_type, f"session:{session_id}", *(tags or [])]
             added = _ingest_clips(
@@ -591,7 +608,7 @@ def download_from_provider_items(
                 "message": f"Splitting {provider} video {idx + 1}/{total} into clips",
             })
 
-        clips = split_into_clips(dest_path)
+        clips = split_into_clips(dest_path, _target_clip_duration(library_id))
         if clips:
             clip_tags = [provider, f"session:{session_id}", *(tags or [])]
             added = _ingest_clips(
@@ -656,7 +673,7 @@ def process_local_uploads(
                 "message": f"Splitting upload {idx + 1}/{total} into clips",
             })
 
-        clips = split_into_clips(dest_path)
+        clips = split_into_clips(dest_path, _target_clip_duration(library_id))
         if clips:
             clip_tags = ["local_upload", f"session:{session_id}", *(tags or [])]
             added = _ingest_clips(

@@ -1,4 +1,4 @@
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, Pause, Play, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,8 @@ import {
   cancelStoryLibraryBakeJob,
   getStoryLibraryBakeJob,
   getTVEffectStyles,
+  pauseStoryLibraryBakeJob,
+  resumeStoryLibraryBakeJob,
 } from "@/lib/api";
 import type {
   StoryLibrary,
@@ -27,7 +29,9 @@ import type {
 } from "@/types/api";
 
 const CUSTOM_OPTION = "__custom__";
-const TERMINAL = new Set(["completed", "partial", "cancelled", "failed"]);
+// States where the job is no longer progressing, so polling stops. "paused" is
+// one of them even though the job can still be resumed.
+const TERMINAL = new Set(["completed", "partial", "cancelled", "failed", "paused"]);
 
 export interface StoryLibraryBakeDialogProps {
   /** The library to bake from (usually the active one). */
@@ -101,7 +105,11 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
           setJob(next);
           if (TERMINAL.has(next.status)) {
             stopPolling();
-            if (next.status === "completed" || next.status === "partial") onBaked?.();
+            // A paused job has already written a usable library, so the parent
+            // must refresh its list just as it would for a finished one.
+            if (next.status === "completed" || next.status === "partial" || next.status === "paused") {
+              onBaked?.();
+            }
           }
         } catch {
           /* keep polling; transient errors are tolerated */
@@ -167,6 +175,30 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
     }
   };
 
+  const handlePause = async () => {
+    if (!job) return;
+    setError(null);
+    try {
+      await pauseStoryLibraryBakeJob(job.jobId);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Không thể tạm dừng bake.");
+    }
+  };
+
+  const handleResume = async () => {
+    if (!job) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await resumeStoryLibraryBakeJob(job.jobId);
+      pollJob(job.jobId);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Không thể tiếp tục bake.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const resetAndClose = () => {
     stopPolling();
     setJob(null);
@@ -175,6 +207,8 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
   };
 
   const jobRunning = job ? !TERMINAL.has(job.status) : false;
+  const jobPaused = job?.status === "paused";
+  const jobResumable = jobPaused || job?.status === "partial" || job?.status === "failed";
 
   return (
     <>
@@ -273,9 +307,17 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
                 />
               </div>
               <p className="text-xs text-muted-foreground">{job.message}</p>
+              {jobPaused ? (
+                <p className="rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
+                  Thư viện <span className="font-medium text-foreground">"{job.targetName}"</span> đã dùng được ngay
+                  với {job.completed} clip đã bake. Bấm <span className="font-medium text-foreground">Tiếp tục</span> bất
+                  cứ lúc nào để bake nốt {job.total - job.completed} clip còn lại — kể cả sau khi khởi động lại app.
+                </p>
+              ) : null}
               {job.status === "failed" ? (
                 <p className="text-sm text-destructive">{job.error || "Bake thất bại."}</p>
               ) : null}
+              {error ? <p className="text-sm text-destructive">{error}</p> : null}
             </div>
           )}
 
@@ -295,13 +337,31 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
                 </Button>
               </>
             ) : jobRunning ? (
-              <Button type="button" variant="outline" onClick={() => void handleCancel()}>
-                Hủy bake
-              </Button>
+              <>
+                <Button type="button" variant="outline" onClick={() => void handleCancel()}>
+                  Hủy bake
+                </Button>
+                <Button type="button" onClick={() => void handlePause()} disabled={job.status === "pausing"}>
+                  {job.status === "pausing" ? (
+                    <Loader2 className="mr-2 size-4 animate-spin" />
+                  ) : (
+                    <Pause className="mr-2 size-4" />
+                  )}
+                  {job.status === "pausing" ? "Đang dừng..." : "Tạm dừng"}
+                </Button>
+              </>
             ) : (
-              <Button type="button" onClick={resetAndClose}>
-                Đóng
-              </Button>
+              <>
+                <Button type="button" variant="outline" onClick={resetAndClose}>
+                  Đóng
+                </Button>
+                {jobResumable ? (
+                  <Button type="button" disabled={busy} onClick={() => void handleResume()}>
+                    {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Play className="mr-2 size-4" />}
+                    Tiếp tục ({job.total - job.completed} clip)
+                  </Button>
+                ) : null}
+              </>
             )}
           </DialogFooter>
         </DialogContent>

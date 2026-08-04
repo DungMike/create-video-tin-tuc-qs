@@ -28,6 +28,7 @@ from src.utils.story_library import (
     ensure_libraries_registry,
     get_default_library_id,
     get_library as get_library_record,
+    library_clip_duration,
     load_libraries,
     load_story_library_index as _load_library_index,
     rename_library,
@@ -36,6 +37,14 @@ from src.utils.story_library import (
     story_library_root,
 )
 from src.utils.story_library import _index_lock as _library_index_lock
+from src.utils.story_intro_library import (
+    IntroLibraryError,
+    add_intro,
+    delete_intro,
+    list_intros,
+    rename_intro,
+    resolve_intro_path,
+)
 
 story_video_bp = Blueprint("story_video", __name__)
 
@@ -625,6 +634,11 @@ def get_library_stats():
         "totalClips": len(assets),
         "totalDuration": round(total_duration, 2),
         "bySource": by_source,
+        # Length new clips are cut to (and the render trims each clip to) for this
+        # library, so the UI never hardcodes "5 giay".
+        "clipDurationSeconds": library_clip_duration(
+            library_id, max(1, int(Config.STORY_CLIP_DURATION))
+        ),
     })
 
 
@@ -650,6 +664,13 @@ def _serialize_library(record: dict, *, with_count: bool = True) -> dict:
         payload["clipDuration"] = record.get("clipDuration")
         payload["waveformLabel"] = record.get("waveformLabel")
         payload["ctaLabel"] = record.get("ctaLabel")
+    # Bake state travels on the library record so a paused job can be resumed from
+    # the library list alone — the runner is gone after an app restart.
+    if record.get("bakeStatus"):
+        payload["bakeStatus"] = record.get("bakeStatus")
+        payload["bakeJobId"] = record.get("bakeJobId")
+        payload["bakeCompleted"] = record.get("bakeCompleted")
+        payload["bakeTotal"] = record.get("bakeTotal")
     if with_count:
         payload["clipCount"] = count_library_clips(record.get("id"))
     return payload
@@ -705,6 +726,64 @@ def delete_library_route(library_id: str):
         status = {
             "library_not_found": 404,
         }.get(exc.code, 400)
+        return _error(exc.message, code=exc.code, status=status)
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# 7c. Intro library CRUD (short opening clips prepended to each batch video)
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/intros", methods=["GET"])
+def list_intros_route():
+    return jsonify({"intros": list_intros()})
+
+
+@story_video_bp.route("/api/story-video/intros", methods=["POST"])
+def create_intro_route():
+    file = request.files.get("file")
+    if file is None or not file.filename:
+        return _error("Chưa chọn file intro.", code="no_file")
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in Config.ALLOWED_VIDEO_EXTENSIONS:
+        return _error("File intro phải là video (mp4/mov/mkv/webm).", code="invalid_intro_format")
+
+    name = str(request.form.get("name", "")).strip()
+    if not name:
+        name = os.path.splitext(file.filename)[0].strip() or "intro"
+
+    upload_dir = os.path.join(Config.STORY_RAW_DIR, f"intro-{str(uuid.uuid4())[:8]}")
+    os.makedirs(upload_dir, exist_ok=True)
+    src_path = os.path.join(upload_dir, secure_filename(file.filename))
+    try:
+        file.save(src_path)
+        record = add_intro(name, src_path)
+    except IntroLibraryError as exc:
+        status = 400 if exc.code in {"missing_name", "invalid_intro_format"} else 422
+        return _error(exc.message, code=exc.code, status=status)
+    finally:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+
+    return jsonify({"intro": record}), 201
+
+
+@story_video_bp.route("/api/story-video/intros/<intro_id>", methods=["PATCH"])
+def rename_intro_route(intro_id: str):
+    data = request.get_json(silent=True) or {}
+    try:
+        record = rename_intro(intro_id, data.get("name", ""))
+    except IntroLibraryError as exc:
+        status = 404 if exc.code == "intro_not_found" else 400
+        return _error(exc.message, code=exc.code, status=status)
+    return jsonify({"intro": record})
+
+
+@story_video_bp.route("/api/story-video/intros/<intro_id>", methods=["DELETE"])
+def delete_intro_route(intro_id: str):
+    try:
+        result = delete_intro(intro_id)
+    except IntroLibraryError as exc:
+        status = 404 if exc.code == "intro_not_found" else 400
         return _error(exc.message, code=exc.code, status=status)
     return jsonify(result)
 
@@ -838,12 +917,147 @@ def get_story_library_bake_job(job_id: str):
 
 @story_video_bp.route("/api/story-video/library/bake/<job_id>/cancel", methods=["POST"])
 def cancel_story_library_bake_job(job_id: str):
+    """Abandon a bake: the partial target library is deleted (see /pause to keep it)."""
     from src.utils.story_library_bake import load_bake_progress, request_bake_cancel
 
     progress = request_bake_cancel(job_id)
     if not progress:
         if not load_bake_progress(job_id):
             return _error("Không tìm thấy tác vụ bake.", code="bake_job_not_found", status=404)
+    return jsonify({"jobId": job_id, "status": (progress or {}).get("status", "unknown")})
+
+
+@story_video_bp.route("/api/story-video/library/bake/<job_id>/pause", methods=["POST"])
+def pause_story_library_bake_job(job_id: str):
+    """Park a bake, keeping everything baked so far.
+
+    The target library stays registered and renderable with the clips it already
+    has; /resume later bakes only the missing ones.
+    """
+    from src.utils.story_library_bake import load_bake_progress, request_bake_pause
+
+    progress = request_bake_pause(job_id)
+    if not progress:
+        if not load_bake_progress(job_id):
+            return _error("Không tìm thấy tác vụ bake.", code="bake_job_not_found", status=404)
+        return _error("Tác vụ bake đã kết thúc.", code="bake_job_finished", status=409)
+    return jsonify({
+        "jobId": job_id,
+        "status": progress.get("status", "unknown"),
+        "completed": progress.get("completed", 0),
+        "total": progress.get("total", 0),
+    })
+
+
+@story_video_bp.route("/api/story-video/library/bake/<job_id>/resume", methods=["POST"])
+def resume_story_library_bake_job(job_id: str):
+    from src.utils.story_library_bake import (
+        RESUMABLE_BAKE_STATUSES,
+        load_bake_progress,
+        resume_bake_job,
+    )
+
+    progress = load_bake_progress(job_id)
+    if not progress:
+        return _error("Không tìm thấy tác vụ bake.", code="bake_job_not_found", status=404)
+    if progress.get("status") not in RESUMABLE_BAKE_STATUSES:
+        return _error(
+            f"Tác vụ đang ở trạng thái '{progress.get('status')}', không thể tiếp tục.",
+            code="bake_not_resumable",
+            status=409,
+        )
+
+    runner = resume_bake_job(job_id)
+    if runner is None:
+        return _error(
+            "Không thể tiếp tục bake (thiếu thư viện đích hoặc thông tin hiệu ứng).",
+            code="bake_resume_failed",
+            status=409,
+        )
+    logger.info(
+        f"[StoryBake] Resumed job={job_id} -> {runner.progress.get('remaining')} clip(s) remaining"
+    )
+    return jsonify({
+        "jobId": job_id,
+        "status": "running",
+        "completed": runner.progress.get("completed", 0),
+        "total": runner.progress.get("total", 0),
+        "remaining": runner.progress.get("remaining", 0),
+    }), 202
+
+
+# ---------------------------------------------------------------------------
+# 7d. Normalize library clips to the canonical spec (fixes the clips every
+#     render logs as "Excluded ... mismatched resolution/pix_fmt/color tags")
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/library/normalize/scan", methods=["GET"])
+def scan_story_library_normalize():
+    from src.utils.story_library_normalize import scan_libraries
+
+    raw_library_id = request.args.get("libraryId")
+    if str(request.args.get("scope", "")).strip() == "all" or raw_library_id is None:
+        return jsonify(scan_libraries())
+
+    library_id, err = _resolve_or_404(raw_library_id)
+    if err:
+        return err
+    return jsonify(scan_libraries([library_id]))
+
+
+@story_video_bp.route("/api/story-video/library/normalize", methods=["POST"])
+def normalize_story_library():
+    from src.utils.story_library_normalize import start_normalize_job
+
+    data = request.get_json(silent=True) or {}
+    include_all = bool(data.get("includeAll"))
+
+    if str(data.get("scope", "")).strip() == "all":
+        library_ids = [lib.get("id") for lib in load_libraries() if lib.get("id")]
+    else:
+        library_id, err = _resolve_or_404(data.get("libraryId"))
+        if err:
+            return err
+        library_ids = [library_id]
+
+    if not library_ids:
+        return _error("Không có thư viện nào để chuẩn hóa.", code="no_libraries")
+
+    for library_id in library_ids:
+        if _has_active_library_session(library_id):
+            return _error(
+                "Thư viện đang được import/upload. Hãy đợi tác vụ hoàn tất rồi chuẩn hóa.",
+                code="library_in_use",
+                status=409,
+            )
+
+    runner = start_normalize_job(library_ids, include_all=include_all)
+    logger.info(
+        f"[StoryNormalize] Started job={runner.job_id} libraries={library_ids} "
+        f"clips={runner.progress.get('total')}"
+    )
+    return jsonify({"jobId": runner.job_id, "total": runner.progress.get("total", 0)}), 202
+
+
+@story_video_bp.route("/api/story-video/library/normalize/<job_id>", methods=["GET"])
+def get_story_library_normalize_job(job_id: str):
+    from src.utils.story_library_normalize import load_normalize_progress
+
+    progress = load_normalize_progress(job_id)
+    if not progress:
+        return _error("Không tìm thấy tác vụ chuẩn hóa.", code="normalize_job_not_found", status=404)
+    return jsonify(progress)
+
+
+@story_video_bp.route("/api/story-video/library/normalize/<job_id>/cancel", methods=["POST"])
+def cancel_story_library_normalize_job(job_id: str):
+    from src.utils.story_library_normalize import (
+        load_normalize_progress,
+        request_normalize_cancel,
+    )
+
+    progress = request_normalize_cancel(job_id)
+    if not progress and not load_normalize_progress(job_id):
+        return _error("Không tìm thấy tác vụ chuẩn hóa.", code="normalize_job_not_found", status=404)
     return jsonify({"jobId": job_id, "status": (progress or {}).get("status", "unknown")})
 
 
@@ -1450,6 +1664,16 @@ def create_story_batch():
 
     shared_subtitle_config = _subtitle_config_from_payload(shared_config)
 
+    # Resolve the (optional) shared intro once for the whole batch. Empty id means
+    # "no intro"; a non-empty id that doesn't resolve is a hard error.
+    intro_id = str(shared_config.get("introId", "") or "").strip()
+    intro_video_path = ""
+    if intro_id:
+        intro_video_path = resolve_intro_path(intro_id)
+        if not intro_video_path:
+            shutil.rmtree(batch_dir, ignore_errors=True)
+            return _error("Intro không tồn tại.", code="intro_not_found", status=404)
+
     # Build story configs
     story_configs = []
     for idx, item in enumerate(items):
@@ -1500,13 +1724,21 @@ def create_story_batch():
             "waveform_overlay_id": str(shared_config.get("waveformOverlayId", "")).strip(),
             "voice_id": str(shared_config.get("voiceId", "")).strip(),
             "subtitle_path": subtitle_path,
+            "intro_video_path": intro_video_path,
             **shared_subtitle_config,
         })
 
-    runner = StoryVideoBatchRunner(batch_id, story_configs)
+    # Optimize mode (per-batch): suspend configured competing apps + boost ffmpeg for
+    # this render. Off by default so batches don't freeze other apps unless requested.
+    optimize_mode = bool(shared_config.get("optimizeMode", False))
+
+    runner = StoryVideoBatchRunner(batch_id, story_configs, optimize_mode=optimize_mode)
     runner.start_async()
 
-    logger.info(f"[StoryVideo] Started batch: batch_id={batch_id}, items={len(story_configs)}")
+    logger.info(
+        f"[StoryVideo] Started batch: batch_id={batch_id}, items={len(story_configs)}, "
+        f"optimize_mode={optimize_mode}"
+    )
     return jsonify({"batchId": batch_id}), 202
 
 
@@ -1630,6 +1862,7 @@ def retry_batch_failed(batch_id: str):
             "clip_tags": s.get("clip_tags", []),
             "library_id": s.get("library_id", ""),
             "voice_id": s.get("voice_id", ""),
+            "intro_video_path": s.get("intro_video_path", ""),
             "subtitle_path": s.get("subtitle_path", ""),
             "subtitle_font": s.get("subtitle_font", ""),
             "subtitle_preset": s.get("subtitle_preset", "clean"),
@@ -1642,7 +1875,9 @@ def retry_batch_failed(batch_id: str):
         })
 
     retry_batch_id = f"{batch_id}-retry"
-    runner = StoryVideoBatchRunner(retry_batch_id, retry_configs)
+    runner = StoryVideoBatchRunner(
+        retry_batch_id, retry_configs, optimize_mode=bool(progress.get("optimizeMode", False))
+    )
     runner.start_async()
 
     logger.info(f"[StoryVideo] Retrying {len(retry_configs)} failed items from batch {batch_id}")
