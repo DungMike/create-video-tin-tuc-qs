@@ -218,7 +218,13 @@ class Config:
     STORY_OVERLAY_PACK_DIR = os.path.join(STORAGE_DIR, "story_overlay_packs")
     STORY_OVERLAY_PRECOMPOSE_ENABLED = os.getenv("STORY_OVERLAY_PRECOMPOSE_ENABLED", "true").lower() == "true"
     STORY_OVERLAY_PACK_DURATION_SECONDS = int(os.getenv("STORY_OVERLAY_PACK_DURATION_SECONDS", "80"))
-    STORY_RAW_DIR = os.path.join(STORAGE_DIR, "story_raw_videos")
+    # Landing area for downloaded/uploaded SOURCE material, before it is cut into
+    # library clips. Cold storage: nothing reads it during a render (the render reads
+    # story_library/<id>/clips/), it only grows as sources are imported, and it is the
+    # single largest thing under STORAGE_DIR. Overridable on its own so the hot render
+    # working set can live on a fast small disk while this stays on a big slow one --
+    # keeping it on the SSD buys no render speed and just consumes the space.
+    STORY_RAW_DIR = os.getenv("STORY_RAW_DIR", os.path.join(STORAGE_DIR, "story_raw_videos"))
     STORY_LIBRARY_PAGE_SIZE = int(os.getenv("STORY_LIBRARY_PAGE_SIZE", "20"))
     # Multiple named clip libraries ("folders"). The Default library's root IS
     # STORY_LIBRARY_DIR itself (no file migration); other libraries live under

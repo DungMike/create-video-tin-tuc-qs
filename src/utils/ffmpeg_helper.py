@@ -1,3 +1,4 @@
+import re
 import subprocess
 import threading
 import time
@@ -170,12 +171,64 @@ class FFmpegHelper:
             return False
 
     @staticmethod
-    def get_nvenc_flags() -> list:
-        """Return base flags for NVENC encoding if configured."""
+    def get_nvenc_flags(preset: str | None = None, bitrate: str | None = None) -> list:
+        """Return base flags for NVENC encoding if configured.
+
+        ``preset`` / ``bitrate`` override FFMPEG_PRESET / VIDEO_BITRATE for a single
+        pass (the story-video overlay pass runs at its own, cheaper settings -- see
+        ``get_overlay_nvenc_flags``). The NVENC ``pN`` preset names are NOT valid
+        libx264 presets, so the software branch deliberately ignores ``preset`` and
+        honours only the bitrate override: forwarding "p1" to libx264 makes ffmpeg
+        abort with "Invalid preset", which would kill every overlay command on a
+        USE_GPU_NVENC=false machine.
+        """
+        video_bitrate = bitrate or Config.VIDEO_BITRATE
         if Config.USE_GPU_NVENC:
-            return ["-c:v", "h264_nvenc", "-preset", Config.FFMPEG_PRESET, "-b:v", Config.VIDEO_BITRATE]
-        else:
-            return ["-c:v", "libx264", "-preset", "fast", "-b:v", Config.VIDEO_BITRATE]
+            return [
+                "-c:v", "h264_nvenc",
+                "-preset", preset or Config.FFMPEG_PRESET,
+                "-b:v", video_bitrate,
+            ]
+        return ["-c:v", "libx264", "-preset", "fast", "-b:v", video_bitrate]
+
+    # NVENC's new-style presets; anything else (e.g. an x264 name like "fast"
+    # pasted into .env) would make every overlay command fail, so it is ignored.
+    _NVENC_PRESET_RE = re.compile(r"^p[1-7]$")
+    # ffmpeg accepts a bare number of bits/s or a K/M suffix. A value it cannot parse
+    # is fatal on BOTH the nvenc and libx264 branches ("Error setting option b"), and
+    # every overlay fallback path rebuilds these same flags -- so a typo here would
+    # fail the render outright rather than degrade it.
+    _BITRATE_RE = re.compile(r"^\d+(\.\d+)?[KkMm]?$")
+
+    @staticmethod
+    def get_overlay_nvenc_flags() -> list:
+        """Encoder flags for the story-video overlay pass.
+
+        The overlay pass is the only stage that re-encodes the whole timeline, and
+        every byte it writes is then re-read and re-written by the segment concat,
+        the audio mux and the final copy on the storage HDD -- which is the measured
+        bottleneck. It therefore runs at OVERLAY_NVENC_PRESET / OVERLAY_OUTPUT_BITRATE
+        instead of the global FFMPEG_PRESET / VIDEO_BITRATE. Blank or malformed
+        values fall back to the globals (previous behaviour).
+        """
+        preset = (Config.OVERLAY_NVENC_PRESET or "").strip()
+        if preset and not FFmpegHelper._NVENC_PRESET_RE.match(preset):
+            logger.warning(
+                f"Ignoring invalid OVERLAY_NVENC_PRESET={preset!r} (expected p1..p7); "
+                f"using FFMPEG_PRESET={Config.FFMPEG_PRESET}."
+            )
+            preset = ""
+        bitrate = (Config.OVERLAY_OUTPUT_BITRATE or "").strip()
+        if bitrate and not FFmpegHelper._BITRATE_RE.match(bitrate):
+            logger.warning(
+                f"Ignoring invalid OVERLAY_OUTPUT_BITRATE={bitrate!r} (expected e.g. 4M, "
+                f"4000k, 4000000); using VIDEO_BITRATE={Config.VIDEO_BITRATE}."
+            )
+            bitrate = ""
+        return FFmpegHelper.get_nvenc_flags(
+            preset=preset or None,
+            bitrate=bitrate or None,
+        )
 
     _cuda_overlay_available: bool | None = None
 

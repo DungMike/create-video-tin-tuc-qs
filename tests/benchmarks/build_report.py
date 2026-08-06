@@ -3,12 +3,19 @@ import csv
 import glob
 import json
 import os
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RES = os.path.join(HERE, "results")
 
+sys.path.insert(0, HERE)
+import disk_probe  # noqa: E402
+
+# Kept in sync with bench.py's Monitor columns. The disk columns are appended from
+# disk_probe rather than spelled out: this list silently dropping them is exactly how
+# the storage bottleneck stayed invisible through the 2026-07-31 CPU/GPU tuning pass.
 METRIC_COLS = ["cpu_pct", "ram_pct", "gpu_util", "enc_util", "dec_util",
-               "gpu_mem_mb", "power_w", "temp_c", "ffmpeg_cpu_pct"]
+               "gpu_mem_mb", "power_w", "temp_c", "ffmpeg_cpu_pct"] + disk_probe.numeric_columns()
 
 
 def hw_from_csv(csv_path, phase):

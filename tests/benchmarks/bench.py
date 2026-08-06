@@ -1,8 +1,13 @@
 """Render performance benchmark for the story-video pipeline.
 
 Submits render jobs through the real HTTP API (POST /api/story-video/create),
-polls progress, and samples GPU (nvidia-smi) + CPU/RAM (psutil) once per second
-into a single time-series CSV. Then computes per-scenario summary stats.
+polls progress, and samples GPU (nvidia-smi) + CPU/RAM + disk I/O (psutil, see
+disk_probe.py) once per second into a single time-series CSV. Then computes
+per-scenario summary stats.
+
+The disk columns are the point of this harness now: the pipeline is I/O bound,
+not CPU/GPU bound, so a run whose gpu_util looks low is explained by
+stor_idle_pct near 0 and a multi-deep stor_queue, not by an idle encoder.
 
 Scenarios (selectable via CLI):
   single10   : 1 x 10-min render
@@ -27,12 +32,29 @@ import psutil
 import requests
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import disk_probe  # noqa: E402
+
 SAMPLES = os.path.join(HERE, "samples")
 OUT = os.path.join(HERE, "results")
 os.makedirs(OUT, exist_ok=True)
 
 API = "http://127.0.0.1:5005"
-LIBRARY_ID = "thai-11-15-ky-uc-vang-507787"
+# Overridable so it stops rotting: the previous hardcoded default
+# ("thai-11-15-ky-uc-vang-507787") no longer exists. Current libraries are
+# "default" (5034 clips, unstyled) and the styled 9538-clip one below.
+LIBRARY_ID = os.getenv("BENCH_LIBRARY_ID", "thu-vien-kenh-26-30-hoang-hon-hoai-niem-8e1165")
+
+
+def _volumes():
+    """(prefix, path) pairs for the disk probe: storage tree + output tree."""
+    try:
+        sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "..")))
+        from src.config import Config
+        return [("stor", Config.STORAGE_DIR), ("out", Config.OUTPUT_DIR)]
+    except Exception:
+        return [("stor", os.getenv("STORAGE_DIR", ".")),
+                ("out", os.getenv("OUTPUT_DIR", "."))]
 
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 CSV_PATH = os.path.join(OUT, f"metrics_{RUN_ID}.csv")
@@ -47,6 +69,14 @@ def now():
 
 def iso(ts):
     return datetime.fromtimestamp(ts, timezone.utc).astimezone().strftime("%H:%M:%S")
+
+
+def _mb(v):
+    """bytes/sec -> MB/s for printing; None (nothing measured) stays 'n/a'."""
+    try:
+        return round(float(v) / 1e6, 1)
+    except (TypeError, ValueError):
+        return "n/a"
 
 
 # --------------------------------------------------------------------------
@@ -67,6 +97,10 @@ class Monitor(threading.Thread):
         self.phase = "idle"
         self.t0 = now()
         self._proc_cache = {}
+        # Disk columns are appended after HEADER so older CSVs stay parseable.
+        self.disk = disk_probe.DiskProbe(_volumes())
+        self.header = list(self.HEADER) + self.disk.header()
+        print(self.disk.describe())
         psutil.cpu_percent(interval=None)  # prime
 
     def set_phase(self, name):
@@ -114,17 +148,18 @@ class Monitor(threading.Thread):
     def run(self):
         with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(self.HEADER)
+            w.writerow(self.header)
             while not self._stop.is_set():
                 t = now()
                 cpu = psutil.cpu_percent(interval=None)
                 vm = psutil.virtual_memory()
                 g = self._gpu()
                 fp, fc = self._ffmpeg()
+                d = self.disk.sample()
                 w.writerow([
                     round(t, 2), round(t - self.t0, 1), self.phase,
                     cpu, vm.percent, round(vm.used / 1e6),
-                    *g, fp, fc,
+                    *g, fp, fc, *d,
                 ])
                 f.flush()
                 # keep ~1s cadence accounting for nvidia-smi latency
@@ -134,6 +169,7 @@ class Monitor(threading.Thread):
     def stop(self):
         self._stop.set()
         self.join(timeout=5)
+        self.disk.close()
 
 
 # --------------------------------------------------------------------------
@@ -243,8 +279,10 @@ def run_scenario(mon, name, samples, video_secs):
 
 def summarize_window(csv_path, t0, t1):
     """Aggregate metric stats for rows within [t0, t1]."""
+    # Disk columns must be listed here too, otherwise the summary silently omits
+    # them even though the CSV has them.
     cols = ["cpu_pct", "ram_pct", "gpu_util", "enc_util", "dec_util",
-            "gpu_mem_mb", "power_w", "temp_c", "ffmpeg_cpu_pct"]
+            "gpu_mem_mb", "power_w", "temp_c", "ffmpeg_cpu_pct"] + disk_probe.numeric_columns()
     data = {c: [] for c in cols}
     n = 0
     with open(csv_path, encoding="utf-8") as f:
@@ -264,9 +302,13 @@ def summarize_window(csv_path, t0, t1):
     for c in cols:
         v = data[c]
         if v:
-            out[c] = {"mean": round(sum(v) / len(v), 1), "max": round(max(v), 1)}
+            # min matters for the disk columns: idle_pct's *minimum* is the
+            # saturation signal (0 = the volume never caught its breath).
+            out[c] = {"mean": round(sum(v) / len(v), 1),
+                      "max": round(max(v), 1),
+                      "min": round(min(v), 1)}
         else:
-            out[c] = {"mean": None, "max": None}
+            out[c] = {"mean": None, "max": None, "min": None}
     return out
 
 
@@ -319,6 +361,14 @@ def main():
               f"mem {hw['gpu_mem_mb']['max']}MB  pow {hw['power_w']['max']}W  temp {hw['temp_c']['max']}C")
         print(f"   CPU sys mean/max = {hw['cpu_pct']['mean']}/{hw['cpu_pct']['max']}%  "
               f"ffmpeg {hw['ffmpeg_cpu_pct']['max']}%  RAM {hw['ram_pct']['max']}%")
+        for p in disk_probe.PREFIXES:
+            rd, wr = hw.get(f"{p}_read_bps", {}), hw.get(f"{p}_write_bps", {})
+            lat, q, idl = hw.get(f"{p}_read_ms_op", {}), hw.get(f"{p}_queue", {}), hw.get(f"{p}_idle_pct", {})
+            print(f"   DISK[{p}] read mean/max = {_mb(rd.get('mean'))}/{_mb(rd.get('max'))} MB/s  "
+                  f"write {_mb(wr.get('mean'))}/{_mb(wr.get('max'))} MB/s  "
+                  f"rlat {lat.get('mean')}/{lat.get('max')} ms  "
+                  f"queue {q.get('mean')}/{q.get('max')}  "
+                  f"idle mean/min {idl.get('mean')}/{idl.get('min')}%")
 
 
 if __name__ == "__main__":

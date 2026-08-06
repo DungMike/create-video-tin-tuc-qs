@@ -267,8 +267,54 @@ class StoryVideoPipelineRunner:
             self.progress["result"]["videoPath"] = video_path
         self._save_progress()
 
+    # Files at the story-dir root that must outlive a purge: progress.json is what the
+    # status API polls, and the cancel marker is what is_story_cancel_requested() reads.
+    _PURGE_KEEP = frozenset({"progress.json", "cancel.requested"})
+
+    def _purge_working_files(self):
+        """Drop the working media left by a run that never reached _finalize().
+
+        On success _finalize() rmtree's the whole story dir, but a failed or cancelled
+        run used to leave renders/ and temp/ behind for good -- multi-GB of dead
+        intermediates accumulating on the render working disk, which is deliberately the
+        small fast one (see STORAGE_DIR in .env). Everything except _PURGE_KEEP goes,
+        while the story dir itself stays so progress.json remains pollable.
+
+        Never raises: this runs in a finally and must not mask the real outcome.
+        """
+        try:
+            story_dir = _story_dir(self.story_id)
+            freed = 0
+            for entry in os.scandir(story_dir):
+                if entry.is_file() and entry.name in self._PURGE_KEEP:
+                    continue
+                try:
+                    if entry.is_dir():
+                        for root, _dirs, files in os.walk(entry.path):
+                            for name in files:
+                                try:
+                                    freed += os.path.getsize(os.path.join(root, name))
+                                except OSError:
+                                    pass
+                        shutil.rmtree(entry.path, ignore_errors=True)
+                    else:
+                        freed += entry.stat().st_size
+                        os.remove(entry.path)
+                except OSError:
+                    pass
+            if freed:
+                logger.info(
+                    f"[StoryPipeline:{self.story_id}] Purged {freed / 1e6:.1f} MB of "
+                    f"working files after an unsuccessful run."
+                )
+        except Exception as exc:
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] Could not purge working files: {exc}"
+            )
+
     def run(self) -> str | None:
         """Main pipeline entry. Returns output video path or None on failure."""
+        completed = False
         try:
             self._raise_if_cancel_requested()
             self._update_progress("prepare_audio", 5, "Dang chuan bi audio...")
@@ -359,6 +405,7 @@ class StoryVideoPipelineRunner:
                 video_path=final_rel_path,
             )
             logger.info(f"[StoryPipeline:{self.story_id}] Pipeline completed: {final_path}")
+            completed = True
             return final_path
 
         except StoryVideoCancelled:
@@ -380,6 +427,11 @@ class StoryVideoPipelineRunner:
                 error=str(exc),
             )
             return None
+        finally:
+            # Runs after the handlers above have written the terminal progress, so the
+            # purge sees (and keeps) the final progress.json rather than racing it.
+            if not completed:
+                self._purge_working_files()
 
     def _prepare_audio(self) -> str | None:
         """Prepare audio from script URL (TTS) or validate uploaded audio file."""
@@ -574,8 +626,6 @@ class StoryVideoPipelineRunner:
             "192k",
             "-t",
             str(audio_duration),
-            "-movflags",
-            "+faststart",
             output_path,
         ]
 
@@ -699,11 +749,11 @@ class StoryVideoPipelineRunner:
             str(audio_duration),
         ]
         cmd.extend(FFmpegHelper.get_nvenc_flags())
+        # No +faststart: this is an intermediate the next ffmpeg step reads, and
+        # faststart costs a full extra read+write pass over a multi-GB file.
         cmd.extend([
             "-c:a",
             "copy",
-            "-movflags",
-            "+faststart",
             output_path,
         ])
 
@@ -881,12 +931,15 @@ class StoryVideoPipelineRunner:
         if with_audio:
             cmd.extend(["-map", "0:a?"])
         cmd.extend(["-t", str(audio_duration)])
-        cmd.extend(FFmpegHelper.get_nvenc_flags())
+        # Overlay-pass encoder settings (OVERLAY_NVENC_PRESET / OVERLAY_OUTPUT_BITRATE):
+        # fewer bytes written here also means fewer bytes re-read and re-written by the
+        # segment concat, the audio mux and the final copy on the storage HDD.
+        cmd.extend(FFmpegHelper.get_overlay_nvenc_flags())
         if with_audio:
             cmd.extend(["-c:a", "copy"])
         else:
             cmd.append("-an")
-        cmd.extend(["-movflags", "+faststart", output_path])
+        cmd.append(output_path)
         return cmd
 
     def _apply_story_overlays_gpu_segmented(
@@ -955,6 +1008,9 @@ class StoryVideoPipelineRunner:
             return None
 
         # Concat the video-only segments (all share codec/params -> stream copy).
+        # No +faststart: this concat output is only ever an input to the audio mux
+        # below and is then deleted, so faststart would just add a full extra
+        # read+write pass over a multi-GB file.
         concat_list = os.path.join(temp, f"segconcat_{self.story_id}.txt")
         with open(concat_list, "w", encoding="utf-8") as handle:
             for path in seg_outputs:
@@ -962,7 +1018,7 @@ class StoryVideoPipelineRunner:
         concat_video = os.path.join(temp, f"segvideo_{self.story_id}.mp4")
         ok = FFmpegHelper.run_command(
             ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
-             "-c", "copy", "-movflags", "+faststart", concat_video],
+             "-c", "copy", concat_video],
             cancel_callback=lambda: is_story_cancel_requested(self.story_id),
         )
         if not ok or not os.path.isfile(concat_video):
@@ -974,7 +1030,7 @@ class StoryVideoPipelineRunner:
         ok = FFmpegHelper.run_command(
             ["ffmpeg", "-y", "-i", concat_video, "-i", current_video,
              "-map", "0:v:0", "-map", "1:a:0?", "-c", "copy", "-t", str(audio_duration),
-             "-movflags", "+faststart", output_path],
+             output_path],
             cancel_callback=lambda: is_story_cancel_requested(self.story_id),
         )
         if not ok or not os.path.isfile(output_path):
@@ -1167,12 +1223,10 @@ class StoryVideoPipelineRunner:
             "-t",
             str(audio_duration),
         ])
-        cmd.extend(FFmpegHelper.get_nvenc_flags())
+        cmd.extend(FFmpegHelper.get_overlay_nvenc_flags())
         cmd.extend([
             "-c:a",
             "copy",
-            "-movflags",
-            "+faststart",
             output_path,
         ])
 
@@ -1317,8 +1371,8 @@ class StoryVideoPipelineRunner:
             "-t",
             str(audio_duration),
         ])
-        cmd.extend(FFmpegHelper.get_nvenc_flags())
-        cmd.extend(["-c:a", "copy", "-movflags", "+faststart", output_path])
+        cmd.extend(FFmpegHelper.get_overlay_nvenc_flags())
+        cmd.extend(["-c:a", "copy", output_path])
         return cmd
 
     def _apply_precomposed_story_overlay(
@@ -1361,12 +1415,10 @@ class StoryVideoPipelineRunner:
             "-t",
             str(audio_duration),
         ]
-        cmd.extend(FFmpegHelper.get_nvenc_flags())
+        cmd.extend(FFmpegHelper.get_overlay_nvenc_flags())
         cmd.extend([
             "-c:a",
             "copy",
-            "-movflags",
-            "+faststart",
             output_path,
         ])
 
@@ -1445,12 +1497,10 @@ class StoryVideoPipelineRunner:
             "-t",
             str(audio_duration),
         ]
-        cmd.extend(FFmpegHelper.get_nvenc_flags())
+        cmd.extend(FFmpegHelper.get_overlay_nvenc_flags())
         cmd.extend([
             "-c:a",
             "copy",
-            "-movflags",
-            "+faststart",
             output_path,
         ])
 
@@ -1515,12 +1565,10 @@ class StoryVideoPipelineRunner:
             "-t",
             str(audio_duration),
         ]
-        cmd.extend(FFmpegHelper.get_nvenc_flags())
+        cmd.extend(FFmpegHelper.get_overlay_nvenc_flags())
         cmd.extend([
             "-c:a",
             "copy",
-            "-movflags",
-            "+faststart",
             output_path,
         ])
 
@@ -1592,7 +1640,7 @@ class StoryVideoPipelineRunner:
         copy_cmd = [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0", "-i", concat_file,
-            "-c", "copy", "-movflags", "+faststart",
+            "-c", "copy",
             copy_out,
         ]
         ok = FFmpegHelper.run_command(
@@ -1620,7 +1668,6 @@ class StoryVideoPipelineRunner:
         reencode_cmd.extend(FFmpegHelper.get_nvenc_flags())
         reencode_cmd.extend([
             "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k",
-            "-movflags", "+faststart",
             reencode_out,
         ])
         ok = FFmpegHelper.run_command(
@@ -1636,12 +1683,21 @@ class StoryVideoPipelineRunner:
         return video_path
 
     def _finalize(self, current_video: str) -> str:
-        """Copy the rendered video to final output and purge the per-story cache dir.
+        """Remux the rendered video to final output and purge the per-story cache dir.
 
         The story dir (temp/, renders/, uploaded originals) is pure working cache;
         the only thing that must survive is progress.json for status polling, and
         that gets rewritten right after this call by the "completed" progress update,
         which recreates the dir via _story_dir()'s makedirs.
+
+        This is also the single place +faststart is applied. Delivery used to be a raw
+        shutil.copy2, so every intermediate had to carry faststart itself just in case
+        it turned out to be the file that got copied out -- and a byte copy preserves
+        moov placement, so that was the only way to ship a progressive file. Paying it
+        here instead costs nothing extra (the copy already read and wrote the whole
+        file), and it lets every stage inside the story dir drop faststart. Each one of
+        those was a full extra read+write pass over a multi-GB file on the storage disk,
+        which is the measured bottleneck of this pipeline.
         """
         safe_name = self.output_name.strip() if self.output_name else f"story_{self.story_id}"
         safe_name = Path(safe_name).stem
@@ -1655,7 +1711,18 @@ class StoryVideoPipelineRunner:
             final_path = os.path.join(_output_dir(), f"{safe_name}_{counter}.mp4")
             counter += 1
 
-        shutil.copy2(current_video, final_path)
+        ok = FFmpegHelper.run_command([
+            "ffmpeg", "-y", "-i", current_video,
+            "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
+            "-movflags", "+faststart", final_path,
+        ])
+        if not ok or not os.path.isfile(final_path):
+            # Never fail a finished render over the moov position: ship it non-progressive.
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] faststart remux failed; "
+                f"falling back to a raw copy (output will not be progressive)."
+            )
+            shutil.copy2(current_video, final_path)
         logger.info(f"[StoryPipeline:{self.story_id}] Final output: {final_path}")
 
         story_dir = _story_dir(self.story_id)

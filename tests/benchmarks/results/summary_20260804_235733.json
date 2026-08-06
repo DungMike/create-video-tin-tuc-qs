@@ -1,0 +1,418 @@
+{
+  "run_id": "20260804_235733",
+  "csv": "C:\\Users\\hiv\\Documents\\Cua Dung\\create-video-tin-tuc-qs\\tests\\benchmarks\\results\\metrics_20260804_235733.csv",
+  "scenarios": [
+    {
+      "name": "single10",
+      "n_jobs": 1,
+      "video_secs_each": 600,
+      "video_secs_total": 600,
+      "wall_s": 56.2,
+      "realtime_factor": 10.68,
+      "t_start": 1785862658.7395096,
+      "t_end": 1785862714.9267788,
+      "jobs": {
+        "sv-d1938c6d": {
+          "sample": "sample_10a",
+          "status": "completed",
+          "stage_times": {
+            "prepare_audio": 1.5,
+            "render_video": 18.3,
+            "story_overlays": 34.8,
+            "finalize": 1.5,
+            "completed": 0.0
+          },
+          "videoPath": "output/story-video/bench_single10_0_20260804_235733.mp4",
+          "error": null
+        }
+      },
+      "hw": {
+        "samples": 57,
+        "cpu_pct": {
+          "mean": 23.5,
+          "max": 38.5,
+          "min": 11.2
+        },
+        "ram_pct": {
+          "mean": 67.8,
+          "max": 69.3,
+          "min": 65.0
+        },
+        "gpu_util": {
+          "mean": 33.3,
+          "max": 61.0,
+          "min": 0.0
+        },
+        "enc_util": {
+          "mean": 27.8,
+          "max": 54.0,
+          "min": 0.0
+        },
+        "dec_util": {
+          "mean": 19.0,
+          "max": 38.0,
+          "min": 0.0
+        },
+        "gpu_mem_mb": {
+          "mean": 3615.5,
+          "max": 4042.0,
+          "min": 3009.0
+        },
+        "power_w": {
+          "mean": 30.9,
+          "max": 46.9,
+          "min": 8.7
+        },
+        "temp_c": {
+          "mean": 42.9,
+          "max": 48.0,
+          "min": 38.0
+        },
+        "ffmpeg_cpu_pct": {
+          "mean": 217.6,
+          "max": 409.6,
+          "min": 0.0
+        },
+        "stor_read_bps": {
+          "mean": 12104641.1,
+          "max": 38731924.0,
+          "min": 0.0
+        },
+        "stor_write_bps": {
+          "mean": 13520194.5,
+          "max": 63955904.0,
+          "min": 0.0
+        },
+        "stor_read_ms_op": {
+          "mean": 0.9,
+          "max": 1.9,
+          "min": 0.1
+        },
+        "stor_write_ms_op": {
+          "mean": 0.2,
+          "max": 0.8,
+          "min": 0.0
+        },
+        "stor_queue": {
+          "mean": 0.0,
+          "max": 1.0,
+          "min": 0.0
+        },
+        "stor_idle_pct": {
+          "mean": 98.5,
+          "max": 100.0,
+          "min": 92.7
+        },
+        "out_read_bps": {
+          "mean": 2309.0,
+          "max": 131615.0,
+          "min": 0.0
+        },
+        "out_write_bps": {
+          "mean": 71.4,
+          "max": 4068.0,
+          "min": 0.0
+        },
+        "out_read_ms_op": {
+          "mean": 269.3,
+          "max": 500.0,
+          "min": 38.7
+        },
+        "out_write_ms_op": {
+          "mean": 0.3,
+          "max": 0.3,
+          "min": 0.3
+        },
+        "out_queue": {
+          "mean": 0.0,
+          "max": 0.0,
+          "min": 0.0
+        },
+        "out_idle_pct": {
+          "mean": 99.9,
+          "max": 100.0,
+          "min": 95.8
+        }
+      }
+    },
+    {
+      "name": "par10",
+      "n_jobs": 2,
+      "video_secs_each": 600,
+      "video_secs_total": 1200,
+      "wall_s": 74.3,
+      "realtime_factor": 16.16,
+      "t_start": 1785862722.9275253,
+      "t_end": 1785862797.2060335,
+      "jobs": {
+        "sv-8e601c62": {
+          "sample": "sample_10b",
+          "status": "completed",
+          "stage_times": {
+            "prepare_audio": 1.5,
+            "select_clips": 1.5,
+            "render_video": 15.1,
+            "story_overlays": 54.3,
+            "completed": 0.0
+          },
+          "videoPath": "output/story-video/bench_par10_1_20260804_235733.mp4",
+          "error": null
+        },
+        "sv-034796c3": {
+          "sample": "sample_10a",
+          "status": "completed",
+          "stage_times": {
+            "prepare_audio": 1.5,
+            "select_clips": 1.5,
+            "render_video": 16.8,
+            "story_overlays": 54.4,
+            "completed": 0.0
+          },
+          "videoPath": "output/story-video/bench_par10_0_20260804_235733.mp4",
+          "error": null
+        }
+      },
+      "hw": {
+        "samples": 74,
+        "cpu_pct": {
+          "mean": 40.5,
+          "max": 61.1,
+          "min": 17.3
+        },
+        "ram_pct": {
+          "mean": 70.9,
+          "max": 73.3,
+          "min": 65.4
+        },
+        "gpu_util": {
+          "mean": 56.9,
+          "max": 85.0,
+          "min": 0.0
+        },
+        "enc_util": {
+          "mean": 45.5,
+          "max": 71.0,
+          "min": 0.0
+        },
+        "dec_util": {
+          "mean": 37.6,
+          "max": 61.0,
+          "min": 0.0
+        },
+        "gpu_mem_mb": {
+          "mean": 4422.4,
+          "max": 5074.0,
+          "min": 3009.0
+        },
+        "power_w": {
+          "mean": 40.3,
+          "max": 54.6,
+          "min": 8.9
+        },
+        "temp_c": {
+          "mean": 49.5,
+          "max": 56.0,
+          "min": 42.0
+        },
+        "ffmpeg_cpu_pct": {
+          "mean": 432.7,
+          "max": 772.9,
+          "min": 0.0
+        },
+        "stor_read_bps": {
+          "mean": 15730860.8,
+          "max": 69557760.0,
+          "min": 0.0
+        },
+        "stor_write_bps": {
+          "mean": 29532009.0,
+          "max": 624038113.0,
+          "min": 0.0
+        },
+        "stor_read_ms_op": {
+          "mean": 0.9,
+          "max": 3.7,
+          "min": 0.2
+        },
+        "stor_write_ms_op": {
+          "mean": 0.3,
+          "max": 1.7,
+          "min": 0.0
+        },
+        "stor_queue": {
+          "mean": 0.1,
+          "max": 3.0,
+          "min": 0.0
+        },
+        "stor_idle_pct": {
+          "mean": 98.0,
+          "max": 100.0,
+          "min": 91.5
+        },
+        "out_read_bps": {
+          "mean": 0.0,
+          "max": 0.0,
+          "min": 0.0
+        },
+        "out_write_bps": {
+          "mean": 725381.9,
+          "max": 20112729.0,
+          "min": 0.0
+        },
+        "out_read_ms_op": {
+          "mean": null,
+          "max": null,
+          "min": null
+        },
+        "out_write_ms_op": {
+          "mean": 2.6,
+          "max": 4.5,
+          "min": 0.3
+        },
+        "out_queue": {
+          "mean": 0.0,
+          "max": 0.0,
+          "min": 0.0
+        },
+        "out_idle_pct": {
+          "mean": 99.7,
+          "max": 100.0,
+          "min": 90.8
+        }
+      }
+    },
+    {
+      "name": "single30",
+      "n_jobs": 1,
+      "video_secs_each": 1800,
+      "video_secs_total": 1800,
+      "wall_s": 157.4,
+      "realtime_factor": 11.44,
+      "t_start": 1785862805.2068498,
+      "t_end": 1785862962.5714114,
+      "jobs": {
+        "sv-b24a6d86": {
+          "sample": "sample_30a",
+          "status": "completed",
+          "stage_times": {
+            "prepare_audio": 1.5,
+            "render_video": 50.1,
+            "story_overlays": 104.1,
+            "finalize": 1.5,
+            "completed": 0.0
+          },
+          "videoPath": "output/story-video/bench_single30_0_20260804_235733.mp4",
+          "error": null
+        }
+      },
+      "hw": {
+        "samples": 157,
+        "cpu_pct": {
+          "mean": 24.6,
+          "max": 44.4,
+          "min": 9.8
+        },
+        "ram_pct": {
+          "mean": 68.8,
+          "max": 71.0,
+          "min": 66.2
+        },
+        "gpu_util": {
+          "mean": 36.0,
+          "max": 66.0,
+          "min": 0.0
+        },
+        "enc_util": {
+          "mean": 30.4,
+          "max": 57.0,
+          "min": 0.0
+        },
+        "dec_util": {
+          "mean": 21.0,
+          "max": 41.0,
+          "min": 0.0
+        },
+        "gpu_mem_mb": {
+          "mean": 3674.1,
+          "max": 4054.0,
+          "min": 3009.0
+        },
+        "power_w": {
+          "mean": 34.0,
+          "max": 49.4,
+          "min": 9.0
+        },
+        "temp_c": {
+          "mean": 51.9,
+          "max": 58.0,
+          "min": 46.0
+        },
+        "ffmpeg_cpu_pct": {
+          "mean": 237.2,
+          "max": 432.8,
+          "min": 0.0
+        },
+        "stor_read_bps": {
+          "mean": 10862628.5,
+          "max": 39037745.0,
+          "min": 0.0
+        },
+        "stor_write_bps": {
+          "mean": 24858948.9,
+          "max": 716054479.0,
+          "min": 0.0
+        },
+        "stor_read_ms_op": {
+          "mean": 1.2,
+          "max": 8.7,
+          "min": 0.2
+        },
+        "stor_write_ms_op": {
+          "mean": 0.3,
+          "max": 3.0,
+          "min": 0.0
+        },
+        "stor_queue": {
+          "mean": 0.1,
+          "max": 4.0,
+          "min": 0.0
+        },
+        "stor_idle_pct": {
+          "mean": 98.4,
+          "max": 100.0,
+          "min": 78.3
+        },
+        "out_read_bps": {
+          "mean": 0.0,
+          "max": 0.0,
+          "min": 0.0
+        },
+        "out_write_bps": {
+          "mean": 1193798.4,
+          "max": 19537409.0,
+          "min": 0.0
+        },
+        "out_read_ms_op": {
+          "mean": null,
+          "max": null,
+          "min": null
+        },
+        "out_write_ms_op": {
+          "mean": 4.0,
+          "max": 19.9,
+          "min": 0.3
+        },
+        "out_queue": {
+          "mean": 0.0,
+          "max": 1.0,
+          "min": 0.0
+        },
+        "out_idle_pct": {
+          "mean": 99.4,
+          "max": 100.0,
+          "min": 89.6
+        }
+      }
+    }
+  ]
+}
