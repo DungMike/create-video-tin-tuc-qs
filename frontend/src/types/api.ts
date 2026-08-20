@@ -713,6 +713,96 @@ export interface StoryLibraryResponse {
   totalPages: number;
 }
 
+// === Prefetch branch: download every search hit first, review locally, then cut ===
+
+export type StoryPrefetchOrientation = "landscape" | "portrait" | "square";
+
+export type StoryPrefetchStatus =
+  | "searching"
+  | "downloading"
+  | "cancelling"
+  /** Sweep finished; waiting for the user to prune before cutting. */
+  | "ready"
+  | "committing"
+  | "completed"
+  | "cancelled"
+  | "failed";
+
+export type StoryPrefetchItemStatus = "downloaded" | "failed" | "deleted" | "committed";
+
+export interface StoryPrefetchItem {
+  /** `"pixabay:12345"` — stable across the whole session. */
+  itemId: string;
+  provider: StoryVideoProvider;
+  videoId: string;
+  title: string;
+  pageUrl: string;
+  thumbnailUrl: string;
+  width: number;
+  height: number;
+  duration: number;
+  author: string;
+  filename: string;
+  /** Append to `/media/` to play the staged file locally. */
+  mediaPath: string;
+  sizeBytes: number;
+  status: StoryPrefetchItemStatus;
+  clipCount: number;
+  error: string | null;
+}
+
+export interface StoryPrefetchFilters {
+  orientation: StoryPrefetchOrientation | null;
+  minWidth: number | null;
+  minHeight: number | null;
+  skipImported: boolean;
+}
+
+export interface StoryPrefetchSession {
+  sessionId: string;
+  libraryId: string;
+  provider: StoryVideoProvider;
+  query: string;
+  tags: string[];
+  filters: StoryPrefetchFilters;
+  status: StoryPrefetchStatus;
+  current: number;
+  total: number;
+  message: string;
+  pagesFetched: number;
+  providerTotal: number;
+  skippedImported: number;
+  skippedFiltered: number;
+  failedCount: number;
+  downloadedBytes: number;
+  addedClips: number;
+  /** Set when the page backstop, not the provider, ended the sweep — the result
+   *  is partial and the UI must say so rather than implying full coverage. */
+  truncated: string | null;
+  items: StoryPrefetchItem[];
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoryPrefetchStartRequest {
+  provider: StoryVideoProvider;
+  query: string;
+  tags?: string[];
+  orientation?: StoryPrefetchOrientation | null;
+  minWidth?: number | null;
+  minHeight?: number | null;
+  skipImported?: boolean;
+}
+
+export interface StoryPrefetchDiscardResponse {
+  sessionId: string;
+  requestedCount: number;
+  deletedCount: number;
+  failedItemIds: string[];
+  session: StoryPrefetchSession;
+}
+
 export interface StoryLibraryStats {
   totalClips: number;
   totalDuration: number;

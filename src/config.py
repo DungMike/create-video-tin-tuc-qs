@@ -225,6 +225,21 @@ class Config:
     # working set can live on a fast small disk while this stays on a big slow one --
     # keeping it on the SSD buys no render speed and just consumes the space.
     STORY_RAW_DIR = os.getenv("STORY_RAW_DIR", os.path.join(STORAGE_DIR, "story_raw_videos"))
+    # --- Prefetch branch (download-all first, review/prune, then cut) ---
+    # The alternate import flow: instead of previewing provider results over the
+    # provider CDN and only downloading what was picked, it pulls every page of a
+    # keyword down to STORY_RAW_DIR first so the review happens on local files
+    # (instant, and it spends no extra provider API quota).
+    STORY_PREFETCH_DOWNLOAD_WORKERS = int(os.getenv("STORY_PREFETCH_DOWNLOAD_WORKERS", "4"))
+    # Both 0 = unlimited: "download everything the keyword has" is the point of the
+    # flow. They exist as a brake for when a keyword turns out to hold thousands of
+    # 1080p videos; the UI's cancel button is the normal way to stop a run.
+    STORY_PREFETCH_MAX_VIDEOS = int(os.getenv("STORY_PREFETCH_MAX_VIDEOS", "0"))
+    STORY_PREFETCH_MAX_TOTAL_MB = int(os.getenv("STORY_PREFETCH_MAX_TOTAL_MB", "0"))
+    # Finished/cancelled prefetch sessions are swept after this long. Nothing else
+    # under STORY_RAW_DIR has ever been cleaned up, and this flow downloads whole
+    # result sets, so its own staging dirs must not accumulate forever.
+    STORY_PREFETCH_TTL_SECONDS = int(os.getenv("STORY_PREFETCH_TTL_SECONDS", "172800"))
     STORY_LIBRARY_PAGE_SIZE = int(os.getenv("STORY_LIBRARY_PAGE_SIZE", "20"))
     # Multiple named clip libraries ("folders"). The Default library's root IS
     # STORY_LIBRARY_DIR itself (no file migration); other libraries live under

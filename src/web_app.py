@@ -2049,6 +2049,12 @@ def media(relative_path: str):
     if normalized == "output" or normalized.startswith("output/"):
         base_dir = os.path.abspath(Config.OUTPUT_DIR)
         sub_path = normalized[len("output"):].lstrip("/")
+    # Same story for "story_raw/...": STORY_RAW_DIR is overridable on its own (the
+    # deployment keeps it on a big slow disk, off STORAGE_DIR), and the prefetch
+    # review step previews those staged source videos straight from the browser.
+    elif normalized == "story_raw" or normalized.startswith("story_raw/"):
+        base_dir = os.path.abspath(Config.STORY_RAW_DIR)
+        sub_path = normalized[len("story_raw"):].lstrip("/")
     else:
         base_dir = os.path.abspath(Config.STORAGE_DIR)
         sub_path = normalized

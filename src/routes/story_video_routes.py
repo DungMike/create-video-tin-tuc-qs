@@ -529,6 +529,261 @@ def import_selected_story_videos():
 
 
 # ---------------------------------------------------------------------------
+# 4d. Prefetch branch — download every search hit first, review locally, then cut.
+#
+# The alternative to 4b+4c: instead of previewing candidates over the provider CDN
+# and importing the picked ones, a sweep downloads the whole keyword into staging
+# so the review happens on local files. Deliberately a separate set of routes —
+# the flow above stays untouched. See src/utils/story_video_prefetch.py.
+# ---------------------------------------------------------------------------
+_PREFETCH_ORIENTATIONS = {"landscape", "portrait", "square"}
+
+
+@story_video_bp.route("/api/story-video/library/prefetch", methods=["POST"])
+def start_story_prefetch():
+    from src.utils import story_video_prefetch as prefetch
+
+    data = request.get_json(silent=True) or {}
+
+    library_id, err = _resolve_or_404(data.get("libraryId"))
+    if err:
+        return err
+
+    provider = str(data.get("provider") or "").strip().lower()
+    if provider not in {"pixabay", "pexels"}:
+        return _error("Provider khong hop le.", code="invalid_provider")
+
+    query = str(data.get("query") or "").strip()
+    if not query:
+        return _error("Can nhap keyword de tai video.", code="missing_query")
+
+    tags = data.get("tags", [])
+    if tags is not None and not isinstance(tags, list):
+        return _error("tags phai la array.", code="invalid_tags")
+    clean_tags = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
+
+    orientation = str(data.get("orientation") or "").strip().lower() or None
+    if orientation and orientation not in _PREFETCH_ORIENTATIONS:
+        return _error("orientation phai la landscape/portrait/square.", code="invalid_orientation")
+
+    try:
+        min_width = int(data.get("minWidth") or 0) or None
+        min_height = int(data.get("minHeight") or 0) or None
+    except (TypeError, ValueError):
+        return _error("minWidth/minHeight khong hop le.", code="invalid_dimensions")
+
+    # One sweep at a time per library: two concurrent sweeps would race on the
+    # library index during their commits and make the progress UI meaningless.
+    if prefetch.has_active_session(library_id):
+        return _error(
+            "Thu vien dang co mot luot tai truoc dang chay. Hay doi hoac huy luot do.",
+            code="prefetch_busy",
+            status=409,
+        )
+
+    prefetch.cleanup_expired_sessions()
+
+    session = prefetch.create_session(
+        library_id=library_id,
+        provider=provider,
+        query=query,
+        tags=clean_tags,
+        orientation=orientation,
+        min_width=min_width,
+        min_height=min_height,
+        skip_imported=bool(data.get("skipImported", True)),
+    )
+    session_id = session["sessionId"]
+
+    threading.Thread(target=prefetch.run_prefetch, args=(session_id,), daemon=True).start()
+    return jsonify(session), 202
+
+
+@story_video_bp.route("/api/story-video/library/prefetch", methods=["GET"])
+def list_story_prefetch_sessions():
+    from src.utils import story_video_prefetch as prefetch
+
+    library_id, err = _resolve_or_404(request.args.get("libraryId"))
+    if err:
+        return err
+
+    prefetch.cleanup_expired_sessions()
+    include_completed = str(request.args.get("includeCompleted", "")).lower() in {"1", "true", "yes"}
+    sessions = prefetch.list_sessions(library_id, include_completed=include_completed)
+    return jsonify({"sessions": sessions})
+
+
+@story_video_bp.route("/api/story-video/library/prefetch/<session_id>", methods=["GET"])
+def get_story_prefetch_session(session_id: str):
+    from src.utils import story_video_prefetch as prefetch
+
+    session = prefetch.load_manifest(session_id)
+    if session is None:
+        return _error("Prefetch session khong ton tai.", code="prefetch_session_not_found", status=404)
+    return jsonify(session)
+
+
+@story_video_bp.route(
+    "/api/story-video/library/prefetch/<session_id>/items/<item_id>/poster",
+    methods=["GET"],
+)
+def story_prefetch_item_poster(session_id: str, item_id: str):
+    """Poster frame for one staged video, cut from the local file and cached.
+
+    The review grid cannot rely on the provider thumbnail: Pixabay sessions have
+    none recorded, so without this every card renders black.
+    """
+    from src.utils import story_video_prefetch as prefetch
+
+    try:
+        poster_path = prefetch.ensure_item_poster(session_id, item_id)
+    except prefetch.PrefetchError as exc:
+        missing = {
+            "prefetch_session_not_found",
+            "prefetch_item_not_found",
+            "prefetch_item_missing_file",
+            "invalid_prefetch_session",
+        }
+        return _error(str(exc), code=exc.code, status=404 if exc.code in missing else 500)
+
+    response = send_file(poster_path, mimetype="image/jpeg", conditional=True)
+    # Immutable once cut: the staged file never changes under a given item id.
+    response.headers["Cache-Control"] = "public, max-age=86400"
+    return response
+
+
+@story_video_bp.route("/api/story-video/library/prefetch/<session_id>/cancel", methods=["POST"])
+def cancel_story_prefetch(session_id: str):
+    from src.utils import story_video_prefetch as prefetch
+
+    session = prefetch.request_cancel(session_id)
+    if session is None:
+        return _error("Prefetch session khong ton tai.", code="prefetch_session_not_found", status=404)
+    return jsonify(session)
+
+
+@story_video_bp.route("/api/story-video/library/prefetch/<session_id>/discard-items", methods=["POST"])
+def discard_story_prefetch_items(session_id: str):
+    from src.utils import story_video_prefetch as prefetch
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _error("Payload phai la JSON object.", code="invalid_payload")
+
+    raw_ids = data.get("itemIds")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return _error("Can it nhat 1 itemId de xoa.", code="invalid_item_ids")
+
+    try:
+        return jsonify(prefetch.discard_items(session_id, [str(item) for item in raw_ids]))
+    except prefetch.PrefetchError as exc:
+        status = 404 if exc.code == "prefetch_session_not_found" else 400
+        return _error(str(exc), code=exc.code, status=status)
+
+
+@story_video_bp.route("/api/story-video/library/prefetch/<session_id>/commit", methods=["POST"])
+def commit_story_prefetch(session_id: str):
+    from src.utils import story_video_prefetch as prefetch
+
+    data = request.get_json(silent=True) or {}
+
+    session = prefetch.load_manifest(session_id)
+    if session is None:
+        return _error("Prefetch session khong ton tai.", code="prefetch_session_not_found", status=404)
+    # "failed" is allowed so a commit that died part-way can be resumed: run_commit
+    # only picks up items still marked "downloaded", so already-ingested videos are
+    # not cut twice and the staged files do not have to be thrown away.
+    if session.get("status") not in {prefetch.REVIEW_STATUS, "cancelled", "failed"}:
+        return _error(
+            "Chi co the cat clip khi luot tai da hoan tat.",
+            code="prefetch_not_ready",
+            status=409,
+        )
+
+    tags = data.get("tags", [])
+    if tags is not None and not isinstance(tags, list):
+        return _error("tags phai la array.", code="invalid_tags")
+    clean_tags = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
+
+    kept = [item for item in session.get("items", []) if item.get("status") == "downloaded"]
+    if not kept:
+        return _error("Khong con video nao de cat clip.", code="prefetch_nothing_to_commit")
+
+    library_id = session.get("libraryId")
+    delete_raw_after = bool(data.get("deleteRawAfter"))
+
+    # Mirror the commit into the in-memory session map so _has_active_library_session
+    # keeps rejecting "delete the whole library" while clips are being ingested,
+    # exactly as it does for the import-selected flow.
+    with _download_sessions_lock:
+        _download_sessions[session_id] = {
+            "sessionId": session_id,
+            "status": "splitting",
+            "current": 0,
+            "total": len(kept),
+            "message": "Bat dau cat clip...",
+            "addedClips": 0,
+            "libraryId": library_id,
+        }
+
+    def _run_commit():
+        def progress_cb(progress_data):
+            with _download_sessions_lock:
+                if session_id in _download_sessions:
+                    _download_sessions[session_id].update(progress_data)
+
+        try:
+            prefetch.run_commit(
+                session_id,
+                tags=clean_tags,
+                delete_raw_after=delete_raw_after,
+                progress_callback=progress_cb,
+            )
+            final = prefetch.load_manifest(session_id) or {}
+            with _download_sessions_lock:
+                _download_sessions[session_id].update({
+                    "status": "completed" if final.get("status") == "completed" else "failed",
+                    "current": final.get("total", len(kept)),
+                    "total": final.get("total", len(kept)),
+                    "message": final.get("message", ""),
+                    "addedClips": final.get("addedClips", 0),
+                })
+        except Exception as exc:
+            logger.error(f"[StoryVideo] Prefetch commit failed: {exc}", exc_info=True)
+            with _download_sessions_lock:
+                _download_sessions[session_id].update({
+                    "status": "failed",
+                    "message": f"Loi: {exc}",
+                })
+
+    threading.Thread(target=_run_commit, daemon=True).start()
+    return jsonify({"sessionId": session_id, "total": len(kept)}), 202
+
+
+@story_video_bp.route("/api/story-video/library/prefetch/<session_id>", methods=["DELETE"])
+def delete_story_prefetch_session(session_id: str):
+    from src.utils import story_video_prefetch as prefetch
+
+    session = prefetch.load_manifest(session_id)
+    if session is None:
+        return _error("Prefetch session khong ton tai.", code="prefetch_session_not_found", status=404)
+    if session.get("status") == "committing":
+        return _error(
+            "Luot nay dang cat clip, khong the xoa.",
+            code="prefetch_busy",
+            status=409,
+        )
+
+    # A sweep still in flight has to be told to stop before its dir disappears,
+    # or its workers keep writing files into a directory nobody will clean up.
+    if session.get("status") in {"searching", "downloading", "cancelling"}:
+        prefetch.request_cancel(session_id)
+
+    prefetch.discard_session(session_id)
+    return jsonify({"deleted": True, "sessionId": session_id})
+
+
+# ---------------------------------------------------------------------------
 # 5. DELETE /api/story-video/library/<clip_id>
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/library/<clip_id>", methods=["DELETE"])

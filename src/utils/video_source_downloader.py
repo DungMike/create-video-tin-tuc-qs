@@ -145,18 +145,54 @@ def _resolve_pexels_download_url(video_id: str) -> str | None:
 
 
 def _download_file(url: str, dest_path: str) -> bool:
-    try:
-        resp = requests.get(url, stream=True, timeout=120)
-        resp.raise_for_status()
-        with open(dest_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-        return True
-    except Exception as exc:
-        logger.error(f"Download failed {url}: {exc}")
-        if os.path.exists(dest_path):
-            os.remove(dest_path)
-        return False
+    """Stream one media file to disk, retrying the transient failures.
+
+    The CDN throttles just like the API does: a long prefetch sweep starts drawing
+    429s a few thousand files in, and DNS blips look the same to the caller. Both
+    are transient, but the caller records a failure permanently -- the item is
+    never re-queued -- so a burst of 429s used to cost the whole rest of the sweep.
+    """
+    for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
+        last_attempt = attempt == _RATE_LIMIT_MAX_RETRIES
+        try:
+            resp = requests.get(url, stream=True, timeout=120)
+            if resp.status_code == 429 and not last_attempt:
+                retry_after = resp.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after) if retry_after else _RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+                except (TypeError, ValueError):
+                    delay = _RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+                resp.close()
+                logger.warning(
+                    f"Rate limited (429) downloading {url} — "
+                    f"retry {attempt + 1}/{_RATE_LIMIT_MAX_RETRIES} sau {delay:.1f}s"
+                )
+                time.sleep(delay)
+                continue
+            resp.raise_for_status()
+            with open(dest_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            return True
+        except requests.RequestException as exc:
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
+            if last_attempt:
+                logger.error(f"Download failed {url}: {exc}")
+                return False
+            delay = _RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                f"Download error {url}: {exc} — "
+                f"retry {attempt + 1}/{_RATE_LIMIT_MAX_RETRIES} sau {delay:.1f}s"
+            )
+            time.sleep(delay)
+        except OSError as exc:
+            # Disk-side failure: retrying the same write will fail the same way.
+            logger.error(f"Download failed {url}: {exc}")
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
+            return False
+    return False
 
 
 def _select_height_limited_file(candidates: list[dict], url_key: str) -> dict | None:
@@ -190,6 +226,28 @@ def _select_pexels_video_file(video_files: list[dict]) -> dict | None:
     return _select_height_limited_file(mp4_files, "link")
 
 
+def _pixabay_thumbnail_url(hit: dict, selected: dict | None) -> str:
+    """Poster frame for a Pixabay video hit.
+
+    Pixabay's *video* endpoint returns no ``previewURL``/``picture_url`` (those are
+    image-search fields): each rendition under ``videos`` carries its own
+    ``thumbnail`` instead. Reading the wrong key silently produced "" for every
+    Pixabay video, which is what left the review grid showing black boxes.
+    ``picture_id`` is the pre-2023 shape, kept as a fallback.
+    """
+    if selected and selected.get("thumbnail"):
+        return str(selected["thumbnail"])
+    videos = hit.get("videos")
+    if isinstance(videos, dict):
+        for entry in videos.values():
+            if isinstance(entry, dict) and entry.get("thumbnail"):
+                return str(entry["thumbnail"])
+    picture_id = str(hit.get("picture_id") or "").strip()
+    if picture_id:
+        return f"https://i.vimeocdn.com/video/{picture_id}_640x360.jpg"
+    return ""
+
+
 def _normalize_pixabay_video(hit: dict) -> dict | None:
     selected = _select_pixabay_video_file(hit.get("videos", {}))
     if not selected:
@@ -202,7 +260,7 @@ def _normalize_pixabay_video(hit: dict) -> dict | None:
         "id": str(hit.get("id") or ""),
         "title": tags or f"Pixabay video {hit.get('id')}",
         "tags": tags,
-        "thumbnailUrl": hit.get("previewURL") or hit.get("picture_url") or "",
+        "thumbnailUrl": _pixabay_thumbnail_url(hit, selected),
         "previewUrl": selected.get("url") or "",
         "pageUrl": hit.get("pageURL") or "",
         "duration": hit.get("duration") or 0,
@@ -234,23 +292,34 @@ def _normalize_pexels_video(video: dict) -> dict | None:
     }
 
 
-def search_pixabay_videos(query: str, page: int = 1, per_page: int = 20) -> dict:
+def search_pixabay_videos(
+    query: str,
+    page: int = 1,
+    per_page: int = 20,
+    *,
+    min_width: int | None = None,
+    min_height: int | None = None,
+) -> dict:
     api_key = Config.PIXABAY_API_KEY
     if not api_key:
         raise ValueError("PIXABAY_API_KEY is not configured")
 
-    resp = requests.get(
-        "https://pixabay.com/api/videos/",
-        params={
-            "key": api_key,
-            "q": query,
-            "page": page,
-            "per_page": per_page,
-            "safesearch": "true",
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
+    params = {
+        "key": api_key,
+        "q": query,
+        "page": page,
+        "per_page": per_page,
+        "safesearch": "true",
+    }
+    # Omitted entirely when unset so a plain search sends the exact same request
+    # it always has. Pixabay's video endpoint has no `orientation` param -- that
+    # filter is applied client-side in iter_all_provider_videos.
+    if min_width:
+        params["min_width"] = int(min_width)
+    if min_height:
+        params["min_height"] = int(min_height)
+
+    resp = _get_with_rate_limit_retry("https://pixabay.com/api/videos/", params=params, timeout=30)
     data = resp.json()
     items = [
         item for item in (_normalize_pixabay_video(hit) for hit in data.get("hits", []))
@@ -265,18 +334,30 @@ def search_pixabay_videos(query: str, page: int = 1, per_page: int = 20) -> dict
     }
 
 
-def search_pexels_videos(query: str, page: int = 1, per_page: int = 20) -> dict:
+def search_pexels_videos(
+    query: str,
+    page: int = 1,
+    per_page: int = 20,
+    *,
+    orientation: str | None = None,
+    size: str | None = None,
+) -> dict:
     api_key = Config.PEXELS_API_KEY
     if not api_key:
         raise ValueError("PEXELS_API_KEY is not configured")
 
-    resp = requests.get(
+    params = {"query": query, "page": page, "per_page": per_page}
+    if orientation:
+        params["orientation"] = orientation
+    if size:
+        params["size"] = size
+
+    resp = _get_with_rate_limit_retry(
         "https://api.pexels.com/videos/search",
-        params={"query": query, "page": page, "per_page": per_page},
         headers={"Authorization": api_key},
+        params=params,
         timeout=30,
     )
-    resp.raise_for_status()
     data = resp.json()
     items = [
         item for item in (_normalize_pexels_video(video) for video in data.get("videos", []))
@@ -295,15 +376,159 @@ def search_pexels_videos(query: str, page: int = 1, per_page: int = 20) -> dict:
 PIXABAY_MAX_PER_PAGE = 200  # Pixabay: per_page valid 3-200
 PEXELS_MAX_PER_PAGE = 80  # Pexels: per_page valid 1-80
 
+# Backstops for the multi-page sweep below, in case a provider reports a `total`
+# that its own pagination will not actually hand over. Pixabay caps totalHits at
+# 500/keyword (3 pages at 200); Pexels has no documented ceiling.
+PIXABAY_MAX_PAGES = 25
+PEXELS_MAX_PAGES = 100
 
-def search_provider_videos(provider: str, query: str, page: int = 1, per_page: int | None = None) -> dict:
+
+def search_provider_videos(
+    provider: str,
+    query: str,
+    page: int = 1,
+    per_page: int | None = None,
+    *,
+    orientation: str | None = None,
+    min_width: int | None = None,
+    min_height: int | None = None,
+) -> dict:
     if provider == "pixabay":
         size = PIXABAY_MAX_PER_PAGE if per_page is None else max(3, min(PIXABAY_MAX_PER_PAGE, per_page))
-        return search_pixabay_videos(query, page, size)
+        return search_pixabay_videos(query, page, size, min_width=min_width, min_height=min_height)
     if provider == "pexels":
         size = PEXELS_MAX_PER_PAGE if per_page is None else max(1, min(PEXELS_MAX_PER_PAGE, per_page))
-        return search_pexels_videos(query, page, size)
+        return search_pexels_videos(query, page, size, orientation=orientation)
     raise ValueError("Unsupported provider")
+
+
+def iter_all_provider_videos(
+    provider: str,
+    query: str,
+    *,
+    orientation: str | None = None,
+    min_width: int | None = None,
+    min_height: int | None = None,
+    should_stop=None,
+    on_page=None,
+    on_truncated=None,
+):
+    """Yield every video a keyword has, page by page, deduped by provider id.
+
+    Requests the provider's maximum page size (200 / 80) so a full sweep costs the
+    fewest API calls possible -- the whole point of the prefetch flow is to spend
+    quota once on search and never again on preview.
+
+    The filter kwargs are passed to whichever provider accepts them (Pixabay takes
+    min_width/min_height, Pexels takes orientation) purely to shrink the sweep.
+    Neither provider covers both, and Pexels filters on the video rather than the
+    <=1080p variant actually downloaded, so callers must still apply their own
+    filters to what comes out of here -- see prefetch_item_rejection_reason.
+
+    Stops on: an empty page, ``page * per_page >= total``, ``should_stop()``, the
+    provider's page backstop, or an HTTP 4xx. That last one matters: Pixabay
+    answers 400 (not an empty page) once you ask past the last page of a query
+    whose totalHits was capped, so a 4xx here means "out of results", not failure.
+    ``on_page(page, total, seen_so_far)`` is called after each page for progress.
+    ``on_truncated(pages, total)`` fires if the page backstop -- not the provider --
+    is what ended the sweep, so a partial result is never mistaken for a complete
+    one. Pexels routinely reports 8000 results for an ordinary keyword, which is
+    exactly PEXELS_MAX_PAGES * 80, so this is reachable in practice.
+    """
+    max_pages = PIXABAY_MAX_PAGES if provider == "pixabay" else PEXELS_MAX_PAGES
+    seen: set[str] = set()
+    page = 1
+    last_total = 0
+
+    while page <= max_pages:
+        if should_stop and should_stop():
+            return
+
+        try:
+            response = search_provider_videos(
+                provider,
+                query,
+                page,
+                orientation=orientation,
+                min_width=min_width,
+                min_height=min_height,
+            )
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if 400 <= status < 500:
+                logger.info(
+                    f"[Prefetch] {provider} page {page} returned {status} - treating as end of results"
+                )
+                return
+            raise
+
+        items = response.get("items") or []
+        if not items:
+            return
+
+        per_page = max(1, int(response.get("perPage") or len(items)))
+        total = int(response.get("total") or 0)
+        last_total = total
+
+        fresh: list[tuple[str, dict]] = []
+        for item in items:
+            key = f"{provider}:{item.get('id')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            fresh.append((key, item))
+
+        # Reported before yielding, so the count reflects pages actually requested
+        # even when the consumer stops partway through a page -- and so progress
+        # appears as soon as each page lands rather than after it is drained.
+        if on_page:
+            on_page(page, total, len(seen))
+
+        yield from fresh
+
+        if total and page * per_page >= total:
+            return
+        page += 1
+
+    # Fell out of the loop: the backstop stopped us, not the provider.
+    logger.warning(
+        f"[Prefetch] {provider} sweep hit the {max_pages}-page backstop for "
+        f"{query!r} (provider reported {last_total} results) - result is partial"
+    )
+    if on_truncated:
+        on_truncated(max_pages, last_total)
+
+
+def prefetch_item_rejection_reason(
+    item: dict,
+    *,
+    orientation: str | None = None,
+    min_width: int | None = None,
+    min_height: int | None = None,
+) -> str | None:
+    """Why a searched item should not be downloaded, or None to keep it.
+
+    Judged on the dimensions of the variant that would actually land on disk (the
+    <=1080p file `_select_height_limited_file` picked), not on the provider's
+    headline resolution. Unknown dimensions are kept rather than dropped.
+    """
+    width = int(item.get("width") or 0)
+    height = int(item.get("height") or 0)
+    if width <= 0 or height <= 0:
+        return None
+
+    if orientation == "landscape" and width <= height:
+        return "orientation"
+    if orientation == "portrait" and height <= width:
+        return "orientation"
+    if orientation == "square" and width != height:
+        return "orientation"
+
+    if min_width and width < int(min_width):
+        return "resolution"
+    if min_height and height < int(min_height):
+        return "resolution"
+    return None
 
 
 def _resolve_download_url(link: str, source_type: str) -> str | None:

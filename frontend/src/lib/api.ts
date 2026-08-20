@@ -268,6 +268,9 @@ import type {
   StartStoryLibraryNormalizeResponse,
   StoryIntroMutationResponse,
   StoryIntrosResponse,
+  StoryPrefetchDiscardResponse,
+  StoryPrefetchSession,
+  StoryPrefetchStartRequest,
   StoryProviderVideo,
   UpdateStoryLibraryRequest,
   StoryProviderVideoSearchResponse,
@@ -650,6 +653,73 @@ export async function updateStoryClipTags(libraryId: string, clipId: string, tag
 export async function getStoryLibraryStats(libraryId: string) {
   const params = new URLSearchParams({ libraryId });
   return requestJson<StoryLibraryStats>(`/api/story-video/library/stats?${params}`);
+}
+
+// === Story Video Library prefetch (download all → review → cut) ===
+// The alternative to searchStoryProviderVideos + importSelectedStoryVideos above:
+// the sweep downloads every hit up front so the review runs on local files.
+
+export async function startStoryPrefetch(libraryId: string, payload: StoryPrefetchStartRequest) {
+  return requestJson<StoryPrefetchSession>("/api/story-video/library/prefetch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ libraryId, ...payload }),
+  });
+}
+
+export async function listStoryPrefetchSessions(libraryId: string, includeCompleted = false) {
+  const params = new URLSearchParams({ libraryId });
+  if (includeCompleted) params.set("includeCompleted", "true");
+  return requestJson<{ sessions: StoryPrefetchSession[] }>(`/api/story-video/library/prefetch?${params}`);
+}
+
+export async function getStoryPrefetchSession(sessionId: string) {
+  return requestJson<StoryPrefetchSession>(`/api/story-video/library/prefetch/${sessionId}`);
+}
+
+export async function cancelStoryPrefetch(sessionId: string) {
+  return requestJson<StoryPrefetchSession>(`/api/story-video/library/prefetch/${sessionId}/cancel`, {
+    method: "POST",
+  });
+}
+
+/** Poster frame cut from the staged file itself — the fallback for items whose
+ *  provider gave us no thumbnail (every Pixabay sweep). Cached server-side. */
+export function storyPrefetchPosterUrl(sessionId: string, itemId: string) {
+  return `/api/story-video/library/prefetch/${encodeURIComponent(sessionId)}/items/${encodeURIComponent(itemId)}/poster`;
+}
+
+export async function discardStoryPrefetchItems(sessionId: string, itemIds: string[]) {
+  return requestJson<StoryPrefetchDiscardResponse>(
+    `/api/story-video/library/prefetch/${sessionId}/discard-items`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ itemIds }),
+    },
+  );
+}
+
+export async function commitStoryPrefetch(
+  sessionId: string,
+  tags: string[] = [],
+  deleteRawAfter = false,
+) {
+  return requestJson<{ sessionId: string; total: number }>(
+    `/api/story-video/library/prefetch/${sessionId}/commit`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags, deleteRawAfter }),
+    },
+  );
+}
+
+export async function deleteStoryPrefetchSession(sessionId: string) {
+  return requestJson<{ deleted: boolean; sessionId: string }>(
+    `/api/story-video/library/prefetch/${sessionId}`,
+    { method: "DELETE" },
+  );
 }
 
 // === Story Video Library normalization (canonical clip format) ===

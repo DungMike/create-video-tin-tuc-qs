@@ -5,6 +5,7 @@ import { EmptyCard } from "@/components/empty-card";
 import { PaginationBar } from "@/components/pagination-bar";
 import { StatusAlert } from "@/components/status-alert";
 import { StoryLibraryBakeDialog } from "@/components/StoryLibraryBakeDialog";
+import { StoryLibraryPrefetchPanel } from "@/components/StoryLibraryPrefetchPanel";
 import { StoryLibraryResumeBake } from "@/components/StoryLibraryResumeBake";
 import { StoryLibrarySelect } from "@/components/StoryLibrarySelect";
 import {
@@ -47,7 +48,7 @@ import type {
 const PAGE_SIZE = 20;
 // Request the maximum page size each provider's API supports per call.
 const PROVIDER_PAGE_SIZE: Record<StoryVideoProvider, number> = {
-  pixabay: 200,
+  pixabay: 100,
   pexels: 80,
 };
 const PROVIDERS: StoryVideoProvider[] = ["pixabay", "pexels"];
@@ -134,16 +135,26 @@ function ProviderSearchPanel({
             <span className="text-xs text-muted-foreground">
               Da chon {selectedPageCount}/{results.length} video cua trang nay
             </span>
-            <Button
-              type="button"
-              variant={allPageSelected ? "secondary" : "outline"}
-              size="sm"
-              onClick={() => onTogglePageSelected(results, !allPageSelected)}
-              disabled={isSearching}
-            >
-              {allPageSelected ? <X className="mr-2 size-4" /> : <Check className="mr-2 size-4" />}
-              {allPageSelected ? "Bo chon toan bo trang" : "Chon toan bo trang"}
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <PaginationBar
+                page={page}
+                totalPages={totalPages}
+                onPrevious={() => onPageChange(Math.max(1, page - 1))}
+                onNext={() => onPageChange(Math.min(totalPages, page + 1))}
+                onPageChange={onPageChange}
+                className="justify-start"
+              />
+              <Button
+                type="button"
+                variant={allPageSelected ? "secondary" : "outline"}
+                size="sm"
+                onClick={() => onTogglePageSelected(results, !allPageSelected)}
+                disabled={isSearching}
+              >
+                {allPageSelected ? <X className="mr-2 size-4" /> : <Check className="mr-2 size-4" />}
+                {allPageSelected ? "Bo chon toan bo trang" : "Chon toan bo trang"}
+              </Button>
+            </div>
           </div>
           <section className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {results.map((item) => {
@@ -203,6 +214,7 @@ function ProviderSearchPanel({
             totalPages={totalPages}
             onPrevious={() => onPageChange(Math.max(1, page - 1))}
             onNext={() => onPageChange(Math.min(totalPages, page + 1))}
+            onPageChange={onPageChange}
           />
         </>
       ) : (
@@ -361,7 +373,11 @@ export function StoryLibraryManager({
 
   const selectedProviderList = useMemo(() => Object.values(selectedProviderVideos), [selectedProviderVideos]);
 
-  const handleProviderSearch = async (provider: StoryVideoProvider, targetPage = 1) => {
+  // Shared fetch behind the two entry points below. `autoSelectPage` is the only
+  // difference between them, and the selection update is strictly additive: keys
+  // already in the map (earlier pages, the other provider) are never rebuilt or
+  // removed here, so paginating can no longer drop what the user picked before.
+  const runProviderSearch = async (provider: StoryVideoProvider, targetPage: number, autoSelectPage: boolean) => {
     const query = providerQueries[provider].trim();
     if (!query) {
       setErrorMessage("Nhap keyword de search video.");
@@ -377,12 +393,28 @@ export function StoryLibraryManager({
         ...current,
         [provider]: Math.max(1, Math.ceil(response.total / Math.max(response.perPage, 1))),
       }));
+      if (autoSelectPage) {
+        setSelectedProviderVideos((current) => {
+          const next = { ...current };
+          response.items.forEach((item) => {
+            next[providerVideoKey(item)] = item;
+          });
+          return next;
+        });
+      }
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : `Khong the search ${provider}.`);
     } finally {
       setSearchingProvider(null);
     }
   };
+
+  // Search button / Enter: back to page 1 and auto-select the whole result page.
+  const handleProviderSearch = (provider: StoryVideoProvider) => runProviderSearch(provider, 1, true);
+
+  // Page change: load the new page only, leave the current selection untouched.
+  const handleProviderPageChange = (provider: StoryVideoProvider, nextPage: number) =>
+    runProviderSearch(provider, nextPage, false);
 
   const handleToggleProviderVideo = (item: StoryProviderVideo) => {
     const itemKey = providerVideoKey(item);
@@ -658,6 +690,7 @@ export function StoryLibraryManager({
           <TabsTrigger value="pixabay">Pixabay</TabsTrigger>
           <TabsTrigger value="pexels">Pexels</TabsTrigger>
           <TabsTrigger value="upload">Upload</TabsTrigger>
+          <TabsTrigger value="prefetch">Tai truoc &rarr; loc</TabsTrigger>
         </TabsList>
 
         {PROVIDERS.map((provider) => (
@@ -673,8 +706,8 @@ export function StoryLibraryManager({
                   isSearching={searchingProvider === provider}
                   selectedItems={selectedProviderVideos}
                   onQueryChange={(value) => setProviderQueries((current) => ({ ...current, [provider]: value }))}
-                  onSearch={() => void handleProviderSearch(provider, 1)}
-                  onPageChange={(nextPage) => void handleProviderSearch(provider, nextPage)}
+                  onSearch={() => void handleProviderSearch(provider)}
+                  onPageChange={(nextPage) => void handleProviderPageChange(provider, nextPage)}
                   onToggleSelected={handleToggleProviderVideo}
                   onTogglePageSelected={handleToggleProviderPage}
                 />
@@ -775,6 +808,21 @@ export function StoryLibraryManager({
             </CardContent>
           </Card>
         </TabsContent>
+
+        {/* The download-first alternative to the provider tabs above. Kept in its
+            own component and its own tab so the preview-then-select flow, which
+            works, is not entangled with it. */}
+        <TabsContent value="prefetch" className="mt-0">
+          <StoryLibraryPrefetchPanel
+            libraryId={activeLibraryId}
+            disabled={isBulkDeleting}
+            onCommitted={() => {
+              setPage(1);
+              void loadLibrary(1);
+              void refreshLibraries();
+            }}
+          />
+        </TabsContent>
       </Tabs>
 
       {showBulkDeleteActions ? (
@@ -873,6 +921,7 @@ export function StoryLibraryManager({
             totalPages={totalPages}
             onPrevious={() => setPage((current) => Math.max(1, current - 1))}
             onNext={() => setPage((current) => Math.min(totalPages, current + 1))}
+            onPageChange={(nextPage) => setPage(nextPage)}
           />
         </>
       )}
