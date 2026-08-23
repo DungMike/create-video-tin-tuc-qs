@@ -286,6 +286,9 @@ import type {
   TVNoiseOverlayJob,
   TVNoiseOverlayUploadResponse,
   WaveformOverlay,
+  YoutubeDownloadConfigResponse,
+  YoutubeDownloadFilesResponse,
+  YoutubeDownloadJob,
 } from "@/types/api";
 
 export const getChannels = (groupId?: string) => {
@@ -999,4 +1002,44 @@ export async function updateCtaOverlay(id: string, payload: Partial<CtaOverlay>)
 
 export async function deleteCtaOverlay(id: string) {
   return requestJson<void>(`/api/story-video/cta-overlays/${id}`, { method: "DELETE" });
+}
+
+// === YouTube Downloader ===
+
+export async function getYoutubeDownloadConfig() {
+  return requestJson<YoutubeDownloadConfigResponse>("/api/youtube-download/config");
+}
+
+export async function startYoutubeDownload(payload: {
+  links: string[];
+  outputDir: string;
+  downloadVideo: boolean;
+  extractAudio: boolean;
+}) {
+  return requestJson<{ sessionId: string }>("/api/youtube-download/jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getYoutubeDownloadJob(sessionId: string) {
+  return requestJson<YoutubeDownloadJob>(`/api/youtube-download/jobs/${sessionId}`);
+}
+
+export async function cancelYoutubeDownload(sessionId: string) {
+  return requestJson<YoutubeDownloadJob>(`/api/youtube-download/jobs/${sessionId}/cancel`, { method: "POST" });
+}
+
+export async function listYoutubeDownloadFiles(outputDir: string) {
+  const suffix = outputDir ? `?dir=${encodeURIComponent(outputDir)}` : "";
+  return requestJson<YoutubeDownloadFilesResponse>(`/api/youtube-download/files${suffix}`);
+}
+
+export async function deleteYoutubeDownloadFile(outputDir: string, name: string) {
+  return requestJson<{ deleted: string; outputDir: string }>("/api/youtube-download/files", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ outputDir, name }),
+  });
 }

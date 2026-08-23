@@ -872,6 +872,59 @@ export interface DownloadProgress {
   addedClips: number;
 }
 
+// === YouTube Downloader (standalone page) ===
+
+export type YoutubeDownloadItemStatus =
+  | "pending"
+  | "downloading"
+  | "extracting"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface YoutubeDownloadItem {
+  id: string;
+  url: string;
+  title: string;
+  status: YoutubeDownloadItemStatus;
+  percent: number;
+  speed: string;
+  eta: string;
+  videoFile: string;
+  audioFile: string;
+  sizeBytes: number;
+  error: string | null;
+}
+
+export interface YoutubeDownloadJob {
+  sessionId: string;
+  status: "downloading" | "completed" | "failed" | "cancelled";
+  outputDir: string;
+  downloadVideo: boolean;
+  extractAudio: boolean;
+  current: number;
+  total: number;
+  message: string;
+  cancelRequested: boolean;
+  items: YoutubeDownloadItem[];
+}
+
+export interface YoutubeDownloadFile {
+  name: string;
+  kind: string;
+  sizeBytes: number;
+  modifiedAt: string;
+}
+
+export interface YoutubeDownloadFilesResponse {
+  outputDir: string;
+  files: YoutubeDownloadFile[];
+}
+
+export interface YoutubeDownloadConfigResponse {
+  defaultOutputDir: string;
+}
+
 export interface CRTSettings {
   noiseStrength: number;
   scanlineOpacity: number;

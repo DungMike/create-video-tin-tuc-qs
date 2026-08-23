@@ -172,6 +172,9 @@ class Config:
     EFFECTS_LIBRARY_DIR = os.getenv("EFFECTS_LIBRARY_DIR", os.path.join(STORAGE_DIR, "effects_library"))
     DECOR_VIDEOS_DIR = os.getenv("DECOR_VIDEOS_DIR", os.path.join(STORAGE_DIR, "decor_videos"))
     BATCH_RETRY_RETENTION_SECONDS = int(os.getenv("BATCH_RETRY_RETENTION_SECONDS", "86400"))
+    # Default folder prefilled on the YouTube downloader page. The page lets the
+    # user point at any absolute folder, so this is only the starting suggestion.
+    YOUTUBE_DOWNLOAD_DIR = os.getenv("YOUTUBE_DOWNLOAD_DIR", os.path.join(STORAGE_DIR, "youtube_downloads"))
 
     # Web UI
     WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")

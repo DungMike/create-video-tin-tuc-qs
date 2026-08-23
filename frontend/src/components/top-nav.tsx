@@ -38,6 +38,9 @@ export function TopNav() {
         <Button asChild variant={currentPath === "/story-video" ? "secondary" : "ghost"}>
           <Link to="/story-video">Story Video</Link>
         </Button>
+        <Button asChild variant={currentPath === "/youtube-download" ? "secondary" : "ghost"}>
+          <Link to="/youtube-download">YouTube Download</Link>
+        </Button>
       </div>
     </nav>
   );

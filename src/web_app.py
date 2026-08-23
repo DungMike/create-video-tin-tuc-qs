@@ -64,6 +64,8 @@ from src.routes.news_bulletin_routes import news_bp  # noqa: E402
 app.register_blueprint(news_bp)
 from src.routes.story_video_routes import story_video_bp  # noqa: E402
 app.register_blueprint(story_video_bp)
+from src.routes.youtube_download_routes import youtube_download_bp  # noqa: E402
+app.register_blueprint(youtube_download_bp)
 app.config["MAX_CONTENT_LENGTH"] = Config.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
 

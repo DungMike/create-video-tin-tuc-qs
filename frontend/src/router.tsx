@@ -13,6 +13,7 @@ import { StoryVideoPage } from "@/pages/StoryVideoPage";
 import { StoryVideoSettingsPage } from "@/pages/StoryVideoSettingsPage";
 import { UploadPage } from "@/pages/UploadPage";
 import { VoicesPage } from "@/pages/VoicesPage";
+import { YoutubeDownloadPage } from "@/pages/YoutubeDownloadPage";
 
 export const router = createBrowserRouter([
   {
@@ -74,6 +75,10 @@ export const router = createBrowserRouter([
   {
     path: "/story-video/settings",
     element: <StoryVideoSettingsPage />,
+  },
+  {
+    path: "/youtube-download",
+    element: <YoutubeDownloadPage />,
   },
 ]);
 
