@@ -265,14 +265,24 @@ def search_pixabay_videos(query: str, page: int = 1, per_page: int = 20) -> dict
     }
 
 
-def search_pexels_videos(query: str, page: int = 1, per_page: int = 20) -> dict:
+def search_pexels_videos(
+    query: str,
+    page: int = 1,
+    per_page: int = 20,
+    orientation: str | None = None,
+) -> dict:
     api_key = Config.PEXELS_API_KEY
     if not api_key:
         raise ValueError("PEXELS_API_KEY is not configured")
 
+    # Pexels loc orientation ngay o API; bo qua khi None de giu nguyen hanh vi cu.
+    params: dict = {"query": query, "page": page, "per_page": per_page}
+    if orientation:
+        params["orientation"] = orientation
+
     resp = requests.get(
         "https://api.pexels.com/videos/search",
-        params={"query": query, "page": page, "per_page": per_page},
+        params=params,
         headers={"Authorization": api_key},
         timeout=30,
     )
@@ -296,13 +306,24 @@ PIXABAY_MAX_PER_PAGE = 200  # Pixabay: per_page valid 3-200
 PEXELS_MAX_PER_PAGE = 80  # Pexels: per_page valid 1-80
 
 
-def search_provider_videos(provider: str, query: str, page: int = 1, per_page: int | None = None) -> dict:
+def search_provider_videos(
+    provider: str,
+    query: str,
+    page: int = 1,
+    per_page: int | None = None,
+    orientation: str | None = None,
+) -> dict:
+    """Search one provider. ``orientation`` chi co tac dung voi Pexels.
+
+    Pixabay video endpoint khong co tham so orientation (chi min_width/min_height),
+    nen caller phai tu loc theo width/height tren ket qua tra ve.
+    """
     if provider == "pixabay":
         size = PIXABAY_MAX_PER_PAGE if per_page is None else max(3, min(PIXABAY_MAX_PER_PAGE, per_page))
         return search_pixabay_videos(query, page, size)
     if provider == "pexels":
         size = PEXELS_MAX_PER_PAGE if per_page is None else max(1, min(PEXELS_MAX_PER_PAGE, per_page))
-        return search_pexels_videos(query, page, size)
+        return search_pexels_videos(query, page, size, orientation)
     raise ValueError("Unsupported provider")
 
 

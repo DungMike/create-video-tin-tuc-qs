@@ -705,6 +705,101 @@ export interface StoryProviderVideoSearchResponse {
   perPage: number;
 }
 
+// === Bulk harvest: tải hết video theo từ khoá trước, chọn lọc sau ===
+
+export type StoryHarvestStatus =
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "stopped_disk";
+
+export interface StoryHarvestJob {
+  jobId: string;
+  status: StoryHarvestStatus;
+  libraryId: string;
+  keywords: string[];
+  providers: StoryVideoProvider[];
+  tags: string[];
+  landscapeOnly: boolean;
+  /** 0 = tải hết theo totalHits của provider. */
+  maxPerKeyword: number;
+  keywordIndex: number;
+  keywordTotal: number;
+  currentKeyword: string;
+  currentProvider: StoryVideoProvider;
+  /** Số request API đã dùng — chỉ search mới tốn quota, tải file thì không. */
+  searchRequests: number;
+  downloaded: number;
+  skipped: number;
+  failed: number;
+  bytesDownloaded: number;
+  message: string;
+  startedAt: string;
+  updatedAt: string;
+  error: string | null;
+  /** Chỉ có ở endpoint list. */
+  keptItems?: number;
+  totalItems?: number;
+}
+
+export interface StoryHarvestItem {
+  itemId: string;
+  provider: StoryVideoProvider;
+  videoId: string;
+  keyword: string;
+  title: string;
+  filename: string;
+  relativePath: string;
+  /** URL /media/... — file nằm trên máy này, preview không gọi tới provider. */
+  previewPath: string;
+  duration: number;
+  width: number;
+  height: number;
+  pageUrl: string;
+  author: string;
+  bytes: number;
+  status: "kept" | "deleted" | "committed";
+  createdAt: string;
+}
+
+export interface StoryHarvestItemsResponse {
+  items: StoryHarvestItem[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+  keywords: string[];
+  keptTotal: number;
+}
+
+export interface StartStoryHarvestRequest {
+  libraryId: string;
+  keywords: string[];
+  providers: StoryVideoProvider[];
+  tags?: string[];
+  landscapeOnly?: boolean;
+  maxPerKeyword?: number;
+}
+
+export type StoryHarvestDeleteRequest =
+  | { scope: "ids"; itemIds: string[] }
+  | { scope: "keyword"; keyword: string }
+  | { scope: "all" };
+
+export interface StoryHarvestDeleteResponse {
+  scope: "ids" | "keyword" | "all";
+  deletedCount: number;
+  failedItemIds: string[];
+  remainingCount: number;
+}
+
+export interface CommitStoryHarvestResponse {
+  sessionId: string;
+  total: number;
+}
+
 export interface StoryLibraryResponse {
   clips: StoryClip[];
   total: number;
@@ -908,6 +1003,23 @@ export interface DriveAudioImportProgress {
   error?: string | null;
 }
 
+export interface LocalAudioFolderItem {
+  audioPath: string;
+  audioName: string;
+  outputName: string;
+  subtitlePath: string;
+  subtitleName: string;
+  sizeMb: number;
+}
+
+export interface LocalAudioFolderScan {
+  path: string;
+  items: LocalAudioFolderItem[];
+  totalSizeMb: number;
+  pairedCount: number;
+  orphanSubtitles: number;
+}
+
 export interface CreateStoryVideoRequest {
   inputType: "audio_file" | "script_url";
   inputValue: string;
@@ -938,8 +1050,10 @@ export interface StoryVideoProgress {
 export interface CreateStoryBatchItem {
   id: string;
   inputType: "audio_file" | "script_url" | "drive_audio";
+  /** Upload index ("0", "1", ...) for uploaded audio, or an absolute local path. */
   inputValue: string;
   outputName: string;
+  /** Upload index for an uploaded .srt, or an absolute local path. */
   subtitleFile?: string;
 }
 

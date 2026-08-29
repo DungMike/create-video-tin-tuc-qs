@@ -242,6 +242,7 @@ import type {
   CRTDemoResponse,
   CRTPresetsResponse,
   CRTSettings,
+  CommitStoryHarvestResponse,
   CreateStoryBatchRequest,
   CreateStoryLibraryRequest,
   CreateStoryVideoRequest,
@@ -253,8 +254,14 @@ import type {
   DownloadProgress,
   BakeStoryLibraryRequest,
   BakeStoryLibraryResponse,
+  LocalAudioFolderScan,
   ParseScriptResponse,
+  StartStoryHarvestRequest,
   StoryBatchProgress,
+  StoryHarvestDeleteRequest,
+  StoryHarvestDeleteResponse,
+  StoryHarvestItemsResponse,
+  StoryHarvestJob,
   StoryLibrariesResponse,
   StoryLibraryBakeJob,
   StoryLibraryBulkDeleteRequest,
@@ -623,6 +630,68 @@ export async function importSelectedStoryVideos(
   });
 }
 
+// === Bulk harvest: tải hết theo từ khoá trước, chọn lọc sau ===
+// Luồng riêng, độc lập với searchStoryProviderVideos/importSelectedStoryVideos ở trên.
+
+export async function startStoryHarvest(payload: StartStoryHarvestRequest) {
+  return requestJson<StoryHarvestJob>("/api/story-video/library/harvest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listStoryHarvestJobs() {
+  return requestJson<{ jobs: StoryHarvestJob[] }>("/api/story-video/library/harvest");
+}
+
+export async function getStoryHarvestJob(jobId: string) {
+  return requestJson<StoryHarvestJob>(`/api/story-video/library/harvest/${jobId}`);
+}
+
+export async function getStoryHarvestItems(jobId: string, page = 1, perPage = 24, keyword?: string) {
+  const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
+  if (keyword) params.set("keyword", keyword);
+  return requestJson<StoryHarvestItemsResponse>(
+    `/api/story-video/library/harvest/${jobId}/items?${params}`,
+  );
+}
+
+export async function cancelStoryHarvest(jobId: string) {
+  return requestJson<StoryHarvestJob>(`/api/story-video/library/harvest/${jobId}/cancel`, {
+    method: "POST",
+  });
+}
+
+export async function deleteStoryHarvestItems(jobId: string, payload: StoryHarvestDeleteRequest) {
+  return requestJson<StoryHarvestDeleteResponse>(
+    `/api/story-video/library/harvest/${jobId}/items/delete`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function commitStoryHarvest(jobId: string, libraryId: string, deleteStaging = true) {
+  return requestJson<CommitStoryHarvestResponse>(
+    `/api/story-video/library/harvest/${jobId}/commit`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ libraryId, deleteStaging }),
+    },
+  );
+}
+
+export async function deleteStoryHarvestJob(jobId: string) {
+  return requestJson<{ deleted: boolean; jobId: string }>(
+    `/api/story-video/library/harvest/${jobId}`,
+    { method: "DELETE" },
+  );
+}
+
 export async function deleteStoryClip(libraryId: string, clipId: string) {
   return requestJson<void>(`/api/story-video/library/${clipId}`, {
     method: "DELETE",
@@ -819,6 +888,15 @@ export async function createStoryBatch(payload: CreateStoryBatchRequest, audioFi
     subtitleFiles.forEach((f) => fd.append("subtitle_files", f));
   }
   return requestJson<{ batchId: string }>("/api/story-video/batch/create", { method: "POST", body: fd });
+}
+
+/** Scan a folder on the machine running the backend — no upload, just paths. */
+export async function scanLocalAudioFolder(path: string) {
+  return requestJson<LocalAudioFolderScan>("/api/story-video/batch/local-folder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
 }
 
 export async function startStoryDriveAudioImport(folderUrl: string) {

@@ -529,6 +529,268 @@ def import_selected_story_videos():
 
 
 # ---------------------------------------------------------------------------
+# 4d. Bulk harvest — tai het video theo tu khoa TRUOC, chon loc SAU.
+#
+# Luong doc lap voi 4b/4c o tren: thay vi preview tung ket qua tu CDN provider
+# roi moi tai, o day search -> tai het ve staging -> preview tu o cung -> xoa
+# video thua -> chi video con lai moi cat clip va vao thu vien.
+# Xem src/utils/story_bulk_harvest.py.
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/library/harvest", methods=["POST"])
+def start_story_harvest():
+    from src.utils.story_bulk_harvest import start_harvest_job
+
+    data = request.get_json(silent=True) or {}
+    library_id, err = _resolve_or_404(data.get("libraryId"))
+    if err:
+        return err
+
+    raw_keywords = data.get("keywords")
+    if isinstance(raw_keywords, str):
+        raw_keywords = raw_keywords.replace(",", "\n").split("\n")
+    if not isinstance(raw_keywords, list):
+        return _error("keywords phai la array hoac chuoi.", code="invalid_keywords")
+
+    providers = data.get("providers")
+    if not isinstance(providers, list):
+        return _error("providers phai la array.", code="invalid_providers")
+
+    tags = data.get("tags") or []
+    if not isinstance(tags, list):
+        return _error("tags phai la array.", code="invalid_tags")
+
+    try:
+        max_per_keyword = max(0, int(data.get("maxPerKeyword") or 0))
+    except (TypeError, ValueError):
+        return _error("maxPerKeyword khong hop le.", code="invalid_max_per_keyword")
+
+    try:
+        progress = start_harvest_job(
+            keywords=raw_keywords,
+            providers=providers,
+            library_id=library_id,
+            tags=tags,
+            landscape_only=bool(data.get("landscapeOnly", True)),
+            max_per_keyword=max_per_keyword,
+        )
+    except ValueError as exc:
+        return _error(str(exc), code="invalid_harvest_request")
+
+    return jsonify(progress), 202
+
+
+@story_video_bp.route("/api/story-video/library/harvest", methods=["GET"])
+def list_story_harvest_jobs():
+    from src.utils.story_bulk_harvest import list_harvest_jobs
+
+    return jsonify({"jobs": list_harvest_jobs()})
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>", methods=["GET"])
+def get_story_harvest_job(job_id: str):
+    from src.utils.story_bulk_harvest import load_harvest_progress
+
+    progress = load_harvest_progress(job_id)
+    if not progress:
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+    return jsonify(progress)
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>/items", methods=["GET"])
+def get_story_harvest_items(job_id: str):
+    from src.utils.story_bulk_harvest import load_harvest_manifest, load_harvest_progress
+
+    if not load_harvest_progress(job_id):
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+        per_page = min(100, max(1, int(request.args.get("per_page", 24))))
+    except ValueError:
+        return _error("page/per_page khong hop le.", code="invalid_pagination")
+
+    all_items = [
+        item for item in load_harvest_manifest(job_id).get("items", [])
+        if item.get("status") == "kept"
+    ]
+    keywords = sorted({item.get("keyword") or "" for item in all_items if item.get("keyword")})
+
+    keyword = request.args.get("keyword", "").strip()
+    items = [item for item in all_items if item.get("keyword") == keyword] if keyword else all_items
+
+    total = len(items)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    start = (page - 1) * per_page
+
+    return jsonify({
+        "items": items[start:start + per_page],
+        "total": total,
+        "page": page,
+        "perPage": per_page,
+        "totalPages": total_pages,
+        "keywords": keywords,
+        "keptTotal": len(all_items),
+    })
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>/cancel", methods=["POST"])
+def cancel_story_harvest(job_id: str):
+    from src.utils.story_bulk_harvest import request_harvest_cancel
+
+    progress = request_harvest_cancel(job_id)
+    if not progress:
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+    return jsonify(progress)
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>/items/delete", methods=["POST"])
+def delete_story_harvest_items(job_id: str):
+    from src.utils.story_bulk_harvest import (
+        delete_harvest_items,
+        load_harvest_manifest,
+        load_harvest_progress,
+    )
+
+    progress = load_harvest_progress(job_id)
+    if not progress:
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+
+    # Worker ghi de nguyen file manifest, nen xoa item khi job dang chay se bi
+    # ghi de mat. Doi job dung han (hoac huy) roi moi chon loc.
+    if progress.get("status") in {"running", "cancelling"}:
+        return _error(
+            "Job dang tai video. Hay doi tai xong hoac huy truoc khi xoa.",
+            code="harvest_running",
+            status=409,
+        )
+
+    data = request.get_json(silent=True) or {}
+    scope = str(data.get("scope") or "ids").strip().lower()
+
+    if scope == "all":
+        result = delete_harvest_items(job_id, delete_all=True)
+    elif scope == "keyword":
+        keyword = str(data.get("keyword") or "").strip()
+        if not keyword:
+            return _error("Can truyen keyword khi scope='keyword'.", code="invalid_keyword")
+        item_ids = [
+            item["itemId"] for item in load_harvest_manifest(job_id).get("items", [])
+            if item.get("status") == "kept" and item.get("keyword") == keyword
+        ]
+        result = delete_harvest_items(job_id, item_ids)
+    elif scope == "ids":
+        raw_ids = data.get("itemIds")
+        if not isinstance(raw_ids, list):
+            return _error("itemIds phai la array.", code="invalid_item_ids")
+        item_ids = [str(value).strip() for value in raw_ids if str(value).strip()]
+        if not item_ids:
+            return _error("Can it nhat 1 itemId de xoa.", code="invalid_item_ids")
+        result = delete_harvest_items(job_id, item_ids)
+    else:
+        return _error("scope phai la 'ids', 'keyword' hoac 'all'.", code="invalid_scope")
+
+    return jsonify({"scope": scope, **result})
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>/commit", methods=["POST"])
+def commit_story_harvest(job_id: str):
+    from src.utils.story_bulk_harvest import load_harvest_manifest, load_harvest_progress
+
+    progress = load_harvest_progress(job_id)
+    if not progress:
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+
+    if progress.get("status") in {"running", "cancelling"}:
+        return _error(
+            "Job dang tai video. Hay doi tai xong hoac huy truoc khi nhap thu vien.",
+            code="harvest_running",
+            status=409,
+        )
+
+    data = request.get_json(silent=True) or {}
+    library_id, err = _resolve_or_404(data.get("libraryId") or progress.get("libraryId"))
+    if err:
+        return err
+
+    pending = [
+        item for item in load_harvest_manifest(job_id).get("items", [])
+        if item.get("status") == "kept"
+    ]
+    if not pending:
+        return _error("Khong con video nao de nhap thu vien.", code="no_harvest_items")
+
+    delete_staging = bool(data.get("deleteStaging", True))
+    session_id = f"hvc-{str(uuid.uuid4())[:8]}"
+
+    # Dung chung _download_sessions + GET /download-progress/<id> co san nen
+    # frontend poll bang dung mot ham getStoryDownloadProgress.
+    with _download_sessions_lock:
+        _download_sessions[session_id] = {
+            "sessionId": session_id,
+            "status": "splitting",
+            "current": 0,
+            "total": len(pending),
+            "message": "Bat dau cat clip va nhap thu vien...",
+            "addedClips": 0,
+            "libraryId": library_id,
+        }
+
+    def _run_commit():
+        from src.utils.story_bulk_harvest import commit_harvest_job
+
+        def progress_cb(progress_data):
+            with _download_sessions_lock:
+                if session_id in _download_sessions:
+                    _download_sessions[session_id].update(progress_data)
+
+        try:
+            result = commit_harvest_job(
+                job_id,
+                library_id=library_id,
+                session_id=session_id,
+                progress_callback=progress_cb,
+                delete_staging=delete_staging,
+            )
+            added_count = len(result) if isinstance(result, list) else 0
+            with _download_sessions_lock:
+                _download_sessions[session_id].update({
+                    "status": "completed",
+                    "current": len(pending),
+                    "total": len(pending),
+                    "message": f"Hoan tat! Da them {added_count} clips.",
+                    "addedClips": added_count,
+                })
+        except Exception as exc:
+            logger.error(f"[StoryVideo] Harvest commit failed: {exc}", exc_info=True)
+            with _download_sessions_lock:
+                _download_sessions[session_id].update({
+                    "status": "failed",
+                    "message": f"Loi: {str(exc)}",
+                })
+
+    threading.Thread(target=_run_commit, daemon=True).start()
+    return jsonify({"sessionId": session_id, "total": len(pending)}), 202
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>", methods=["DELETE"])
+def delete_story_harvest_job(job_id: str):
+    from src.utils.story_bulk_harvest import delete_harvest_job, load_harvest_progress
+
+    progress = load_harvest_progress(job_id)
+    if not progress:
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+    if progress.get("status") in {"running", "cancelling"}:
+        return _error(
+            "Job dang chay. Hay huy truoc khi xoa.",
+            code="harvest_running",
+            status=409,
+        )
+
+    delete_harvest_job(job_id)
+    return jsonify({"deleted": True, "jobId": job_id})
+
+
+# ---------------------------------------------------------------------------
 # 5. DELETE /api/story-video/library/<clip_id>
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/library/<clip_id>", methods=["DELETE"])
@@ -1600,6 +1862,83 @@ def get_drive_audio_import(session_id: str):
 
 
 # ---------------------------------------------------------------------------
+# 13b. POST /api/story-video/batch/local-folder - scan a folder on this machine
+# ---------------------------------------------------------------------------
+LOCAL_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+
+
+@story_video_bp.route("/api/story-video/batch/local-folder", methods=["POST"])
+def scan_local_audio_folder():
+    """List audio (+ paired .srt) inside a folder on the machine running this server.
+
+    Backend and browser share the same filesystem here, so a batch can reference the
+    originals by absolute path instead of re-uploading gigabytes through the form.
+    """
+    data = request.get_json(silent=True) or {}
+    raw_path = str(data.get("path", "") or "").strip().strip('"').strip("'")
+    if not raw_path:
+        return _error("Nhap duong dan thu muc.", code="empty_path")
+
+    folder = os.path.abspath(os.path.expandvars(os.path.expanduser(raw_path)))
+    if not os.path.isdir(folder):
+        return _error(f"Thu muc khong ton tai: {folder}", code="folder_not_found", status=404)
+
+    recursive = bool(data.get("recursive", True))
+
+    # Collect audio and subtitles per directory so an .srt only pairs with an audio
+    # file of the same stem sitting next to it (same rule the browser picker uses).
+    items: list[dict] = []
+    total_bytes = 0
+    paired_count = 0
+    orphan_subtitles = 0
+
+    walker = os.walk(folder) if recursive else [(folder, [], os.listdir(folder))]
+    for dir_path, _dirs, filenames in walker:
+        subtitles: dict[str, str] = {}
+        audio_names: list[str] = []
+        for name in filenames:
+            ext = os.path.splitext(name)[1].lower()
+            if ext == ".srt":
+                subtitles[os.path.splitext(name)[0].lower()] = os.path.join(dir_path, name)
+            elif ext in LOCAL_AUDIO_EXTENSIONS:
+                audio_names.append(name)
+
+        used_stems: set[str] = set()
+        for name in sorted(audio_names, key=str.lower):
+            audio_path = os.path.join(dir_path, name)
+            stem = os.path.splitext(name)[0]
+            subtitle_path = subtitles.get(stem.lower(), "")
+            if subtitle_path:
+                paired_count += 1
+                used_stems.add(stem.lower())
+            try:
+                size_bytes = os.path.getsize(audio_path)
+            except OSError:
+                size_bytes = 0
+            total_bytes += size_bytes
+            items.append({
+                "audioPath": audio_path,
+                "audioName": name,
+                "outputName": stem,
+                "subtitlePath": subtitle_path,
+                "subtitleName": os.path.basename(subtitle_path) if subtitle_path else "",
+                "sizeMb": round(size_bytes / (1024 * 1024), 2),
+            })
+        orphan_subtitles += len(set(subtitles) - used_stems)
+
+    if not items:
+        return _error(f"Khong tim thay file audio nao trong: {folder}", code="no_audio_found", status=404)
+
+    return jsonify({
+        "path": folder,
+        "items": items,
+        "totalSizeMb": round(total_bytes / (1024 * 1024), 1),
+        "pairedCount": paired_count,
+        "orphanSubtitles": orphan_subtitles,
+    })
+
+
+# ---------------------------------------------------------------------------
 # 14. POST /api/story-video/batch/create - batch of stories
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/batch/create", methods=["POST"])
@@ -1682,6 +2021,8 @@ def create_story_batch():
         output_name = str(item.get("outputName", f"story_{idx + 1}")).strip()
 
         # Map local upload indexes or Drive staging tokens to durable batch files.
+        # An absolute path is taken as-is: the file already lives on this machine, so
+        # the pipeline reads the original instead of a re-uploaded copy.
         if input_type == "audio_file":
             if input_value.isdigit():
                 file_idx = int(input_value)
@@ -1691,6 +2032,14 @@ def create_story_batch():
                 input_value = audio_name_map[input_value]
             elif secure_filename(input_value) in audio_name_map:
                 input_value = audio_name_map[secure_filename(input_value)]
+            elif os.path.isabs(input_value):
+                if not os.path.isfile(input_value):
+                    shutil.rmtree(batch_dir, ignore_errors=True)
+                    return _error(
+                        f"Khong tim thay file audio local: {input_value}",
+                        code="local_audio_not_found",
+                        status=404,
+                    )
         elif input_type == "drive_audio":
             try:
                 input_value, _original_name = copy_staged_audio_to_batch(input_value, batch_dir, idx)
@@ -1711,6 +2060,18 @@ def create_story_batch():
                 subtitle_path = subtitle_name_map[subtitle_ref]
             elif secure_filename(subtitle_ref) in subtitle_name_map:
                 subtitle_path = subtitle_name_map[secure_filename(subtitle_ref)]
+            elif os.path.isabs(subtitle_ref):
+                if not subtitle_ref.lower().endswith(".srt"):
+                    shutil.rmtree(batch_dir, ignore_errors=True)
+                    return _error("File subtitle phải có định dạng .srt.", code="invalid_subtitle_format")
+                if not os.path.isfile(subtitle_ref):
+                    shutil.rmtree(batch_dir, ignore_errors=True)
+                    return _error(
+                        f"Khong tim thay file subtitle local: {subtitle_ref}",
+                        code="local_subtitle_not_found",
+                        status=404,
+                    )
+                subtitle_path = subtitle_ref
 
         story_configs.append({
             "story_id": f"sv-{str(uuid.uuid4())[:8]}",
