@@ -185,6 +185,10 @@ class StoryVideoPipelineRunner:
         self.voice_id = config_dict.get("voice_id", "")
         self.waveform_overlay_id = str(config_dict.get("waveform_overlay_id", "") or "").strip()
         self.tv_effect_style_id = str(config_dict.get("tv_effect_style_id", "") or "").strip()
+        # Opt-out for the TV style pass on a library whose clips are NOT pre-baked:
+        # render the clips as they are (overlays + subtitle only). This also unlocks
+        # the GPU overlay path, which the CPU-only style filter would otherwise block.
+        self.skip_tv_effect = bool(config_dict.get("skip_tv_effect", False))
         self.subtitle_path = str(config_dict.get("subtitle_path", "") or "").strip()
         # Optional intro clip (already normalized to the canonical output spec on
         # upload) prepended to the front of the finished video. "" = no intro.
@@ -742,10 +746,18 @@ class StoryVideoPipelineRunner:
 
         Pre-baked "styled" libraries already have the style burned into every
         clip, so the style pass is skipped to avoid double-styling (and to take
-        the much cheaper overlay-only render path).
+        the much cheaper overlay-only render path). `skip_tv_effect` asks for the
+        same cheap path on a library that was never baked.
         """
         from src.processors.crt_effect_processor import get_tv_effect_filter
         from src.utils.story_library import is_styled_library
+
+        if self.skip_tv_effect:
+            logger.info(
+                f"[StoryPipeline:{self.story_id}] TV style disabled for this render; "
+                f"skipping the style pass."
+            )
+            return ""
 
         if is_styled_library(self.library_id):
             logger.info(

@@ -149,6 +149,7 @@ class StoryVideoBatchRunner:
                 "output_name": config.get("output_name", ""),
                 "clip_tags": config.get("clip_tags", []),
                 "library_id": config.get("library_id", ""),
+                "skip_tv_effect": bool(config.get("skip_tv_effect", False)),
                 "voice_id": config.get("voice_id", ""),
                 "intro_video_path": config.get("intro_video_path", ""),
                 "subtitle_path": config.get("subtitle_path", ""),

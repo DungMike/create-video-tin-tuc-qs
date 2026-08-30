@@ -32,6 +32,11 @@ TV_EFFECT_PARAM_SPEC = {
     "flicker": {"min": 0.0, "max": 0.08, "default": 0.0},
     "flickerSpeed": {"min": 0.5, "max": 15.0, "default": 3.0},
     "soften": {"min": 0.0, "max": 1.0, "default": 0.0},
+    # Bloom: quang sang toa ra tu chinh vung sang cua khung hinh. Mac dinh 0 nen
+    # moi style/config da luu deu sinh ra dung chuoi filter nhu truoc.
+    "bloom": {"min": 0.0, "max": 1.0, "default": 0.0},
+    "bloomThreshold": {"min": 0.5, "max": 0.95, "default": 0.75},
+    "bloomRadius": {"min": 0.0, "max": 1.0, "default": 0.5},
 }
 
 # Flicker mac dinh duoc giu thap (<=0.02, toc do cham 2.5-5Hz) — bien do lon /
@@ -166,6 +171,19 @@ TV_EFFECT_STYLES = [
         "description": "Xanh lạnh sâu, màu rút bớt, tương phản nhỉnh — hợp chuyện buồn, cô đơn, mùa đông.",
         "params": {"tone": "cool", "saturation": 0.7, "contrast": 1.1, "brightness": -0.02, "noise": 5, "vignette": 0.55},
     },
+    # --- Nhom lap lanh / bloom (2026-08) ---
+    {
+        "id": "starlight_glow",
+        "name": "Ánh Sao Lấp Lánh",
+        "description": "Vùng sáng toả quầng mềm, tông ấm nhẹ — lung linh mà vẫn tự nhiên, hợp mọi cảnh.",
+        "params": {"tone": "warm", "saturation": 1.05, "contrast": 1.02, "bloom": 0.5, "bloomThreshold": 0.78, "bloomRadius": 0.55, "vignette": 0.35},
+    },
+    {
+        "id": "dreamy_sparkle",
+        "name": "Mơ Màng Lung Linh",
+        "description": "Quầng sáng rộng và mềm, hơi nhoè — hợp đoạn hồi tưởng, chuyện cổ tích, chữa lành.",
+        "params": {"tone": "warm", "brightness": 0.03, "soften": 0.4, "bloom": 0.65, "bloomThreshold": 0.7, "bloomRadius": 0.7, "vignette": 0.3},
+    },
     {
         "id": "sepia_letter",
         "name": "Sepia Thư Cũ",
@@ -240,6 +258,30 @@ def build_tv_effect_chain(params: dict | None) -> str:
     if p["soften"] > 0.05:
         amount = 0.3 + 0.7 * p["soften"]
         parts.append(f"unsharp=5:5:-{amount:.2f}:5:5:0")
+
+    if p["bloom"] > 0.01:
+        # Chi mot doan nay trong ca chuoi la filtergraph co nhanh (`;`) thay vi
+        # chuoi phang. Ba duong tieu thu deu chap nhan: `-vf` cua preview,
+        # `[0:v]{chain}[styled]` trong filter_complex cua pipeline, va
+        # canonical_video_filter(prefix=...) khi bake. Label deu co tien to `bl_`
+        # de khong dung do voi label cua graph ben ngoai.
+        #
+        # Blend CHI tren plane luma (`c0_*`), chroma lay nguyen tu ban goc
+        # (`c1_opacity=0:c2_opacity=0`). Do duoc tren clip that: `all_mode=screen`
+        # keo UAVG 121.6 -> 156.2 va SATAVG 14.3 -> 39.5, tuc lech mau nang;
+        # ban luma-only giu chroma khong doi mot don vi.
+        #
+        # `u='val':v='val'` cung phai viet ra: lutyuv khong pass-through plane
+        # khong duoc khai bao.
+        threshold = int(round(255 * p["bloomThreshold"]))
+        sigma = 5 + 35 * p["bloomRadius"]
+        parts.append(
+            rf"split=2[bl_a][bl_b];"
+            rf"[bl_b]lutyuv=y='if(gt(val\,{threshold})\,val\,0)':u='val':v='val',"
+            rf"gblur=sigma={sigma:.3g}:planes=1[bl_g];"
+            rf"[bl_a][bl_g]blend=c0_mode=screen:c0_opacity={p['bloom']:.3g}"
+            rf":c1_opacity=0:c2_opacity=0"
+        )
 
     if p["scanlines"] > 0.005:
         parts.append(f"drawgrid=w=iw:h=2:t=1:c=black@{p['scanlines']:.3g}")

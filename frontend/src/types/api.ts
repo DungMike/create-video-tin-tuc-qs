@@ -915,6 +915,9 @@ export interface TVEffectParams {
   flicker: number;
   flickerSpeed: number;
   soften: number;
+  bloom: number;
+  bloomThreshold: number;
+  bloomRadius: number;
 }
 
 export interface TVEffectStyle {
@@ -952,21 +955,84 @@ export interface TVNoiseOverlay {
   status: "processing" | "ready" | "failed";
   enabled: boolean;
   order: number;
-  // "alpha" (lumakey, default) or "screen" (black-background textures: dust, light leak...).
-  blendMode?: "alpha" | "screen";
+  // "alpha" (lumakey, default), "screen" (black-background textures: dust, light
+  // leak...), or "luma" (alpha from the source's own brightness — sparkle layers).
+  blendMode?: "alpha" | "screen" | "luma";
   opacity: number;
   tolerance: number;
   softness: number;
+  // "luma" only: pushes the layer's colour to white and normalises the alpha peak
+  // before opacity is applied.
+  lumaGain?: number;
+  // Set on generated layers (sparkle); absent on uploaded/imported ones.
+  kind?: string;
+  meta?: { presetId?: string; params?: Record<string, number> };
   sourceUrl?: string;
   error?: string | null;
   createdAt: string;
   updatedAt?: string;
 }
 
+export interface SparklePreset {
+  id: string;
+  name: string;
+  description: string;
+  paramsUsed: string[];
+  params: Record<string, number>;
+}
+
+export interface SparkleParamSpec {
+  min: number;
+  max: number;
+  default: number;
+}
+
+export interface SparklePresetsResponse {
+  presets: SparklePreset[];
+  paramSpec: Record<string, SparkleParamSpec>;
+}
+
+export interface SparkleCreateResponse {
+  sessionId: string;
+  presetId: string;
+  params: Record<string, number>;
+}
+
+export interface EffectPreviewClip {
+  name: string;
+  durationSeconds: number;
+}
+
+export interface EffectPreviewSource {
+  id: string;
+  name: string;
+  clipCount: number;
+  clips: EffectPreviewClip[];
+  durationSeconds: number;
+  basePath: string;
+  previewPath: string | null;
+  previewSeconds?: number;
+  appliedStyle?: boolean;
+  appliedOverlays?: boolean;
+  appliedCompare?: boolean;
+  appliedLayers?: { id?: string; name?: string; kind?: string; blendMode?: string; opacity?: number }[];
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface EffectPreviewJob {
+  sessionId: string;
+  status: "processing" | "completed" | "failed";
+  message: string;
+  sourceId: string;
+  source: EffectPreviewSource | null;
+  error?: string | null;
+}
+
 export interface TVNoiseOverlayJob {
   sessionId: string;
-  status: "processing" | "downloading" | "completed" | "failed";
-  action: "upload" | "import_youtube" | string;
+  status: "processing" | "downloading" | "generating" | "completed" | "failed";
+  action: "upload" | "import_youtube" | "create_sparkle" | string;
   current: number;
   total: number;
   message: string;
@@ -1027,6 +1093,8 @@ export interface CreateStoryVideoRequest {
   libraryId?: string;
   clipTags?: string[];
   crtSettings?: CRTSettings;
+  /** Bỏ qua bước hiệu ứng TV khi render (thư viện chưa bake hiệu ứng). */
+  skipTvEffect?: boolean;
   waveformOverlayId?: string;
   voiceId?: string;
   subtitleFont?: string;
@@ -1066,6 +1134,8 @@ export interface CreateStoryBatchRequest {
     optimizeMode?: boolean;
     clipTags?: string[];
     crtSettings?: CRTSettings;
+    /** Bỏ qua bước hiệu ứng TV khi render (thư viện chưa bake hiệu ứng). */
+    skipTvEffect?: boolean;
     waveformOverlayId?: string;
     voiceId?: string;
     subtitleFont?: string;

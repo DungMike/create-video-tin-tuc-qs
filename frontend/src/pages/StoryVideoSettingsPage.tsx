@@ -1,5 +1,5 @@
 import { Check, Eye, Link as LinkIcon, Loader2, Save, Sparkles, Star, Trash2, Upload } from "lucide-react";
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
 import { EmptyCard } from "@/components/empty-card";
@@ -14,7 +14,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   ApiError,
+  createSparkleOverlay,
   deleteCtaOverlay,
+  deleteEffectPreviewSource,
   deleteTVNoiseOverlay,
   deleteWaveformOverlay,
   generateCustomTVEffectPreview,
@@ -23,19 +25,33 @@ import {
   getCtaOverlays,
   getTVEffectStyles,
   getTVNoiseOverlayJob,
+  getEffectPreviewJob,
+  getEffectPreviewSources,
   getTVNoiseOverlays,
+  getSparklePresets,
   getWaveformOverlays,
   importTVNoiseOverlayFromYoutube,
+  renderEffectPreview,
   saveCustomTVEffect,
   selectTVEffectStyle,
   updateCtaOverlay,
   updateTVNoiseOverlay,
   updateWaveformOverlay,
   uploadCtaOverlay,
+  uploadEffectPreviewSource,
   uploadTVNoiseOverlay,
   uploadWaveformOverlay,
 } from "@/lib/api";
-import type { CtaOverlay, TVEffectParams, TVEffectStyle, TVEffectTone, TVNoiseOverlay, WaveformOverlay } from "@/types/api";
+import type {
+  CtaOverlay,
+  EffectPreviewSource,
+  SparklePreset,
+  TVEffectParams,
+  TVEffectStyle,
+  TVEffectTone,
+  TVNoiseOverlay,
+  WaveformOverlay,
+} from "@/types/api";
 
 const DEFAULT_EFFECT_PARAMS: TVEffectParams = {
   tone: "none",
@@ -50,6 +66,9 @@ const DEFAULT_EFFECT_PARAMS: TVEffectParams = {
   flicker: 0,
   flickerSpeed: 3,
   soften: 0,
+  bloom: 0,
+  bloomThreshold: 0.75,
+  bloomRadius: 0.5,
 };
 
 const TONE_OPTIONS: { value: TVEffectTone; label: string }[] = [
@@ -76,6 +95,9 @@ const EFFECT_PARAM_FIELDS: { key: EffectNumericKey; label: string; min: number; 
   { key: "flicker", label: "Độ nháy sáng", min: 0, max: 0.08, step: 0.005 },
   { key: "flickerSpeed", label: "Tốc độ nháy (Hz)", min: 0.5, max: 15, step: 0.5 },
   { key: "soften", label: "Làm mềm", min: 0, max: 1, step: 0.05 },
+  { key: "bloom", label: "Bloom (toả sáng)", min: 0, max: 1, step: 0.05 },
+  { key: "bloomThreshold", label: "Ngưỡng bloom", min: 0.5, max: 0.95, step: 0.01 },
+  { key: "bloomRadius", label: "Bán kính bloom", min: 0, max: 1, step: 0.05 },
 ];
 
 type EffectForm = Record<EffectNumericKey, string> & { tone: TVEffectTone };
@@ -121,6 +143,7 @@ type TVNoiseForm = {
   opacity: string;
   tolerance: string;
   softness: string;
+  lumaGain: string;
   order: string;
 };
 
@@ -130,8 +153,40 @@ const DEFAULT_NOISE_FORM: TVNoiseForm = {
   opacity: "0.35",
   tolerance: "0.08",
   softness: "0.02",
+  lumaGain: "2",
   order: "1",
 };
+
+const BLEND_MODE_HINTS: Record<NonNullable<TVNoiseOverlay["blendMode"]>, string> = {
+  alpha:
+    "Alpha: key nen den thanh trong suot bang lumakey. Hop nhieu TV, bui film. Tolerance/Softness dieu khien nguong key.",
+  screen:
+    "Screen: cong sang luc render, khong can alpha. Hop light leak, bokeh. Luu y: che do nay ep pass overlay ve CPU.",
+  luma:
+    "Luma: alpha lay tu chinh do sang cua nguon, mau day ve trang. Hop lop lap lanh — quang sang tan dan thay vi bi bet.",
+};
+
+const SPARKLE_PARAM_LABELS: Record<string, string> = {
+  density: "Mật độ hạt",
+  twinkle: "Nhấp nháy chậm",
+  size: "Kích thước hạt",
+  gain: "Độ sáng",
+  spike: "Độ dài tia",
+  sweepSpeed: "Tốc độ quét (px/s)",
+  sweepAngle: "Góc nghiêng (rad)",
+  sweepWidth: "Bề rộng vệt",
+  sweepGain: "Độ sáng vệt",
+  tintR: "Ám màu · Đỏ",
+  tintG: "Ám màu · Lục",
+  tintB: "Ám màu · Lam",
+  loopSeconds: "Độ dài loop (giây)",
+};
+
+function paramsToForm(preset: SparklePreset): Record<string, string> {
+  const form: Record<string, string> = {};
+  for (const key of preset.paramsUsed) form[key] = String(preset.params[key] ?? 0);
+  return form;
+}
 
 function formFromOverlay(overlay?: WaveformOverlay): WaveformForm {
   if (!overlay) return DEFAULT_FORM;
@@ -267,6 +322,7 @@ function formFromNoiseOverlay(overlay?: TVNoiseOverlay): TVNoiseForm {
     opacity: String(overlay.opacity ?? DEFAULT_NOISE_FORM.opacity),
     tolerance: String(overlay.tolerance ?? DEFAULT_NOISE_FORM.tolerance),
     softness: String(overlay.softness ?? DEFAULT_NOISE_FORM.softness),
+    lumaGain: String(overlay.lumaGain ?? DEFAULT_NOISE_FORM.lumaGain),
     order: String(overlay.order ?? DEFAULT_NOISE_FORM.order),
   };
 }
@@ -288,6 +344,25 @@ export function StoryVideoSettingsPage() {
   const [noiseJobId, setNoiseJobId] = useState<string | null>(null);
   const [noiseJobMessage, setNoiseJobMessage] = useState<string | null>(null);
   const [noiseDemoSrc, setNoiseDemoSrc] = useState<string | null>(null);
+  const [sparklePresets, setSparklePresets] = useState<SparklePreset[]>([]);
+  const [sparklePresetId, setSparklePresetId] = useState("");
+  const [sparkleParams, setSparkleParams] = useState<Record<string, string>>({});
+  // Ten rieng cho tung bien the: khong co no thi moi lop tao tu cung mot preset
+  // deu mang dung mot ten, khong the phan biet cac mau da luu.
+  const [sparkleName, setSparkleName] = useState("");
+  const [isSparkleCreating, setIsSparkleCreating] = useState(false);
+  const [previewSources, setPreviewSources] = useState<EffectPreviewSource[]>([]);
+  const [selectedPreviewId, setSelectedPreviewId] = useState("");
+  const [isPreviewUploading, setIsPreviewUploading] = useState(false);
+  const [isPreviewRendering, setIsPreviewRendering] = useState(false);
+  const [previewJobId, setPreviewJobId] = useState<string | null>(null);
+  const [previewMessage, setPreviewMessage] = useState<string | null>(null);
+  const [previewOptions, setPreviewOptions] = useState({
+    includeStyle: true,
+    includeOverlays: true,
+    compare: true,
+    maxSeconds: "15",
+  });
   const [tvEffectStyles, setTvEffectStyles] = useState<TVEffectStyle[]>([]);
   const [selectedEffectId, setSelectedEffectId] = useState("none");
   const [previewingEffectId, setPreviewingEffectId] = useState<string | null>(null);
@@ -318,6 +393,16 @@ export function StoryVideoSettingsPage() {
     () => ctaOverlays.find((overlay) => overlay.id === selectedCtaId) ?? ctaOverlays.find((overlay) => overlay.isDefault) ?? ctaOverlays[0],
     [ctaOverlays, selectedCtaId],
   );
+  const selectedPreviewSource = useMemo(
+    () => previewSources.find((item) => item.id === selectedPreviewId) ?? previewSources[0],
+    [previewSources, selectedPreviewId],
+  );
+
+  const selectedSparklePreset = useMemo(
+    () => sparklePresets.find((preset) => preset.id === sparklePresetId),
+    [sparklePresets, sparklePresetId],
+  );
+
   const selectedNoise = useMemo(
     () => tvNoiseOverlays.find((overlay) => overlay.id === selectedNoiseId) ?? tvNoiseOverlays[0],
     [tvNoiseOverlays, selectedNoiseId],
@@ -353,6 +438,34 @@ export function StoryVideoSettingsPage() {
       .catch((err) => setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai TV noise overlay."));
   };
 
+  const loadPreviewSources = () => {
+    return getEffectPreviewSources()
+      .then((res) => {
+        setPreviewSources(res.sources);
+        setSelectedPreviewId((current) => current || (res.sources[0]?.id ?? ""));
+      })
+      .catch(() => {
+        /* Optional feature: never block the settings page on it. */
+      });
+  };
+
+  const loadSparklePresets = () => {
+    return getSparklePresets()
+      .then((res) => {
+        setSparklePresets(res.presets);
+        const first = res.presets[0];
+        if (first) {
+          setSparklePresetId((current) => current || first.id);
+          setSparkleParams((current) =>
+            Object.keys(current).length ? current : paramsToForm(first),
+          );
+        }
+      })
+      .catch(() => {
+        /* Sparkle is optional: a failure here must not block the settings page. */
+      });
+  };
+
   const loadTVEffectStyles = () => {
     return getTVEffectStyles()
       .then((res) => {
@@ -366,10 +479,111 @@ export function StoryVideoSettingsPage() {
 
   useEffect(() => {
     setIsLoading(true);
-    Promise.all([loadOverlays(), loadCtaOverlays(), loadTVNoiseOverlays(), loadTVEffectStyles()]).finally(() =>
-      setIsLoading(false),
-    );
+    Promise.all([
+      loadOverlays(),
+      loadCtaOverlays(),
+      loadTVNoiseOverlays(),
+      loadTVEffectStyles(),
+      loadSparklePresets(),
+      loadPreviewSources(),
+    ]).finally(() => setIsLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (!previewJobId) return;
+    const interval = window.setInterval(() => {
+      getEffectPreviewJob(previewJobId)
+        .then((job) => {
+          setPreviewMessage(job.message);
+          if (job.status === "completed" || job.status === "failed") {
+            setPreviewJobId(null);
+            setIsPreviewRendering(false);
+            if (job.status === "failed") setErrorMessage(job.error ?? job.message);
+            void loadPreviewSources();
+          }
+        })
+        .catch(() => {
+          setPreviewJobId(null);
+          setIsPreviewRendering(false);
+        });
+    }, 2000);
+    return () => window.clearInterval(interval);
+  }, [previewJobId]);
+
+  const handlePreviewUpload = async (files: FileList | null) => {
+    if (!files || !files.length) return;
+    setIsPreviewUploading(true);
+    setErrorMessage(null);
+    setPreviewMessage("Dang chuan hoa va ghep clip...");
+    try {
+      const res = await uploadEffectPreviewSource(Array.from(files));
+      await loadPreviewSources();
+      setSelectedPreviewId(res.source.id);
+      setPreviewMessage(`Da san sang: ${res.source.clipCount} clip / ${res.source.durationSeconds}s`);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai bo clip preview.");
+      setPreviewMessage(null);
+    } finally {
+      setIsPreviewUploading(false);
+    }
+  };
+
+  const handlePreviewRender = async () => {
+    if (!selectedPreviewSource) return;
+    setIsPreviewRendering(true);
+    setErrorMessage(null);
+    setPreviewMessage("Dang render preview...");
+    try {
+      const maxSeconds = Number(previewOptions.maxSeconds);
+      const res = await renderEffectPreview({
+        sourceId: selectedPreviewSource.id,
+        includeStyle: previewOptions.includeStyle,
+        includeOverlays: previewOptions.includeOverlays,
+        compare: previewOptions.compare,
+        maxSeconds: Number.isFinite(maxSeconds) && maxSeconds > 0 ? maxSeconds : undefined,
+      });
+      setPreviewJobId(res.sessionId);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the render preview.");
+      setIsPreviewRendering(false);
+    }
+  };
+
+  const handlePreviewDelete = async (sourceId: string) => {
+    setErrorMessage(null);
+    try {
+      await deleteEffectPreviewSource(sourceId);
+      setSelectedPreviewId("");
+      await loadPreviewSources();
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the xoa bo clip preview.");
+    }
+  };
+
+  const handleSparkleCreate = async () => {
+    const preset = sparklePresets.find((item) => item.id === sparklePresetId);
+    if (!preset) return;
+    setIsSparkleCreating(true);
+    setErrorMessage(null);
+    setNoiseJobMessage("Dang dung lop lap lanh (25-90 giay)...");
+    try {
+      const params: Record<string, number> = {};
+      for (const key of preset.paramsUsed) {
+        const value = Number(sparkleParams[key]);
+        params[key] = Number.isFinite(value) ? value : preset.params[key];
+      }
+      const res = await createSparkleOverlay({
+        presetId: preset.id,
+        params,
+        name: sparkleName.trim() || preset.name,
+      });
+      setNoiseJobId(res.sessionId);
+      await loadTVNoiseOverlays();
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the tao lop lap lanh.");
+      setIsSparkleCreating(false);
+    }
+  };
 
   const handleSelectEffect = async (styleId: string) => {
     setIsSelectingEffect(true);
@@ -443,10 +657,16 @@ export function StoryVideoSettingsPage() {
     setCtaForm(ctaFormFromOverlay(selectedCta));
   }, [selectedCta]);
 
+  // Chi nap lai form khi DOI lop dang chon. Bam vao chinh object `selectedNoise`
+  // thi moi lan poll 3s (luc dang dung lop lap lanh, danh sach tai lai lien tuc va
+  // tra ve object moi) se ghi de nhung gi nguoi dung vua go -> khong luu duoc.
+  const selectedNoiseRef = useRef(selectedNoise);
+  selectedNoiseRef.current = selectedNoise;
+  const selectedNoiseKey = selectedNoise?.id ?? "";
   useEffect(() => {
-    setNoiseForm(formFromNoiseOverlay(selectedNoise));
+    setNoiseForm(formFromNoiseOverlay(selectedNoiseRef.current));
     setNoiseDemoSrc(null);
-  }, [selectedNoise]);
+  }, [selectedNoiseKey]);
 
   useEffect(() => {
     const hasProcessing = tvNoiseOverlays.some((overlay) => overlay.status === "processing");
@@ -462,6 +682,10 @@ export function StoryVideoSettingsPage() {
               setNoiseJobId(null);
               setIsNoiseUploading(false);
               setIsNoiseImporting(false);
+              setIsSparkleCreating(false);
+              // Chon luon lop vua tao: no la lop dang dung khi render, va day la
+              // cho nguoi dung xem lai thong so / bam Demo 3s.
+              if (job.overlayId) setSelectedNoiseId(job.overlayId);
               void loadTVNoiseOverlays();
             }
           })
@@ -535,12 +759,18 @@ export function StoryVideoSettingsPage() {
         opacity: Number(noiseForm.opacity),
         tolerance: Number(noiseForm.tolerance),
         softness: Number(noiseForm.softness),
+        lumaGain: Number(noiseForm.lumaGain),
         order: Number(noiseForm.order),
       };
       const res = await updateTVNoiseOverlay(selectedNoise.id, payload);
       setTvNoiseOverlays((current) => current.map((item) => (item.id === selectedNoise.id ? res.overlay : item)));
       if (res.overlay.status === "processing") {
         setNoiseJobMessage("Dang tao lai alpha MOV...");
+      }
+      // Bật một lớp sẽ tắt các lớp còn lại ở server (chỉ 1 hiệu ứng khi render),
+      // nên phải tải lại cả danh sách thay vì chỉ vá bản ghi vừa lưu.
+      if (payload.enabled) {
+        await loadTVNoiseOverlays();
       }
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the luu cau hinh TV noise.");
@@ -888,8 +1118,11 @@ export function StoryVideoSettingsPage() {
           {noiseJobMessage ? <Badge variant="secondary" className="rounded-full">{noiseJobMessage}</Badge> : null}
         </div>
 
+        {/* min-w-0 tren cot trai: mac dinh grid item la min-width:auto, nen mot ten
+            file dai (khong xuong dong duoc) keo cot rong hon track 380px va de len
+            panel cau hinh ben phai. */}
         <div className="grid gap-5 lg:grid-cols-[minmax(280px,380px)_1fr]">
-          <div className="space-y-4">
+          <div className="min-w-0 space-y-4">
             <div className="grid gap-2">
               <Label>Upload TV noise</Label>
               <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
@@ -921,6 +1154,74 @@ export function StoryVideoSettingsPage() {
               </div>
             </div>
 
+            {sparklePresets.length ? (
+              <div className="grid gap-2 rounded-lg border border-border/70 bg-background/70 p-3">
+                <Label>Tạo lớp lấp lánh</Label>
+                <select
+                  value={sparklePresetId}
+                  onChange={(event) => {
+                    const next = sparklePresets.find((item) => item.id === event.target.value);
+                    setSparklePresetId(event.target.value);
+                    if (next) setSparkleParams(paramsToForm(next));
+                  }}
+                  className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {sparklePresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name}
+                    </option>
+                  ))}
+                </select>
+                {selectedSparklePreset ? (
+                  <>
+                    <p className="text-xs text-muted-foreground">{selectedSparklePreset.description}</p>
+                    <div className="grid gap-1">
+                      <Label className="text-xs font-normal text-muted-foreground">
+                        Tên lớp (để phân biệt các mẫu)
+                      </Label>
+                      <Input
+                        value={sparkleName}
+                        placeholder={selectedSparklePreset.name}
+                        onChange={(event) => setSparkleName(event.target.value)}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {selectedSparklePreset.paramsUsed.map((key) => (
+                        <div key={key} className="grid gap-1">
+                          <Label className="text-xs font-normal text-muted-foreground">
+                            {SPARKLE_PARAM_LABELS[key] ?? key}
+                          </Label>
+                          <Input
+                            type="number"
+                            step="any"
+                            value={sparkleParams[key] ?? ""}
+                            onChange={(event) =>
+                              setSparkleParams((current) => ({ ...current, [key]: event.target.value }))
+                            }
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : null}
+                <Button type="button" variant="secondary" onClick={() => void handleSparkleCreate()} disabled={isSparkleCreating}>
+                  {isSparkleCreating ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                  {isSparkleCreating ? "Dang dung lop lap lanh..." : "Tao lop lap lanh"}
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  Dung mot lan roi cache lai (25-90 giay). Lop tao ra nam trong danh sach ben duoi: bat/tat,
+                  chinh opacity va thu tu nhu moi overlay khac. Lớp vừa tạo sẽ tự thành lớp đang dùng.
+                </p>
+              </div>
+            ) : null}
+
+            {tvNoiseOverlays.length ? (
+              <p className="text-xs text-muted-foreground">
+                Mỗi lần render chỉ áp <span className="font-semibold text-foreground">một</span> lớp hiệu ứng. Bật một lớp
+                sẽ tự tắt các lớp còn lại — chúng vẫn nằm trong danh sách để bật lại sau.
+              </p>
+            ) : null}
+
             {tvNoiseOverlays.length ? (
               <div className="grid gap-2">
                 {tvNoiseOverlays.map((overlay) => (
@@ -928,11 +1229,11 @@ export function StoryVideoSettingsPage() {
                     key={overlay.id}
                     type="button"
                     onClick={() => setSelectedNoiseId(overlay.id)}
-                    className={`rounded-lg border p-3 text-left transition-colors ${
+                    className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${
                       selectedNoise?.id === overlay.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
                     }`}
                   >
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center justify-between gap-2">
                       <span className="truncate text-sm font-semibold text-foreground">{overlay.name}</span>
                       <Badge
                         variant={overlay.status === "failed" ? "destructive" : overlay.status === "ready" ? "secondary" : "outline"}
@@ -942,7 +1243,12 @@ export function StoryVideoSettingsPage() {
                       </Badge>
                     </div>
                     <div className="mt-1 text-xs text-muted-foreground">
-                      #{overlay.order} | opacity {Math.round((overlay.opacity ?? 0) * 100)}% | {overlay.enabled ? "enabled" : "disabled"}
+                      #{overlay.order} | opacity {Math.round((overlay.opacity ?? 0) * 100)}% |{" "}
+                      {overlay.enabled ? (
+                        <span className="font-semibold text-primary">đang dùng khi render</span>
+                      ) : (
+                        "tắt"
+                      )}
                     </div>
                   </button>
                 ))}
@@ -953,7 +1259,7 @@ export function StoryVideoSettingsPage() {
           </div>
 
           {selectedNoise ? (
-            <div className="grid gap-5">
+            <div className="grid min-w-0 gap-5">
               {noiseDemoSrc || selectedNoise.relativePath ? (
                 <video
                   src={noiseDemoSrc || `/media/${selectedNoise.relativePath}`}
@@ -966,44 +1272,147 @@ export function StoryVideoSettingsPage() {
                 <StatusAlert title="TV noise preprocess failed" message={selectedNoise.error} variant="destructive" />
               ) : null}
 
-              <div className="grid gap-4 md:grid-cols-6">
-                <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={noiseForm.enabled}
-                    onChange={(event) => setNoiseForm((current) => ({ ...current, enabled: event.target.checked }))}
-                  />
-                  Enabled
-                </label>
-                <div className="grid gap-2">
+              {/* Thong so cua lop lap lanh da tao: khong hien thi thi hai bien the
+                  cung preset trong y het nhau va khong the dung lai de tinh chinh. */}
+              {selectedNoise.kind === "sparkle" && selectedNoise.meta?.params ? (
+                <div className="grid gap-2 rounded-lg border border-border/70 bg-background/70 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <Label className="text-xs font-normal text-muted-foreground">
+                      Thông số đã lưu ·{" "}
+                      {sparklePresets.find((preset) => preset.id === selectedNoise.meta?.presetId)?.name ??
+                        selectedNoise.meta?.presetId ??
+                        "sparkle"}
+                    </Label>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        const presetId = selectedNoise.meta?.presetId ?? "";
+                        const preset = sparklePresets.find((item) => item.id === presetId);
+                        if (!preset) return;
+                        setSparklePresetId(presetId);
+                        setSparkleParams(
+                          Object.fromEntries(
+                            preset.paramsUsed.map((key) => [
+                              key,
+                              String(selectedNoise.meta?.params?.[key] ?? preset.params[key] ?? 0),
+                            ]),
+                          ),
+                        );
+                        setSparkleName(`${selectedNoise.name} (copy)`);
+                      }}
+                    >
+                      Nạp vào form tạo lớp
+                    </Button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-3">
+                    {Object.entries(selectedNoise.meta.params).map(([key, value]) => (
+                      <div key={key} className="flex min-w-0 justify-between gap-2">
+                        <span className="truncate">{SPARKLE_PARAM_LABELS[key] ?? key}</span>
+                        <span className="font-medium text-foreground">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                <div className="grid min-w-0 gap-2">
+                  <Label>Trang thai</Label>
+                  <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={noiseForm.enabled}
+                      onChange={(event) => setNoiseForm((current) => ({ ...current, enabled: event.target.checked }))}
+                    />
+                    Dùng lớp này khi render
+                  </label>
+                </div>
+
+                <div className="grid min-w-0 gap-2">
                   <Label>Blend</Label>
                   <select
                     value={noiseForm.blendMode}
-                    onChange={(event) => setNoiseForm((current) => ({ ...current, blendMode: event.target.value as TVNoiseForm["blendMode"] }))}
-                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-                    title="Alpha: key nền đen thành trong suốt (nhiễu TV). Screen: cộng sáng — hợp texture nền đen như bụi bay, light leak, bokeh."
+                    onChange={(event) =>
+                      setNoiseForm((current) => ({ ...current, blendMode: event.target.value as TVNoiseForm["blendMode"] }))
+                    }
+                    className="h-10 w-full min-w-0 truncate rounded-md border border-input bg-background px-3 text-sm"
                   >
-                    <option value="alpha">Alpha (key nền)</option>
-                    <option value="screen">Screen (cộng sáng)</option>
+                    <option value="alpha">Alpha &mdash; key nen den</option>
+                    <option value="screen">Screen &mdash; cong sang</option>
+                    <option value="luma">Luma &mdash; lop lap lanh</option>
                   </select>
                 </div>
-                <div className="grid gap-2">
+
+                <div className="grid min-w-0 gap-2">
                   <Label>Opacity</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={noiseForm.opacity} onChange={(event) => setNoiseForm((current) => ({ ...current, opacity: event.target.value }))} />
+                  <Input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={noiseForm.opacity}
+                    onChange={(event) => setNoiseForm((current) => ({ ...current, opacity: event.target.value }))}
+                  />
                 </div>
-                <div className="grid gap-2">
-                  <Label>Tolerance</Label>
-                  <Input type="number" min="0" max="1" step="0.01" disabled={noiseForm.blendMode === "screen"} value={noiseForm.tolerance} onChange={(event) => setNoiseForm((current) => ({ ...current, tolerance: event.target.value }))} />
-                </div>
-                <div className="grid gap-2">
-                  <Label>Softness</Label>
-                  <Input type="number" min="0" max="1" step="0.01" disabled={noiseForm.blendMode === "screen"} value={noiseForm.softness} onChange={(event) => setNoiseForm((current) => ({ ...current, softness: event.target.value }))} />
-                </div>
-                <div className="grid gap-2">
+
+                {/* Cac o duoi day chi co nghia voi dung mot blend mode, nen an han
+                    thay vi disable: form 7 cot truoc day bi vo o man hinh hep. */}
+                {noiseForm.blendMode === "luma" ? (
+                  <div className="grid min-w-0 gap-2">
+                    <Label>Luma gain</Label>
+                    <Input
+                      type="number"
+                      min="1"
+                      max="8"
+                      step="0.1"
+                      value={noiseForm.lumaGain}
+                      onChange={(event) => setNoiseForm((current) => ({ ...current, lumaGain: event.target.value }))}
+                    />
+                  </div>
+                ) : null}
+
+                {noiseForm.blendMode === "alpha" ? (
+                  <>
+                    <div className="grid min-w-0 gap-2">
+                      <Label>Tolerance</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={noiseForm.tolerance}
+                        onChange={(event) => setNoiseForm((current) => ({ ...current, tolerance: event.target.value }))}
+                      />
+                    </div>
+                    <div className="grid min-w-0 gap-2">
+                      <Label>Softness</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={noiseForm.softness}
+                        onChange={(event) => setNoiseForm((current) => ({ ...current, softness: event.target.value }))}
+                      />
+                    </div>
+                  </>
+                ) : null}
+
+                <div className="grid min-w-0 gap-2">
                   <Label>Order</Label>
-                  <Input type="number" min="0" step="1" value={noiseForm.order} onChange={(event) => setNoiseForm((current) => ({ ...current, order: event.target.value }))} />
+                  <Input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={noiseForm.order}
+                    onChange={(event) => setNoiseForm((current) => ({ ...current, order: event.target.value }))}
+                  />
                 </div>
               </div>
+
+              <p className="text-xs text-muted-foreground">{BLEND_MODE_HINTS[noiseForm.blendMode]}</p>
 
               <div className="flex flex-wrap gap-3">
                 <Button type="button" onClick={handleNoiseSave} disabled={isNoiseSaving}>
@@ -1023,6 +1432,151 @@ export function StoryVideoSettingsPage() {
           ) : null}
         </div>
       </PageSection>
+
+      <PageSection>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-1">
+            <h2 className="text-base font-semibold text-foreground">Preview hieu ung tren video that</h2>
+            <p className="text-sm text-muted-foreground">
+              Tai len vai clip ngan 3-5s giong trong thu vien, roi render de xem ca chong hieu ung
+              (style + cac lop overlay dang bat + song am + CTA) tren dung loai canh ban se dung.
+            </p>
+          </div>
+          {previewMessage ? <Badge variant="secondary" className="rounded-full">{previewMessage}</Badge> : null}
+        </div>
+
+        {/* min-w-0 tren cot trai: mac dinh grid item la min-width:auto, nen mot ten
+            file dai (khong xuong dong duoc) keo cot rong hon track 380px va de len
+            panel cau hinh ben phai. */}
+        <div className="grid gap-5 lg:grid-cols-[minmax(280px,380px)_1fr]">
+          <div className="min-w-0 space-y-4">
+            <div className="grid gap-2">
+              <Label>Tai len bo clip</Label>
+              <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-center text-sm text-muted-foreground">
+                {isPreviewUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
+                <span>{isPreviewUploading ? "Dang chuan hoa va ghep..." : "Chon nhieu clip cung luc (toi da 24)"}</span>
+                <Input
+                  type="file"
+                  multiple
+                  accept=".mp4,.mov,.mkv,.webm"
+                  className="hidden"
+                  disabled={isPreviewUploading}
+                  onChange={(event) => void handlePreviewUpload(event.currentTarget.files)}
+                />
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Clip duoc chuan hoa ve dung dinh dang thu vien roi ghep lai mot lan. Sau do doi thong so
+                bao nhieu lan cung duoc, chi phai render lai buoc hieu ung.
+              </p>
+            </div>
+
+            {previewSources.length ? (
+              <div className="grid gap-2">
+                {previewSources.map((source) => (
+                  <button
+                    key={source.id}
+                    type="button"
+                    onClick={() => setSelectedPreviewId(source.id)}
+                    className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${
+                      selectedPreviewSource?.id === source.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+                    }`}
+                  >
+                    <div className="truncate text-sm font-semibold text-foreground">{source.name}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {source.clipCount} clip | {source.durationSeconds}s
+                      {source.previewPath ? " | da co preview" : " | chua render"}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <EmptyCard title="Chua co bo clip nao" description="Tai len vai clip ngan de xem thu hieu ung." />
+            )}
+          </div>
+
+          {selectedPreviewSource ? (
+            <div className="grid gap-5">
+              {selectedPreviewSource.previewPath ? (
+                <video
+                  key={selectedPreviewSource.previewPath}
+                  src={`/media/${selectedPreviewSource.previewPath}`}
+                  controls
+                  className="aspect-video w-full rounded-lg bg-black object-contain"
+                />
+              ) : (
+                <div className="flex aspect-video w-full items-center justify-center rounded-lg border border-dashed border-border bg-background/70 text-sm text-muted-foreground">
+                  Chua render preview cho bo clip nay.
+                </div>
+              )}
+
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={previewOptions.includeStyle}
+                    onChange={(event) => setPreviewOptions((current) => ({ ...current, includeStyle: event.target.checked }))}
+                  />
+                  Ap style mau
+                </label>
+                <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={previewOptions.includeOverlays}
+                    onChange={(event) => setPreviewOptions((current) => ({ ...current, includeOverlays: event.target.checked }))}
+                  />
+                  Ap cac lop overlay
+                </label>
+                <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={previewOptions.compare}
+                    onChange={(event) => setPreviewOptions((current) => ({ ...current, compare: event.target.checked }))}
+                  />
+                  So sanh canh nhau
+                </label>
+                <div className="grid min-w-0 gap-2">
+                  <Label>Gioi han (giay)</Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    max="90"
+                    step="1"
+                    value={previewOptions.maxSeconds}
+                    onChange={(event) => setPreviewOptions((current) => ({ ...current, maxSeconds: event.target.value }))}
+                  />
+                </div>
+              </div>
+
+              {selectedPreviewSource.appliedLayers?.length ? (
+                <div className="flex flex-wrap gap-2">
+                  {selectedPreviewSource.appliedLayers.map((layer, index) => (
+                    <Badge key={layer.id ?? index} variant="outline" className="rounded-full">
+                      {layer.name} · {layer.blendMode}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="flex flex-wrap gap-3">
+                <Button type="button" onClick={() => void handlePreviewRender()} disabled={isPreviewRendering}>
+                  {isPreviewRendering ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
+                  {isPreviewRendering ? "Dang render..." : "Render preview"}
+                </Button>
+                <Button type="button" variant="destructive" onClick={() => void handlePreviewDelete(selectedPreviewSource.id)}>
+                  <Trash2 className="mr-2 size-4" />
+                  Xoa bo clip
+                </Button>
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                Preview dung dung chuoi filter ma buoc render that dung, nen ket qua khop nhau. Chay tren CPU
+                va o 1080p, nen cho khoang 3-4 giay xu ly cho moi giay video.
+              </p>
+            </div>
+          ) : null}
+        </div>
+      </PageSection>
+
 
       <PageSection>
         <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">

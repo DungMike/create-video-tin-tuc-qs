@@ -53,6 +53,8 @@ _download_sessions: dict[str, dict] = {}
 _download_sessions_lock = threading.Lock()
 _tv_noise_jobs: dict[str, dict] = {}
 _tv_noise_jobs_lock = threading.Lock()
+_effect_preview_jobs: dict[str, dict] = {}
+_effect_preview_jobs_lock = threading.Lock()
 
 
 def _error(message: str, code: str = "bad_request", status: int = 400):
@@ -1748,6 +1750,7 @@ def create_story_video():
         "library_id": str(data.get("libraryId", "") or "").strip(),
         "crt_settings": data.get("crtSettings", {}),
         "tv_effect_style_id": str(data.get("tvEffectStyleId", "")).strip(),
+        "skip_tv_effect": bool(data.get("skipTvEffect", False)),
         "waveform_overlay_id": str(data.get("waveformOverlayId", "")).strip(),
         "voice_id": str(data.get("voiceId", "")).strip(),
         "subtitle_path": subtitle_path,
@@ -2082,6 +2085,7 @@ def create_story_batch():
             "library_id": str(shared_config.get("libraryId", "") or "").strip(),
             "crt_settings": shared_config.get("crtSettings", {}),
             "tv_effect_style_id": str(shared_config.get("tvEffectStyleId", "")).strip(),
+            "skip_tv_effect": bool(shared_config.get("skipTvEffect", False)),
             "waveform_overlay_id": str(shared_config.get("waveformOverlayId", "")).strip(),
             "voice_id": str(shared_config.get("voiceId", "")).strip(),
             "subtitle_path": subtitle_path,
@@ -2222,6 +2226,7 @@ def retry_batch_failed(batch_id: str):
             "output_name": s.get("output_name", ""),
             "clip_tags": s.get("clip_tags", []),
             "library_id": s.get("library_id", ""),
+            "skip_tv_effect": bool(s.get("skip_tv_effect", False)),
             "voice_id": s.get("voice_id", ""),
             "intro_video_path": s.get("intro_video_path", ""),
             "subtitle_path": s.get("subtitle_path", ""),
@@ -2574,6 +2579,199 @@ def import_tv_noise_from_youtube():
     return jsonify({"sessionId": session_id, "overlay": overlay}), 202
 
 
+@story_video_bp.route("/api/story-video/effect-preview/sources", methods=["GET"])
+def list_effect_preview_sources():
+    from src.utils.story_effect_preview import load_sources
+
+    return jsonify({"sources": load_sources()})
+
+
+@story_video_bp.route("/api/story-video/effect-preview/sources", methods=["POST"])
+def upload_effect_preview_source():
+    """Upload a handful of short clips and build the preview base video."""
+    from src.utils.story_effect_preview import EffectPreviewError, build_source_set
+
+    files = request.files.getlist("files") or request.files.getlist("file")
+    if not files:
+        return _error("Chua chon video nao.", code="no_files")
+
+    try:
+        record = build_source_set(files, str(request.form.get("name") or ""))
+    except EffectPreviewError as exc:
+        return _error(str(exc), code="effect_preview_source_failed")
+    except Exception as exc:
+        logger.error(f"[StoryVideo] Effect preview source failed: {exc}", exc_info=True)
+        return _error(f"Khong the tao bo clip preview: {exc}", code="effect_preview_source_failed", status=500)
+    return jsonify({"source": record}), 201
+
+
+@story_video_bp.route("/api/story-video/effect-preview/sources/<source_id>", methods=["DELETE"])
+def delete_effect_preview_source(source_id: str):
+    from src.utils.story_effect_preview import delete_source
+
+    if not delete_source(source_id):
+        return _error("Khong tim thay bo clip preview.", code="source_not_found", status=404)
+    return jsonify({"deleted": source_id})
+
+
+@story_video_bp.route("/api/story-video/effect-preview/render", methods=["POST"])
+def render_effect_preview():
+    """Re-apply the current effect stack to a stored clip set.
+
+    Runs on a worker thread: a 30-60s preview takes a while, and the point of the
+    feature is to keep tweaking settings and re-rendering.
+    """
+    from src.utils.story_effect_preview import get_source
+
+    data = request.get_json(silent=True) or {}
+    source_id = str(data.get("sourceId") or "").strip()
+    record = get_source(source_id)
+    if not record:
+        return _error("Khong tim thay bo clip preview.", code="source_not_found", status=404)
+
+    include_style = bool(data.get("includeStyle", True))
+    include_overlays = bool(data.get("includeOverlays", True))
+    compare = bool(data.get("compare", False))
+    try:
+        max_seconds = float(data.get("maxSeconds") or 0)
+    except (TypeError, ValueError):
+        max_seconds = 0.0
+
+    session_id = f"efp-{str(uuid.uuid4())[:8]}"
+    with _effect_preview_jobs_lock:
+        _effect_preview_jobs[session_id] = {
+            "sessionId": session_id,
+            "status": "processing",
+            "message": "Dang render preview...",
+            "sourceId": source_id,
+            "source": None,
+            "error": None,
+        }
+
+    def _worker():
+        from src.utils.story_effect_preview import render_preview
+
+        try:
+            updated = render_preview(
+                source_id,
+                include_style=include_style,
+                include_overlays=include_overlays,
+                compare=compare,
+                max_seconds=max_seconds,
+            )
+            payload = {"status": "completed", "message": "Preview da san sang.", "source": updated}
+        except Exception as exc:
+            logger.error(f"[StoryVideo] Effect preview render failed: {exc}", exc_info=True)
+            payload = {"status": "failed", "message": str(exc), "error": str(exc)}
+        with _effect_preview_jobs_lock:
+            if session_id in _effect_preview_jobs:
+                _effect_preview_jobs[session_id].update(payload)
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({"sessionId": session_id}), 202
+
+
+@story_video_bp.route("/api/story-video/effect-preview/jobs/<session_id>", methods=["GET"])
+def get_effect_preview_job(session_id: str):
+    with _effect_preview_jobs_lock:
+        job = _effect_preview_jobs.get(session_id)
+    if not job:
+        return _error("Preview job khong ton tai.", code="job_not_found", status=404)
+    return jsonify(job)
+
+
+@story_video_bp.route("/api/story-video/sparkle-presets", methods=["GET"])
+def get_sparkle_presets():
+    from src.utils.story_sparkle_presets import SPARKLE_PARAM_SPEC, list_sparkle_presets
+
+    return jsonify({"presets": list_sparkle_presets(), "paramSpec": SPARKLE_PARAM_SPEC})
+
+
+@story_video_bp.route("/api/story-video/sparkle-overlays", methods=["POST"])
+def create_sparkle_overlay():
+    """Generate a sparkle layer and register it as an overlay.
+
+    Generation takes 25-90s depending on preset, so it runs on a worker thread and
+    reports through the existing TV noise job tracker. The resulting record is an
+    ordinary overlay from there on: the same list, demo, enable/opacity/order and
+    delete endpoints manage it.
+    """
+    from src.utils.story_sparkle_presets import get_sparkle_preset, sanitize_sparkle_params
+    from src.utils.story_tv_noise_overlays import mark_tv_noise_failed
+
+    data = request.get_json(silent=True) or {}
+    preset_id = str(data.get("presetId") or "").strip()
+    preset = get_sparkle_preset(preset_id)
+    if not preset:
+        return _error("Preset lap lanh khong hop le.", code="invalid_sparkle_preset", status=404)
+
+    raw_params = data.get("params")
+    if raw_params is not None and not isinstance(raw_params, dict):
+        return _error("params khong hop le.", code="invalid_params")
+    params = sanitize_sparkle_params(preset_id, raw_params)
+
+    name = str(data.get("name") or "").strip() or preset["name"]
+    try:
+        opacity = max(0.0, min(1.0, float(data.get("opacity", 0.7))))
+        luma_gain = max(1.0, min(8.0, float(data.get("lumaGain", Config.STORY_TV_NOISE_LUMA_GAIN))))
+    except (TypeError, ValueError):
+        return _error("opacity/lumaGain khong hop le.", code="invalid_params")
+
+    session_id = _new_tv_noise_job("create_sparkle")
+    _update_tv_noise_job(session_id, message="Dang dung lop lap lanh...")
+
+    def _worker():
+        from src.utils.story_sparkle_presets import generate_sparkle_source
+        from src.utils.story_tv_noise_overlays import (
+            create_generated_overlay,
+            run_tv_noise_preprocess,
+        )
+
+        overlay_id = ""
+        try:
+            _update_tv_noise_job(session_id, status="generating", message="Dang dung lop lap lanh...")
+            source_path = generate_sparkle_source(preset_id, params)
+
+            record = create_generated_overlay(
+                name,
+                source_path,
+                kind="sparkle",
+                meta={"presetId": preset_id, "params": params},
+                blend_mode="luma",
+                opacity=opacity,
+                luma_gain=luma_gain,
+            )
+            overlay_id = str(record["id"])
+            _update_tv_noise_job(
+                session_id, status="processing", message="Dang tao alpha MOV...", overlayId=overlay_id
+            )
+
+            processed = run_tv_noise_preprocess(overlay_id)
+            if processed and processed.get("status") == "ready":
+                _update_tv_noise_job(
+                    session_id,
+                    status="completed",
+                    current=1,
+                    message="Lop lap lanh da san sang.",
+                    overlayId=overlay_id,
+                )
+            else:
+                error = (processed or {}).get("error") or "Sparkle preprocess failed."
+                _update_tv_noise_job(
+                    session_id, status="failed", current=1, message=error, error=error, overlayId=overlay_id
+                )
+        except Exception as exc:
+            logger.error(f"[StoryVideo] Sparkle overlay creation failed: {exc}", exc_info=True)
+            if overlay_id:
+                mark_tv_noise_failed(overlay_id, str(exc))
+            _update_tv_noise_job(
+                session_id, status="failed", current=1, message=str(exc), error=str(exc), overlayId=overlay_id
+            )
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({"sessionId": session_id, "presetId": preset_id, "params": params}), 202
+
+
 @story_video_bp.route("/api/story-video/tv-noise-overlays/jobs/<session_id>", methods=["GET"])
 def get_tv_noise_job(session_id: str):
     with _tv_noise_jobs_lock:
@@ -2590,7 +2788,7 @@ def update_tv_noise_overlay_config(overlay_id: str):
     data = request.get_json(silent=True) or {}
     updates = {}
     try:
-        for key in ("enabled", "name", "order", "opacity", "tolerance", "softness", "blendMode"):
+        for key in ("enabled", "name", "order", "opacity", "tolerance", "softness", "blendMode", "lumaGain"):
             if key in data:
                 updates[key] = data.get(key)
         overlay, should_regenerate = update_tv_noise_overlay(overlay_id, updates)

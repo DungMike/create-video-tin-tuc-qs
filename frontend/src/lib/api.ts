@@ -283,6 +283,10 @@ import type {
   SubtitleFontInfo,
   SubtitlePresetInfo,
   TVEffectCustomSaveResponse,
+  EffectPreviewJob,
+  EffectPreviewSource,
+  SparkleCreateResponse,
+  SparklePresetsResponse,
   TVEffectParams,
   TVEffectPreviewResponse,
   TVEffectStylesResponse,
@@ -830,6 +834,60 @@ export async function getTVNoiseOverlayJob(sessionId: string) {
 export async function updateTVNoiseOverlay(id: string, payload: Partial<TVNoiseOverlay>) {
   return requestJson<{ overlay: TVNoiseOverlay }>(`/api/story-video/tv-noise-overlays/${id}`, {
     method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getEffectPreviewSources() {
+  return requestJson<{ sources: EffectPreviewSource[] }>("/api/story-video/effect-preview/sources");
+}
+
+export async function uploadEffectPreviewSource(files: File[], name?: string) {
+  const fd = new FormData();
+  for (const file of files) fd.append("files", file);
+  if (name) fd.append("name", name);
+  return requestJson<{ source: EffectPreviewSource }>("/api/story-video/effect-preview/sources", {
+    method: "POST",
+    body: fd,
+  });
+}
+
+export async function deleteEffectPreviewSource(id: string) {
+  return requestJson<{ deleted: string }>(`/api/story-video/effect-preview/sources/${id}`, { method: "DELETE" });
+}
+
+export async function renderEffectPreview(payload: {
+  sourceId: string;
+  includeStyle?: boolean;
+  includeOverlays?: boolean;
+  compare?: boolean;
+  maxSeconds?: number;
+}) {
+  return requestJson<{ sessionId: string }>("/api/story-video/effect-preview/render", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getEffectPreviewJob(sessionId: string) {
+  return requestJson<EffectPreviewJob>(`/api/story-video/effect-preview/jobs/${sessionId}`);
+}
+
+export async function getSparklePresets() {
+  return requestJson<SparklePresetsResponse>("/api/story-video/sparkle-presets");
+}
+
+export async function createSparkleOverlay(payload: {
+  presetId: string;
+  params?: Record<string, number>;
+  name?: string;
+  opacity?: number;
+  lumaGain?: number;
+}) {
+  return requestJson<SparkleCreateResponse>("/api/story-video/sparkle-overlays", {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
