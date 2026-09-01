@@ -1,4 +1,4 @@
-import { FolderPlus, Loader2, Pencil, Trash2 } from "lucide-react";
+import { Check, FolderPlus, Loader2, Pencil, Trash2 } from "lucide-react";
 import { useState } from "react";
 
 import {
@@ -27,6 +27,7 @@ import type { StoryLibrary } from "@/types/api";
 
 export interface StoryLibrarySelectProps {
   libraries: StoryLibrary[];
+  /** The single library the create/rename/delete controls act on. */
   value: string;
   onChange: (libraryId: string) => void;
   /** Called after a create/rename/delete so the parent can re-fetch the list. */
@@ -34,6 +35,13 @@ export interface StoryLibrarySelectProps {
   /** Show the create/rename/delete controls (false = picker only). */
   manage?: boolean;
   disabled?: boolean;
+  /**
+   * Pass these two together to switch the picker to multi-select: a render can
+   * draw clips from several libraries at once. `value` stays the manage target
+   * (the first pick), the dropdown becomes a checkbox list.
+   */
+  selectedIds?: string[];
+  onSelectedIdsChange?: (libraryIds: string[]) => void;
 }
 
 export function StoryLibrarySelect({
@@ -43,6 +51,8 @@ export function StoryLibrarySelect({
   onLibrariesChanged,
   manage = false,
   disabled = false,
+  selectedIds,
+  onSelectedIdsChange,
 }: StoryLibrarySelectProps) {
   const [createOpen, setCreateOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -52,6 +62,19 @@ export function StoryLibrarySelect({
   const [error, setError] = useState<string | null>(null);
 
   const active = libraries.find((lib) => lib.id === value);
+  const multi = selectedIds !== undefined && onSelectedIdsChange !== undefined;
+  const picked = selectedIds ?? [];
+
+  const toggle = (libraryId: string) => {
+    if (!onSelectedIdsChange) return;
+    if (picked.includes(libraryId)) {
+      // A render always needs at least one clip source.
+      if (picked.length === 1) return;
+      onSelectedIdsChange(picked.filter((id) => id !== libraryId));
+      return;
+    }
+    onSelectedIdsChange([...picked, libraryId]);
+  };
 
   const handleCreate = async () => {
     const trimmed = name.trim();
@@ -70,7 +93,11 @@ export function StoryLibrarySelect({
       // window where the persisted id points at a library not yet in the list,
       // and the hook silently falls back to (and re-persists) the default.
       await onLibrariesChanged?.();
-      onChange(res.library.id);
+      if (multi) {
+        onSelectedIdsChange?.([...picked, res.library.id]);
+      } else {
+        onChange(res.library.id);
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Không tạo được thư viện.");
     } finally {
@@ -112,6 +139,11 @@ export function StoryLibrarySelect({
         remaining.find((lib) => lib.isDefault)?.id ||
         remaining[0]?.id ||
         "";
+      if (multi) {
+        // Keep the other picks; only fall back to `next` if nothing is left.
+        const stillPicked = picked.filter((id) => id !== value);
+        onSelectedIdsChange?.(stillPicked.length ? stillPicked : next ? [next] : []);
+      }
       onChange(next);
       onLibrariesChanged?.();
     } catch (err) {
@@ -121,24 +153,75 @@ export function StoryLibrarySelect({
     }
   };
 
-  return (
+  const picker = multi ? (
+    <div className="grid gap-1.5 sm:grid-cols-2">
+      {libraries.map((lib) => {
+        const checked = picked.includes(lib.id);
+        // The last remaining pick can't be unticked: a render needs a source.
+        const locked = checked && picked.length === 1;
+        return (
+          <button
+            key={lib.id}
+            type="button"
+            disabled={disabled || locked}
+            title={locked ? "Phải giữ ít nhất 1 thư viện" : undefined}
+            onClick={() => toggle(lib.id)}
+            className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-left transition-colors disabled:cursor-not-allowed ${
+              checked ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+            } ${disabled ? "opacity-50" : ""}`}
+          >
+            <span
+              className={`flex size-4 shrink-0 items-center justify-center rounded border ${
+                checked ? "border-primary bg-primary text-primary-foreground" : "border-input"
+              }`}
+            >
+              {checked ? <Check className="size-3" /> : null}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-sm">
+              {lib.styled ? "🎞 " : ""}
+              {lib.name}
+              {lib.isDefault ? " (mặc định)" : ""}
+              {lib.styled && lib.styleLabel ? ` [${lib.styleLabel}]` : ""}
+            </span>
+            <span className="shrink-0 text-xs text-muted-foreground">{lib.clipCount} clip</span>
+          </button>
+        );
+      })}
+      {libraries.length === 0 ? (
+        <p className="text-xs text-muted-foreground">Chưa có thư viện nào.</p>
+      ) : null}
+    </div>
+  ) : (
+    <select
+      value={value}
+      disabled={disabled || libraries.length === 0}
+      onChange={(event) => onChange(event.target.value)}
+      className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+    >
+      {libraries.map((lib) => (
+        <option key={lib.id} value={lib.id}>
+          {lib.styled ? "🎞 " : ""}
+          {lib.name}
+          {lib.isDefault ? " (mặc định)" : ""}
+          {lib.styled && lib.styleLabel ? ` [${lib.styleLabel}]` : ""} · {lib.clipCount}
+        </option>
+      ))}
+    </select>
+  );
+
+  const header = (
     <div className="flex items-center gap-2">
-      <Label className="whitespace-nowrap text-xs text-muted-foreground">Thư viện</Label>
-      <select
-        value={value}
-        disabled={disabled || libraries.length === 0}
-        onChange={(event) => onChange(event.target.value)}
-        className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-      >
-        {libraries.map((lib) => (
-          <option key={lib.id} value={lib.id}>
-            {lib.styled ? "🎞 " : ""}
-            {lib.name}
-            {lib.isDefault ? " (mặc định)" : ""}
-            {lib.styled && lib.styleLabel ? ` [${lib.styleLabel}]` : ""} · {lib.clipCount}
-          </option>
-        ))}
-      </select>
+      <Label className="whitespace-nowrap text-xs text-muted-foreground">
+        {multi ? `Thư viện (${picked.length}/${libraries.length} đã chọn)` : "Thư viện"}
+      </Label>
+      {multi ? null : picker}
+      {multi && manage ? (
+        // In multi-select the manage target is invisible otherwise: say which
+        // library the create/rename/delete buttons act on.
+        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+          {active ? `Đổi tên / xóa áp dụng cho: ${active.name}` : ""}
+        </span>
+      ) : null}
 
       {manage ? (
         <>
@@ -186,7 +269,11 @@ export function StoryLibrarySelect({
           </Button>
         </>
       ) : null}
+    </div>
+  );
 
+  const dialogs = (
+    <>
       {/* Create */}
       <Dialog
         open={createOpen}
@@ -301,6 +388,24 @@ export function StoryLibrarySelect({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </>
+  );
+
+  if (multi) {
+    return (
+      <div className="grid gap-2">
+        {header}
+        {picker}
+        {dialogs}
+      </div>
+    );
+  }
+
+  // `header` is already the row wrapper for the single-select layout.
+  return (
+    <>
+      {header}
+      {dialogs}
+    </>
   );
 }

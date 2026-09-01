@@ -109,6 +109,26 @@ class StoryVideoBatchRunner:
         record = get_decor_image(image_id)
         return str(record.get("name") or image_id) if record else image_id
 
+    @staticmethod
+    def _waveform_name(overlay_id: str) -> str:
+        """Display name for the waveform this item drew, for the batch UI."""
+        if not overlay_id:
+            return ""
+        from src.utils.waveform_overlays import get_waveform_overlay
+
+        record = get_waveform_overlay(overlay_id)
+        return str(record.get("name") or overlay_id) if record else overlay_id
+
+    @staticmethod
+    def _cta_name(overlay_id: str) -> str:
+        """Display name for the CTA overlay this item drew, for the batch UI."""
+        if not overlay_id:
+            return ""
+        from src.utils.story_cta_overlay import get_cta_overlay
+
+        record = get_cta_overlay(overlay_id)
+        return str(record.get("name") or overlay_id) if record else overlay_id
+
     def __init__(self, batch_id: str, story_configs: list[dict], *, optimize_mode: bool = False):
         self.batch_id = batch_id
         self.story_configs = story_configs
@@ -158,10 +178,16 @@ class StoryVideoBatchRunner:
                 "input_value": config.get("input_value", ""),
                 "output_name": config.get("output_name", ""),
                 "clip_tags": config.get("clip_tags", []),
-                "library_id": config.get("library_id", ""),
+                "library_ids": config.get("library_ids") or (
+                    [config["library_id"]] if config.get("library_id") else []
+                ),
                 "skip_tv_effect": bool(config.get("skip_tv_effect", False)),
                 "decor_image_id": config.get("decor_image_id", ""),
                 "decor_image_name": self._decor_name(config.get("decor_image_id", "")),
+                "waveform_overlay_id": config.get("waveform_overlay_id", ""),
+                "waveform_overlay_name": self._waveform_name(config.get("waveform_overlay_id", "")),
+                "cta_overlay_id": config.get("cta_overlay_id", ""),
+                "cta_overlay_name": self._cta_name(config.get("cta_overlay_id", "")),
                 "voice_id": config.get("voice_id", ""),
                 "intro_video_path": config.get("intro_video_path", ""),
                 "subtitle_path": config.get("subtitle_path", ""),

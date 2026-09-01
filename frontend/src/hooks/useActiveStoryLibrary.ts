@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import { getStoryLibraries } from "@/lib/api";
 import {
   readActiveLibraryId,
+  readRenderLibraryIds,
   subscribeActiveLibrary,
   writeActiveLibraryId,
+  writeRenderLibraryIds,
 } from "@/lib/storyLibrarySelection";
 import type { StoryLibrary } from "@/types/api";
 
@@ -17,6 +19,10 @@ export interface UseActiveStoryLibraryResult {
   error: string | null;
   setActiveId: (libraryId: string) => void;
   refresh: () => Promise<void>;
+  /** Libraries a render draws its clips from (>= 1; activeId is always the first). */
+  selectedIds: string[];
+  selectedLibraries: StoryLibrary[];
+  setSelectedIds: (libraryIds: string[]) => void;
 }
 
 const DEFAULT_LIBRARY_ID = "default";
@@ -94,11 +100,44 @@ export function useActiveStoryLibrary(): UseActiveStoryLibraryResult {
     return () => window.clearTimeout(timer);
   }, [isLoading, libraries, persistedId, activeId]);
 
+  // Render selection ("clip nguon"): one or more libraries merged into a single
+  // clip pool. Nothing persisted yet = render from the active library alone.
+  const persistedRenderIds = useSyncExternalStore(
+    subscribeActiveLibrary,
+    readRenderLibraryIds,
+    () => null,
+  );
+
+  const selectedIds = useMemo(() => {
+    if (!persistedRenderIds?.length) return activeId ? [activeId] : [];
+    // Keep unknown ids while the list is still loading, for the same reason
+    // activeId does: a just-created library is briefly absent from `libraries`.
+    if (persistedResolving) return persistedRenderIds;
+    const known = persistedRenderIds.filter((id) => libraries.some((lib) => lib.id === id));
+    return known.length ? known : activeId ? [activeId] : [];
+  }, [persistedRenderIds, persistedResolving, libraries, activeId]);
+
+  const setSelectedIds = useCallback((libraryIds: string[]) => {
+    const unique = libraryIds.filter((id, index) => id && libraryIds.indexOf(id) === index);
+    if (!unique.length) return;
+    writeRenderLibraryIds(unique);
+  }, []);
+
+  // Management target (upload/rename/delete), independent of the render
+  // selection so browsing another library on the settings page never rewrites
+  // which libraries the next render pulls clips from.
   const setActiveId = useCallback((libraryId: string) => {
     writeActiveLibraryId(libraryId);
   }, []);
 
   const activeLibrary = libraries.find((lib) => lib.id === activeId) ?? null;
+  const selectedLibraries = useMemo(
+    () =>
+      selectedIds
+        .map((id) => libraries.find((lib) => lib.id === id))
+        .filter((lib): lib is StoryLibrary => Boolean(lib)),
+    [selectedIds, libraries],
+  );
 
   return {
     libraries,
@@ -109,5 +148,8 @@ export function useActiveStoryLibrary(): UseActiveStoryLibraryResult {
     error,
     setActiveId,
     refresh,
+    selectedIds,
+    selectedLibraries,
+    setSelectedIds,
   };
 }

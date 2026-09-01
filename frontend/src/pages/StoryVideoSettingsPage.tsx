@@ -1,4 +1,4 @@
-import { Check, Eye, Link as LinkIcon, Loader2, Save, Sparkles, Star, Trash2, Upload } from "lucide-react";
+import { Check, Eye, Link as LinkIcon, Loader2, Pencil, Save, Sparkles, Star, Trash2, Upload, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
@@ -41,6 +41,7 @@ import {
   getSparklePresets,
   getWaveformOverlays,
   importTVNoiseOverlayFromYoutube,
+  renameDecorGroup,
   renderDecorFramePreview,
   renderEffectPreview,
   saveCustomTVEffect,
@@ -346,6 +347,13 @@ function formFromNoiseOverlay(overlay?: TVNoiseOverlay): TVNoiseForm {
   };
 }
 
+// Nhan cho anh decor chua duoc xep vao chu de nao.
+const DECOR_UNGROUPED = "Chưa phân nhóm";
+// Gia tri sentinel trong <select>: chon no se mo o nhap ten nhom moi.
+const DECOR_NEW_GROUP = "__new_group__";
+
+const decorGroupOf = (item: StoryDecorImage) => (item.group ?? "").trim();
+
 export function StoryVideoSettingsPage() {
   const [overlays, setOverlays] = useState<WaveformOverlay[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -362,6 +370,12 @@ export function StoryVideoSettingsPage() {
   const [isDecorSaving, setIsDecorSaving] = useState(false);
   const [decorPreviewPath, setDecorPreviewPath] = useState<string | null>(null);
   const [isDecorPreviewLoading, setIsDecorPreviewLoading] = useState(false);
+  // null = xem tat ca nhom; "" = nhom "chua phan nhom".
+  const [decorGroupFilter, setDecorGroupFilter] = useState<string | null>(null);
+  const [decorUploadGroup, setDecorUploadGroup] = useState("");
+  const [decorGroupEdit, setDecorGroupEdit] = useState<{ from: string; value: string } | null>(null);
+  const [decorGroupInputFor, setDecorGroupInputFor] = useState<string | null>(null);
+  const [decorGroupBusy, setDecorGroupBusy] = useState(false);
   const [tvNoiseOverlays, setTvNoiseOverlays] = useState<TVNoiseOverlay[]>([]);
   const [selectedNoiseId, setSelectedNoiseId] = useState("");
   const [noiseForm, setNoiseForm] = useState<TVNoiseForm>(DEFAULT_NOISE_FORM);
@@ -422,6 +436,36 @@ export function StoryVideoSettingsPage() {
   const selectedDecor = useMemo(
     () => decorImages.find((item) => item.id === selectedDecorId) ?? decorImages[0],
     [decorImages, selectedDecorId],
+  );
+
+  // Anh decor duoc gom theo chu de ("Den chua", "Lang que", "Dieu tra pha an"...)
+  // vi moi loai video chi dung dung mot bo khung. Nhom nam ngay tren record nen
+  // danh sach nhom luon khop voi anh dang hien thi.
+  const decorGroups = useMemo(() => {
+    const seen: string[] = [];
+    for (const item of decorImages) {
+      const group = decorGroupOf(item);
+      if (!seen.includes(group)) seen.push(group);
+    }
+    // "Chua phan nhom" luon xuong cuoi du no xuat hien som.
+    return seen.sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b, "vi")));
+  }, [decorImages]);
+
+  const decorByGroup = useMemo(
+    () =>
+      decorGroups.map((group) => ({
+        group,
+        items: decorImages.filter((item) => decorGroupOf(item) === group),
+      })),
+    [decorGroups, decorImages],
+  );
+
+  const visibleDecorGroups = useMemo(
+    () =>
+      decorGroupFilter === null
+        ? decorByGroup
+        : decorByGroup.filter((entry) => entry.group === decorGroupFilter),
+    [decorByGroup, decorGroupFilter],
   );
 
   // Both overlay sections show the same two boxes, differing only in which one
@@ -581,9 +625,14 @@ export function StoryVideoSettingsPage() {
     setIsDecorUploading(true);
     setErrorMessage(null);
     try {
-      const res = await uploadDecorImage(file);
+      const res = await uploadDecorImage(file, decorUploadGroup);
       await loadDecorImages();
       setSelectedDecorId(res.image.id);
+      // Neu dang loc theo mot nhom khac, anh vua upload se bi an di — keo bo loc
+      // sang nhom cua no de nguoi dung thay ngay ket qua.
+      setDecorGroupFilter((current) =>
+        current === null || current === (res.image.group ?? "") ? current : (res.image.group ?? ""),
+      );
       if (res.image.autoDetected === false) {
         setErrorMessage(
           "Da upload nhung khong tim thay vung mau xanh. Hay keo khung thu cong tren canvas.",
@@ -611,6 +660,56 @@ export function StoryVideoSettingsPage() {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the luu anh decor.");
     } finally {
       setIsDecorSaving(false);
+    }
+  };
+
+  const handleDecorGroupAssign = async (imageId: string, group: string) => {
+    setDecorGroupInputFor(null);
+    setErrorMessage(null);
+    try {
+      const res = await updateDecorImage(imageId, { group: group.trim() });
+      setDecorImages((current) => current.map((item) => (item.id === imageId ? res.image : item)));
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the doi nhom anh decor.");
+    }
+  };
+
+  const handleDecorGroupRename = async (from: string, to: string) => {
+    const next = to.trim();
+    setDecorGroupEdit(null);
+    if (!next || next === from) return;
+    setErrorMessage(null);
+    setDecorGroupBusy(true);
+    try {
+      await renameDecorGroup(from, next);
+      // Bo loc va o nhom mac dinh cua upload deu tro toi ten cu, keo ca hai sang
+      // ten moi de man hinh khong bong dung rong.
+      if (decorGroupFilter === from) setDecorGroupFilter(next);
+      if (decorUploadGroup === from) setDecorUploadGroup(next);
+      await loadDecorImages();
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the doi ten nhom.");
+    } finally {
+      setDecorGroupBusy(false);
+    }
+  };
+
+  const handleDecorGroupEnable = async (group: string, enabled: boolean) => {
+    const targets = decorImages.filter(
+      (item) => decorGroupOf(item) === group && (item.enabled !== false) !== enabled,
+    );
+    if (!targets.length) return;
+    setErrorMessage(null);
+    setDecorGroupBusy(true);
+    try {
+      for (const target of targets) {
+        const res = await updateDecorImage(target.id, { enabled });
+        setDecorImages((current) => current.map((item) => (item.id === target.id ? res.image : item)));
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the doi trang thai ca nhom.");
+    } finally {
+      setDecorGroupBusy(false);
     }
   };
 
@@ -1703,7 +1802,7 @@ export function StoryVideoSettingsPage() {
                     <option value="">Khong dung anh decor</option>
                     {decorImages.map((item) => (
                       <option key={item.id} value={item.id}>
-                        {item.name}
+                        {item.group ? `[${item.group}] ${item.name}` : item.name}
                       </option>
                     ))}
                   </select>
@@ -2087,7 +2186,25 @@ export function StoryVideoSettingsPage() {
         <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
           <div className="space-y-4">
             <div className="grid gap-2">
-              <Label>Upload ảnh decor (có vùng nền xanh)</Label>
+              <Label htmlFor="decor-upload-group">Nhóm chủ đề</Label>
+              <Input
+                id="decor-upload-group"
+                list="decor-group-options"
+                value={decorUploadGroup}
+                onChange={(event) => setDecorUploadGroup(event.currentTarget.value)}
+                placeholder="VD: Đền chùa, Làng quê, Điều tra phá án"
+              />
+              <datalist id="decor-group-options">
+                {decorGroups.filter(Boolean).map((group) => (
+                  <option key={group} value={group} />
+                ))}
+              </datalist>
+              <p className="text-xs text-muted-foreground">
+                Ảnh upload dưới đây sẽ vào nhóm này. Gõ tên mới để tạo nhóm, để trống nếu chưa
+                muốn phân loại — đổi nhóm sau lúc nào cũng được.
+              </p>
+
+              <Label className="mt-2">Upload ảnh decor (có vùng nền xanh)</Label>
               <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
                 {isDecorUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
                 <span>{isDecorUploading ? "Đang tách nền xanh..." : "Chọn ảnh PNG / JPG / WEBP"}</span>
@@ -2109,45 +2226,211 @@ export function StoryVideoSettingsPage() {
             </div>
 
             {decorImages.length ? (
-              <div className="grid gap-2">
-                {decorImages.map((item) => (
-                  <div
-                    key={item.id}
-                    className={`min-w-0 rounded-lg border p-2 transition-colors ${
-                      selectedDecor?.id === item.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setDecorGroupFilter(null)}
+                  className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                    decorGroupFilter === null
+                      ? "border-primary bg-primary/15 text-foreground"
+                      : "border-border/70 text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Tất cả ({decorImages.length})
+                </button>
+                {decorByGroup.map(({ group, items }) => (
+                  <button
+                    key={group || "__none__"}
+                    type="button"
+                    onClick={() => {
+                      setDecorGroupFilter(group);
+                      // Nhom dang xem cung la nhom mac dinh cho anh upload tiep theo.
+                      setDecorUploadGroup(group);
+                      if (!selectedDecor || decorGroupOf(selectedDecor) !== group) {
+                        setSelectedDecorId(items[0]?.id ?? "");
+                      }
+                    }}
+                    className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                      decorGroupFilter === group
+                        ? "border-primary bg-primary/15 text-foreground"
+                        : "border-border/70 text-muted-foreground hover:text-foreground"
                     }`}
                   >
-                    <button
-                      type="button"
-                      onClick={() => setSelectedDecorId(item.id)}
-                      className="flex w-full min-w-0 items-center gap-3 text-left"
-                    >
-                      <img
-                        src={`/media/${item.processedRelativePath ?? item.relativePath}?t=${encodeURIComponent(item.updatedAt ?? "")}`}
-                        alt={item.name}
-                        className="h-12 w-20 shrink-0 rounded border border-border/50 object-cover"
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm font-semibold text-foreground">{item.name}</span>
-                        <span className="block text-xs text-muted-foreground">
-                          Khung {item.frame.w}x{item.frame.h} @ {item.frame.x},{item.frame.y}
-                        </span>
-                      </span>
-                      {item.enabled === false ? (
-                        <Badge variant="secondary" className="rounded-full">Tắt</Badge>
-                      ) : null}
-                    </button>
-                    <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-                      <input
-                        type="checkbox"
-                        checked={item.enabled !== false}
-                        onChange={(event) => void handleDecorToggle(item.id, event.currentTarget.checked)}
-                        className="size-3.5"
-                      />
-                      Cho phép dùng khi render
-                    </label>
-                  </div>
+                    {group || DECOR_UNGROUPED} ({items.length})
+                  </button>
                 ))}
+              </div>
+            ) : null}
+
+            {decorImages.length ? (
+              <div className="grid gap-4">
+                {visibleDecorGroups.map(({ group, items }) => {
+                  const enabledCount = items.filter((item) => item.enabled !== false).length;
+                  const isRenaming = decorGroupEdit?.from === group;
+                  return (
+                    <div key={group || "__none__"} className="grid gap-2">
+                      <div className="flex items-center gap-1.5 border-b border-border/60 pb-1">
+                        {isRenaming ? (
+                          <>
+                            <Input
+                              autoFocus
+                              value={decorGroupEdit.value}
+                              onChange={(event) =>
+                                setDecorGroupEdit({ from: group, value: event.currentTarget.value })
+                              }
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  void handleDecorGroupRename(group, event.currentTarget.value);
+                                } else if (event.key === "Escape") {
+                                  setDecorGroupEdit(null);
+                                }
+                              }}
+                              className="h-7 text-sm"
+                            />
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="size-7 shrink-0"
+                              disabled={decorGroupBusy}
+                              onClick={() => void handleDecorGroupRename(group, decorGroupEdit.value)}
+                            >
+                              <Check className="size-3.5" />
+                            </Button>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="size-7 shrink-0"
+                              onClick={() => setDecorGroupEdit(null)}
+                            >
+                              <X className="size-3.5" />
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+                              {group || DECOR_UNGROUPED}
+                            </span>
+                            <span className="shrink-0 text-xs text-muted-foreground">
+                              {enabledCount}/{items.length} bật
+                            </span>
+                            {group ? (
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant="ghost"
+                                className="size-7 shrink-0"
+                                title="Đổi tên nhóm"
+                                onClick={() => setDecorGroupEdit({ from: group, value: group })}
+                              >
+                                <Pencil className="size-3.5" />
+                              </Button>
+                            ) : null}
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 shrink-0 px-2 text-xs"
+                              disabled={decorGroupBusy || enabledCount === items.length}
+                              onClick={() => void handleDecorGroupEnable(group, true)}
+                            >
+                              Bật cả nhóm
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 shrink-0 px-2 text-xs"
+                              disabled={decorGroupBusy || enabledCount === 0}
+                              onClick={() => void handleDecorGroupEnable(group, false)}
+                            >
+                              Tắt
+                            </Button>
+                          </>
+                        )}
+                      </div>
+
+                      <div className="grid gap-2">
+                        {items.map((item) => (
+                          <div
+                            key={item.id}
+                            className={`min-w-0 rounded-lg border p-2 transition-colors ${
+                              selectedDecor?.id === item.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => setSelectedDecorId(item.id)}
+                              className="flex w-full min-w-0 items-center gap-3 text-left"
+                            >
+                              <img
+                                src={`/media/${item.processedRelativePath ?? item.relativePath}?t=${encodeURIComponent(item.updatedAt ?? "")}`}
+                                alt={item.name}
+                                className="h-12 w-20 shrink-0 rounded border border-border/50 object-cover"
+                              />
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-sm font-semibold text-foreground">{item.name}</span>
+                                <span className="block text-xs text-muted-foreground">
+                                  Khung {item.frame.w}x{item.frame.h} @ {item.frame.x},{item.frame.y}
+                                </span>
+                              </span>
+                              {item.enabled === false ? (
+                                <Badge variant="secondary" className="rounded-full">Tắt</Badge>
+                              ) : null}
+                            </button>
+                            <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                              <input
+                                type="checkbox"
+                                checked={item.enabled !== false}
+                                onChange={(event) => void handleDecorToggle(item.id, event.currentTarget.checked)}
+                                className="size-3.5"
+                              />
+                              Cho phép dùng khi render
+                            </label>
+                            {decorGroupInputFor === item.id ? (
+                              <Input
+                                autoFocus
+                                placeholder="Tên nhóm mới"
+                                className="mt-2 h-7 text-xs"
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    void handleDecorGroupAssign(item.id, event.currentTarget.value);
+                                  } else if (event.key === "Escape") {
+                                    setDecorGroupInputFor(null);
+                                  }
+                                }}
+                                onBlur={(event) => {
+                                  const value = event.currentTarget.value.trim();
+                                  if (value) void handleDecorGroupAssign(item.id, value);
+                                  else setDecorGroupInputFor(null);
+                                }}
+                              />
+                            ) : (
+                              <select
+                                value={decorGroupOf(item)}
+                                onChange={(event) => {
+                                  const value = event.currentTarget.value;
+                                  if (value === DECOR_NEW_GROUP) setDecorGroupInputFor(item.id);
+                                  else void handleDecorGroupAssign(item.id, value);
+                                }}
+                                className="mt-2 h-7 w-full rounded-md border border-input bg-background px-2 text-xs text-muted-foreground"
+                              >
+                                <option value="">{DECOR_UNGROUPED}</option>
+                                {decorGroups.filter(Boolean).map((name) => (
+                                  <option key={name} value={name}>
+                                    {name}
+                                  </option>
+                                ))}
+                                <option value={DECOR_NEW_GROUP}>+ Nhóm mới...</option>
+                              </select>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <EmptyCard

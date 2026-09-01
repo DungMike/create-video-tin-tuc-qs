@@ -83,6 +83,28 @@ def get_default_waveform_overlay() -> dict | None:
     return default or valid[0]
 
 
+def get_waveform_overlay(overlay_id: str) -> dict | None:
+    """Ban ghi waveform theo id, chi tra ve khi file alpha da xu ly con ton tai."""
+    wanted = str(overlay_id or "").strip()
+    if not wanted:
+        return None
+    overlays = load_waveform_index().get("overlays", [])
+    record = next((item for item in overlays if item.get("id") == wanted), None)
+    return record if record and processed_abs_path(record) else None
+
+
+def build_waveform_rotation(overlay_ids: list[str], count: int) -> list[str]:
+    """Chia cac song am da chon cho ``count`` video (bo bai xao).
+
+    Cac id khong tra cuu duoc (da xoa, chua xu ly xong) bi loai truoc khi chia,
+    dung nhu :func:`src.utils.story_decor_images.build_decor_rotation`.
+    """
+    from src.utils.asset_rotation import deal_rotation
+
+    usable = [overlay_id for overlay_id in overlay_ids if get_waveform_overlay(overlay_id)]
+    return deal_rotation(usable, count)
+
+
 def preprocess_waveform_overlay(source_path: str, record: dict) -> str:
     overlay_id = str(record["id"])
     processed_filename = f"{overlay_id}_alpha.mov"

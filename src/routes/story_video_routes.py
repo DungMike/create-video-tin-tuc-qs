@@ -100,6 +100,34 @@ def _resolve_or_404(raw_library_id):
     return raw, None
 
 
+def _resolve_library_ids_or_404(raw_library_ids, raw_library_id=None):
+    """Validate a multi-library render selection -> (ids, error_response).
+
+    Accepts ``libraryIds`` (list) and falls back to the single ``libraryId`` sent
+    by clients from before multi-select. Duplicates are dropped keeping the click
+    order, and an unknown id is a hard 404 rather than a silent fallback so the
+    user never renders from a library they did not pick.
+    """
+    ensure_libraries_registry()
+    raw_values = raw_library_ids if isinstance(raw_library_ids, (list, tuple)) else []
+    candidates = [str(value or "").strip() for value in raw_values]
+    candidates = [value for value in candidates if value]
+    if not candidates:
+        candidates = [str(raw_library_id or "").strip()]
+
+    resolved: list[str] = []
+    for raw in candidates:
+        library_id, err = _resolve_or_404(raw)
+        if err is not None:
+            return None, err
+        if library_id and library_id not in resolved:
+            resolved.append(library_id)
+
+    if not resolved:
+        return None, _error("Chưa chọn thư viện clip nguồn.", code="missing_library")
+    return resolved, None
+
+
 def _new_tv_noise_job(action: str, overlay_id: str = "") -> str:
     session_id = f"tvn-{str(uuid.uuid4())[:8]}"
     with _tv_noise_jobs_lock:
@@ -1551,22 +1579,23 @@ def generate_tv_effect_style_preview():
 # ---------------------------------------------------------------------------
 # 9c. Subtitle fonts / presets / preview
 # ---------------------------------------------------------------------------
-def _resolve_decor_selection(image_ids, library_id, count):
+def _resolve_decor_selection(image_ids, library_ids, count):
     """Validate a decor selection and deal it out across ``count`` videos.
 
     Returns ``(assignments, error_response)``. A fully-baked library already has
     the waveform and CTA burned into its clips, which would end up shrunk inside
     the TV screen instead of on top of the photo — so that combination is refused
-    here rather than silently rendering something wrong.
+    here rather than silently rendering something wrong. One fully-baked library
+    anywhere in the selection is enough: its clips land in the same pool.
     """
     from src.utils.story_decor_images import build_decor_rotation
-    from src.utils.story_library import is_fully_baked_library
+    from src.utils.story_library import any_fully_baked_library
 
     wanted = [str(item or "").strip() for item in (image_ids or []) if str(item or "").strip()]
     if not wanted:
         return [], None
 
-    if is_fully_baked_library(library_id):
+    if any_fully_baked_library(library_ids):
         return None, _error(
             "Thu vien da bake san hieu ung/song am/CTA nen khong dung duoc anh decor. "
             "Hay chon thu vien chua bake.",
@@ -1579,6 +1608,24 @@ def _resolve_decor_selection(image_ids, library_id, count):
             "Khong co anh decor nao dung duoc (chua tach nen hoac da bi xoa).",
             code="decor_unusable",
         )
+    return assignments, None
+
+
+def _resolve_overlay_rotation(overlay_ids, count, build_rotation, empty_message, empty_code):
+    """Validate a waveform/CTA selection and deal it out across ``count`` videos.
+
+    Returns ``(assignments, error_response)``. An empty selection is not an
+    error: it means "keep the current behaviour" — the default waveform and the
+    CTA enabled on the settings page. A non-empty selection where nothing
+    resolves is a hard error rather than a silent fallback.
+    """
+    wanted = [str(item or "").strip() for item in (overlay_ids or []) if str(item or "").strip()]
+    if not wanted:
+        return [], None
+
+    assignments = build_rotation(wanted, count)
+    if not assignments:
+        return None, _error(empty_message, code=empty_code)
     return assignments, None
 
 
@@ -1748,6 +1795,14 @@ def create_story_video():
         if sub_ext != "srt":
             return _error("File subtitle phải có định dạng .srt.", code="invalid_subtitle_format")
 
+    # Validated before anything is written to disk, so a bad selection never
+    # leaves an orphan story dir behind.
+    library_ids, library_error = _resolve_library_ids_or_404(
+        data.get("libraryIds"), data.get("libraryId")
+    )
+    if library_error is not None:
+        return library_error
+
     story_id = f"sv-{str(uuid.uuid4())[:8]}"
     story_dir = os.path.join(Config.STORY_VIDEO_DIR, story_id)
     os.makedirs(story_dir, exist_ok=True)
@@ -1776,7 +1831,7 @@ def create_story_video():
     # A single render takes one decor image; the rotation only applies to batches.
     decor_selection, decor_error = _resolve_decor_selection(
         [str(data.get("decorImageId") or "").strip()],
-        str(data.get("libraryId", "") or "").strip(),
+        library_ids,
         1,
     )
     if decor_error is not None:
@@ -1788,7 +1843,7 @@ def create_story_video():
         "input_value": input_value,
         "output_name": output_name,
         "clip_tags": data.get("clipTags", []),
-        "library_id": str(data.get("libraryId", "") or "").strip(),
+        "library_ids": library_ids,
         "crt_settings": data.get("crtSettings", {}),
         "tv_effect_style_id": str(data.get("tvEffectStyleId", "")).strip(),
         "skip_tv_effect": bool(data.get("skipTvEffect", False)),
@@ -2010,6 +2065,14 @@ def create_story_batch():
     if not items or not isinstance(items, list):
         return _error("Cần ít nhất 1 item.", code="empty_items")
 
+    # Resolved once for the whole batch, before the batch dir exists, so a bad
+    # selection fails without leaving files behind.
+    library_ids, library_error = _resolve_library_ids_or_404(
+        shared_config.get("libraryIds"), shared_config.get("libraryId")
+    )
+    if library_error is not None:
+        return library_error
+
     batch_id = f"sb-{str(uuid.uuid4())[:8]}"
     batch_dir = os.path.join(Config.STORY_VIDEO_DIR, "batches", batch_id)
     os.makedirs(batch_dir, exist_ok=True)
@@ -2062,12 +2125,40 @@ def create_story_batch():
     # out so every run of N videos uses all N images in a different order.
     decor_assignments, decor_error = _resolve_decor_selection(
         shared_config.get("decorImageIds"),
-        str(shared_config.get("libraryId", "") or "").strip(),
+        library_ids,
         len(items),
     )
     if decor_error is not None:
         shutil.rmtree(batch_dir, ignore_errors=True)
         return decor_error
+
+    # Song am va CTA cung xoay vong theo cach do: chon nhieu cau hinh thi moi N
+    # video lien tiep dung du N cau hinh, thu tu ngau nhien. Khong chon = giu
+    # nguyen hanh vi cu (waveform mac dinh + CTA dang bat o trang cau hinh).
+    from src.utils.story_cta_overlay import build_cta_rotation
+    from src.utils.waveform_overlays import build_waveform_rotation
+
+    waveform_assignments, waveform_error = _resolve_overlay_rotation(
+        shared_config.get("waveformOverlayIds"),
+        len(items),
+        build_waveform_rotation,
+        "Khong co song am nao dung duoc (chua xu ly xong hoac da bi xoa).",
+        "waveform_unusable",
+    )
+    if waveform_error is not None:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+        return waveform_error
+
+    cta_assignments, cta_error = _resolve_overlay_rotation(
+        shared_config.get("ctaOverlayIds"),
+        len(items),
+        build_cta_rotation,
+        "Khong co CTA overlay nao dung duoc (chua xu ly xong hoac da bi xoa).",
+        "cta_unusable",
+    )
+    if cta_error is not None:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+        return cta_error
 
     # Build story configs
     story_configs = []
@@ -2135,11 +2226,17 @@ def create_story_batch():
             "input_value": input_value,
             "output_name": output_name,
             "clip_tags": shared_config.get("clipTags", []),
-            "library_id": str(shared_config.get("libraryId", "") or "").strip(),
+            "library_ids": library_ids,
             "crt_settings": shared_config.get("crtSettings", {}),
             "tv_effect_style_id": str(shared_config.get("tvEffectStyleId", "")).strip(),
             "skip_tv_effect": bool(shared_config.get("skipTvEffect", False)),
-            "waveform_overlay_id": str(shared_config.get("waveformOverlayId", "")).strip(),
+            # `waveformOverlayId` (so it) van duoc doc cho client cu.
+            "waveform_overlay_id": (
+                waveform_assignments[idx]
+                if waveform_assignments
+                else str(shared_config.get("waveformOverlayId", "")).strip()
+            ),
+            "cta_overlay_id": cta_assignments[idx] if cta_assignments else "",
             "decor_image_id": decor_assignments[idx] if decor_assignments else "",
             "voice_id": str(shared_config.get("voiceId", "")).strip(),
             "subtitle_path": subtitle_path,
@@ -2157,7 +2254,9 @@ def create_story_batch():
     logger.info(
         f"[StoryVideo] Started batch: batch_id={batch_id}, items={len(story_configs)}, "
         f"optimize_mode={optimize_mode}, "
-        f"decor_images={len(set(decor_assignments)) if decor_assignments else 0}"
+        f"decor_images={len(set(decor_assignments)) if decor_assignments else 0}, "
+        f"waveforms={len(set(waveform_assignments)) if waveform_assignments else 0}, "
+        f"cta_overlays={len(set(cta_assignments)) if cta_assignments else 0}"
     )
     return jsonify({"batchId": batch_id}), 202
 
@@ -2191,8 +2290,10 @@ def get_batch_progress(batch_id: str):
             "message": source.get("message", ""),
             "result": source.get("result"),
             "error": source.get("error"),
-            # Which decor image this item drew from the batch rotation.
+            # Which decor image / waveform / CTA this item drew from the batch rotation.
             "decorImageName": story.get("decor_image_name", ""),
+            "waveformName": story.get("waveform_overlay_name", ""),
+            "ctaOverlayName": story.get("cta_overlay_name", ""),
         })
 
     batch_status = progress.get("status", "pending")
@@ -2282,9 +2383,13 @@ def retry_batch_failed(batch_id: str):
             "input_value": input_value,
             "output_name": s.get("output_name", ""),
             "clip_tags": s.get("clip_tags", []),
-            "library_id": s.get("library_id", ""),
+            # Batches rendered before multi-select only carry the singular key.
+            "library_ids": s.get("library_ids") or [s.get("library_id", "")],
             "skip_tv_effect": bool(s.get("skip_tv_effect", False)),
             "decor_image_id": s.get("decor_image_id", ""),
+            # Retry giu dung song am / CTA ma item da boc o lan chay truoc.
+            "waveform_overlay_id": s.get("waveform_overlay_id", ""),
+            "cta_overlay_id": s.get("cta_overlay_id", ""),
             "voice_id": s.get("voice_id", ""),
             "intro_video_path": s.get("intro_video_path", ""),
             "subtitle_path": s.get("subtitle_path", ""),
@@ -2569,11 +2674,13 @@ def delete_cta_overlay(overlay_id: str):
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/decor-images", methods=["GET"])
 def get_decor_images():
-    from src.utils.story_decor_images import load_decor_index
+    from src.utils.story_decor_images import list_decor_groups, load_decor_index
 
     images = load_decor_index().get("images", [])
     images.sort(key=lambda item: str(item.get("createdAt") or ""))
-    return jsonify({"images": images})
+    # Groups are derived from the records, so the UI never has to reconcile a
+    # separate list against the images it is showing.
+    return jsonify({"images": images, "groups": list_decor_groups()})
 
 
 @story_video_bp.route("/api/story-video/decor-images", methods=["POST"])
@@ -2585,7 +2692,7 @@ def upload_decor_image():
         return _error("Chua chon file anh decor.", code="no_file")
 
     try:
-        record = create_decor_image(upload_file)
+        record = create_decor_image(upload_file, group=request.form.get("group") or "")
     except ValueError as exc:
         return _error(str(exc), code="invalid_decor_image")
     except Exception as exc:
@@ -2602,7 +2709,7 @@ def patch_decor_image(image_id: str):
 
     payload = request.get_json(silent=True) or {}
     updates = {}
-    for key in ("name", "keyColor", "enabled", "frame"):
+    for key in ("name", "keyColor", "enabled", "frame", "group"):
         if key in payload:
             updates[key] = payload[key]
     for key in ("similarity", "blend", "overscan"):
@@ -2620,6 +2727,30 @@ def patch_decor_image(image_id: str):
     if not record:
         return _error("Anh decor khong ton tai.", code="decor_not_found", status=404)
     return jsonify({"image": record})
+
+
+@story_video_bp.route("/api/story-video/decor-images/group", methods=["PATCH"])
+def rename_decor_image_group():
+    """Rename a theme group across every image that carries it.
+
+    The static "group" segment cannot be shadowed by the sibling
+    ``<image_id>`` PATCH rule: Werkzeug ranks argument-free rules above ones
+    with a converter, whatever order they were registered in.
+    """
+    from src.utils.story_decor_images import list_decor_groups, rename_decor_group
+
+    payload = request.get_json(silent=True) or {}
+    old_group = str(payload.get("from") or "")
+    new_group = str(payload.get("to") or "")
+
+    try:
+        moved = rename_decor_group(old_group, new_group)
+    except Exception as exc:
+        logger.error(f"[StoryVideo] Decor group rename failed: {exc}", exc_info=True)
+        return _error(f"Khong the doi ten nhom: {exc}", code="decor_group_rename_failed", status=500)
+
+    logger.info(f"[StoryVideo] Decor group renamed: '{old_group}' -> '{new_group}' ({moved} anh)")
+    return jsonify({"moved": moved, "groups": list_decor_groups()})
 
 
 @story_video_bp.route("/api/story-video/decor-images/<image_id>", methods=["DELETE"])

@@ -23,7 +23,6 @@ finds that rectangle automatically on upload.
 import json
 import math
 import os
-import random
 import shutil
 import uuid
 from datetime import datetime
@@ -70,6 +69,60 @@ def _relative(filename: str) -> str:
 
 def _absolute(filename: str) -> str:
     return os.path.join(Config.STORY_DECOR_DIR, filename)
+
+
+# --------------------------------------------------------------------------- #
+# Theme groups
+# --------------------------------------------------------------------------- #
+# Each kind of story video has its own setting ("den chua", "lang que", "dieu
+# tra pha an"...), so decor images are tagged with a free-text group and the
+# render page rotates within one theme instead of across the whole library.
+# An empty group means "not sorted yet" and is never a hard error.
+MAX_GROUP_LEN = 60
+
+
+def normalize_group(value) -> str:
+    """Trim a group label; anything falsy or blank collapses to '' (ungrouped)."""
+    if value is None:
+        return ""
+    return " ".join(str(value).split())[:MAX_GROUP_LEN]
+
+
+def decor_group_of(record: dict) -> str:
+    return normalize_group(record.get("group"))
+
+
+def list_decor_groups() -> list[str]:
+    """Distinct non-empty group labels, in first-use order."""
+    groups: list[str] = []
+    for record in load_decor_index().get("images", []):
+        group = decor_group_of(record)
+        if group and group not in groups:
+            groups.append(group)
+    return groups
+
+
+def rename_decor_group(old: str, new: str) -> int:
+    """Move every image in group ``old`` to ``new``. Returns how many moved.
+
+    Renaming through the records themselves keeps the group list derived from a
+    single source of truth — there is no separate group registry to drift.
+    """
+    old_group = normalize_group(old)
+    new_group = normalize_group(new)
+    if old_group == new_group:
+        return 0
+
+    index = load_decor_index()
+    moved = 0
+    for record in index.get("images", []):
+        if decor_group_of(record) == old_group:
+            record["group"] = new_group
+            record["updatedAt"] = datetime.now().isoformat()
+            moved += 1
+    if moved:
+        save_decor_index(index)
+    return moved
 
 
 def target_size() -> tuple[int, int]:
@@ -439,7 +492,7 @@ def preprocess_decor_image(source_path: str, record: dict) -> str:
 # --------------------------------------------------------------------------- #
 # CRUD
 # --------------------------------------------------------------------------- #
-def create_decor_image(file_storage) -> dict:
+def create_decor_image(file_storage, group: str = "") -> dict:
     if not file_storage or not file_storage.filename:
         raise ValueError("Chua chon file anh decor.")
 
@@ -471,6 +524,7 @@ def create_decor_image(file_storage) -> dict:
     record = {
         "id": image_id,
         "name": os.path.splitext(safe_name)[0] or image_id,
+        "group": normalize_group(group),
         "filename": filename,
         "relativePath": _relative(filename),
         "keyColor": key_color,
@@ -519,6 +573,11 @@ def update_decor_image(image_id: str, updates: dict) -> dict | None:
     for key in ("name", "overscan"):
         if key in updates and updates[key] is not None:
             record[key] = updates[key]
+
+    # "" is a meaningful value here (back to ungrouped), so this cannot ride
+    # along with the is-not-None loop above.
+    if "group" in updates:
+        record["group"] = normalize_group(updates["group"])
 
     if "enabled" in updates and updates["enabled"] is not None:
         record["enabled"] = bool(updates["enabled"])
@@ -590,11 +649,15 @@ def resolve_decor_image(image_id: str) -> tuple[dict, str] | None:
     return record, path
 
 
-def get_enabled_decor_images() -> list[dict]:
+def get_enabled_decor_images(group: str | None = None) -> list[dict]:
+    """Usable decor images; pass ``group`` to keep only one theme."""
+    wanted = None if group is None else normalize_group(group)
     return [
         item
         for item in load_decor_index().get("images", [])
-        if item.get("enabled", True) and processed_abs_path(item)
+        if item.get("enabled", True)
+        and processed_abs_path(item)
+        and (wanted is None or decor_group_of(item) == wanted)
     ]
 
 
@@ -605,21 +668,7 @@ def build_decor_rotation(image_ids: list[str], count: int) -> list[str]:
     images uses all 7 in every run of 7, in a different order each time, and no
     image is starved the way independent random picks would allow.
     """
-    usable = [image_id for image_id in image_ids if resolve_decor_image(image_id)]
-    if not usable or count <= 0:
-        return []
+    from src.utils.asset_rotation import deal_rotation
 
-    assignments: list[str] = []
-    deck: list[str] = []
-    previous: str | None = None
-    while len(assignments) < count:
-        if not deck:
-            deck = list(usable)
-            random.shuffle(deck)
-            # Avoid the seam repeat: a reshuffle can put the image we just used
-            # at the front, which reads as "the rotation broke".
-            if len(deck) > 1 and deck[0] == previous:
-                deck.append(deck.pop(0))
-        previous = deck.pop(0)
-        assignments.append(previous)
-    return assignments
+    usable = [image_id for image_id in image_ids if resolve_decor_image(image_id)]
+    return deal_rotation(usable, count)

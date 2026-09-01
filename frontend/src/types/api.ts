@@ -1092,7 +1092,13 @@ export interface CreateStoryVideoRequest {
   inputType: "audio_file" | "script_url";
   inputValue: string;
   outputName: string;
+  /** @deprecated Dùng `libraryIds`; backend vẫn nhận key này cho client cũ. */
   libraryId?: string;
+  /**
+   * Các thư viện clip nguồn cho lần render này. Backend gộp clip của tất cả
+   * thư viện thành một pool rồi rút ngẫu nhiên không lặp lại.
+   */
+  libraryIds?: string[];
   clipTags?: string[];
   crtSettings?: CRTSettings;
   /** Bỏ qua bước hiệu ứng TV khi render (thư viện chưa bake hiệu ứng). */
@@ -1132,7 +1138,10 @@ export interface CreateStoryBatchItem {
 export interface CreateStoryBatchRequest {
   items: CreateStoryBatchItem[];
   sharedConfig: {
+    /** @deprecated Dùng `libraryIds`; backend vẫn nhận key này cho client cũ. */
     libraryId?: string;
+    /** Các thư viện clip nguồn dùng chung cho cả batch (pool gộp). */
+    libraryIds?: string[];
     introId?: string;
     /** Optimize mode: suspend competing apps + boost ffmpeg priority for this batch. */
     optimizeMode?: boolean;
@@ -1140,7 +1149,18 @@ export interface CreateStoryBatchRequest {
     crtSettings?: CRTSettings;
     /** Bỏ qua bước hiệu ứng TV khi render (thư viện chưa bake hiệu ứng). */
     skipTvEffect?: boolean;
+    /** @deprecated Dùng `waveformOverlayIds`; backend vẫn nhận key này cho client cũ. */
     waveformOverlayId?: string;
+    /**
+     * Sóng âm tham gia xoay vòng cho batch này (cùng cơ chế bộ bài xáo như
+     * `decorImageIds`). Rỗng = dùng sóng âm mặc định ở trang cấu hình.
+     */
+    waveformOverlayIds?: string[];
+    /**
+     * CTA overlay tham gia xoay vòng cho batch này. Rỗng = dùng CTA đang bật ở
+     * trang cấu hình (hành vi cũ).
+     */
+    ctaOverlayIds?: string[];
     /**
      * Ảnh decor tham gia xoay vòng cho batch này. Backend xáo bộ bài rồi chia
      * lần lượt, nên mỗi N video liên tiếp dùng đủ N ảnh theo thứ tự ngẫu nhiên.
@@ -1181,6 +1201,10 @@ export interface StoryBatchItemProgress {
   error?: string;
   /** Decor image this item drew from the batch rotation; "" when decor is off. */
   decorImageName?: string;
+  /** Sóng âm item này bốc được; "" khi batch không xoay vòng sóng âm. */
+  waveformName?: string;
+  /** CTA overlay item này bốc được; "" khi batch không xoay vòng CTA. */
+  ctaOverlayName?: string;
 }
 
 export interface StoryBatchProgress {
@@ -1210,6 +1234,8 @@ export interface StoryDecorFrame {
 export interface StoryDecorImage {
   id: string;
   name: string;
+  /** Theme this decor belongs to ("den chua", "lang que"...); "" = chua phan nhom. */
+  group?: string;
   filename: string;
   relativePath?: string;
   processedFilename?: string;

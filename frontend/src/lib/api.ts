@@ -1071,16 +1071,30 @@ export async function deleteCtaOverlay(id: string) {
 }
 
 export async function getDecorImages() {
-  return requestJson<{ images: StoryDecorImage[] }>("/api/story-video/decor-images");
+  return requestJson<{ images: StoryDecorImage[]; groups?: string[] }>(
+    "/api/story-video/decor-images",
+  );
 }
 
-export async function uploadDecorImage(file: File) {
-  const fd = new FormData();
-  fd.append("file", file);
+export async function uploadDecorImage(file: File, group?: string) {
+  const form = new FormData();
+  form.append("file", file);
+  if (group) form.append("group", group);
   return requestJson<{ image: StoryDecorImage }>("/api/story-video/decor-images", {
     method: "POST",
-    body: fd,
+    body: form,
   });
+}
+
+export async function renameDecorGroup(from: string, to: string) {
+  return requestJson<{ moved: number; groups: string[] }>(
+    "/api/story-video/decor-images/group",
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to }),
+    },
+  );
 }
 
 export async function updateDecorImage(id: string, payload: Partial<StoryDecorImage>) {
