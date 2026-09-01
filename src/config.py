@@ -213,7 +213,17 @@ class Config:
     # so a library built at 3s and a render at 3s stay in lockstep. A library can
     # override it via its own `clipDuration` (see story_library.library_clip_duration).
     STORY_CLIP_DURATION = int(os.getenv("STORY_CLIP_DURATION", "3"))
-    STORY_LIBRARY_DIR = os.path.join(STORAGE_DIR, "story_library")
+    # Root of the clip libraries (story_library/<library_id>/clips/). This is the
+    # hottest read path of a render AND the biggest thing under STORAGE_DIR, so the
+    # two pull in opposite directions: it wants the fast disk, it does not fit on it.
+    # Overridable on its own for that reason -- before this it was pinned to
+    # STORAGE_DIR and the only way to split it off was an NTFS junction per library
+    # (C:/storage/story_library/<id> -> E:/...), which still works and stays valid:
+    # index.json stores relative_path, and both commonpath guards in
+    # src/utils/story_library.py realpath() the root as well as the candidate, so a
+    # junction AT LIBRARY LEVEL resolves on both sides. A junction at clips/ level
+    # does not -- never place one there (see .env).
+    STORY_LIBRARY_DIR = os.getenv("STORY_LIBRARY_DIR", os.path.join(STORAGE_DIR, "story_library"))
     STORY_VIDEO_DIR = os.path.join(STORAGE_DIR, "story_video")
     # Intro-video library: short opening clips prepended to each batch video.
     # Each intro is normalized to the pipeline's canonical output spec on upload.
@@ -258,7 +268,7 @@ class Config:
     STORY_SUBTITLE_PREVIEW_DIR = os.path.join(STORAGE_DIR, "story_subtitle_previews")
     STORY_SUBTITLE_MAX_CHARS_PER_LINE = int(os.getenv("STORY_SUBTITLE_MAX_CHARS_PER_LINE", "42"))
     STORY_SUBTITLE_MAX_LINES = int(os.getenv("STORY_SUBTITLE_MAX_LINES", "2"))
-    STORY_SUBTITLE_DEFAULT_FONT = os.getenv("STORY_SUBTITLE_DEFAULT_FONT", "Malgun Gothic")
+    STORY_SUBTITLE_DEFAULT_FONT = os.getenv("STORY_SUBTITLE_DEFAULT_FONT", "Arial")
 
     # --- CRT Effect ---
     CRT_NOISE_STRENGTH = int(os.getenv("CRT_NOISE_STRENGTH", "15"))

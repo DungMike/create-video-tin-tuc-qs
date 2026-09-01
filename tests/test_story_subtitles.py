@@ -451,17 +451,22 @@ def test_scan_fonts_registry_and_cache(tmp_path, monkeypatch):
     assert fonts
     by_family = {item["family"]: item for item in fonts}
 
-    malgun = by_family.get("Malgun Gothic")
-    if malgun is not None:
-        assert malgun["supportsKorean"] is True
-        assert malgun["supportsVietnamese"] is False
-        assert malgun["source"] == "system"
-        assert malgun["files"]
+    # Font Hàn bị loại hẳn khỏi danh sách, và cờ Korean không còn trong payload.
+    assert "Malgun Gothic" not in by_family
+    assert all("supportsKorean" not in item for item in fonts)
+    assert all("_hasHangul" not in item for item in fonts)
 
     arial = by_family.get("Arial")
     if arial is not None:
         assert arial["supportsVietnamese"] is True
-        assert arial["supportsKorean"] is False
+        assert arial["supportsIndonesian"] is True
+        assert arial["source"] == "system"
+        assert arial["files"]
+
+    # Font symbol không có Latin/"é" nên không tính là hỗ trợ tiếng Indonesia.
+    wingdings = by_family.get("Wingdings")
+    if wingdings is not None:
+        assert wingdings["supportsIndonesian"] is False
 
     index_path = os.path.join(Config.STORY_FONTS_DIR, "fonts_index.json")
     assert os.path.isfile(index_path)
@@ -470,7 +475,7 @@ def test_scan_fonts_registry_and_cache(tmp_path, monkeypatch):
     with open(index_path, "r", encoding="utf-8") as file_obj:
         cached = json.load(file_obj)
     cached["fonts"].append({
-        "family": "ZZZ Fake Font", "files": [], "supportsKorean": False,
+        "family": "ZZZ Fake Font", "files": [], "supportsIndonesian": False,
         "supportsVietnamese": False, "source": "system",
     })
     with open(index_path, "w", encoding="utf-8") as file_obj:

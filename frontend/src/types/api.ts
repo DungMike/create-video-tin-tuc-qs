@@ -1107,7 +1107,7 @@ export interface CreateStoryBatchRequest {
 
 export interface SubtitleFontInfo {
   family: string;
-  supportsKorean: boolean;
+  supportsIndonesian: boolean;
   supportsVietnamese: boolean;
   supportsThai: boolean;
   source: "system" | "user";
