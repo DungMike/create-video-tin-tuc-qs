@@ -1015,6 +1015,8 @@ export interface EffectPreviewSource {
   appliedStyle?: boolean;
   appliedOverlays?: boolean;
   appliedCompare?: boolean;
+  appliedDecorId?: string | null;
+  appliedDecorName?: string | null;
   appliedLayers?: { id?: string; name?: string; kind?: string; blendMode?: string; opacity?: number }[];
   createdAt: string;
   updatedAt?: string;
@@ -1096,6 +1098,8 @@ export interface CreateStoryVideoRequest {
   /** Bỏ qua bước hiệu ứng TV khi render (thư viện chưa bake hiệu ứng). */
   skipTvEffect?: boolean;
   waveformOverlayId?: string;
+  /** Ảnh decor (khung TV) dùng cho render đơn. "" = tắt. */
+  decorImageId?: string;
   voiceId?: string;
   subtitleFont?: string;
   subtitlePreset?: string;
@@ -1137,6 +1141,12 @@ export interface CreateStoryBatchRequest {
     /** Bỏ qua bước hiệu ứng TV khi render (thư viện chưa bake hiệu ứng). */
     skipTvEffect?: boolean;
     waveformOverlayId?: string;
+    /**
+     * Ảnh decor tham gia xoay vòng cho batch này. Backend xáo bộ bài rồi chia
+     * lần lượt, nên mỗi N video liên tiếp dùng đủ N ảnh theo thứ tự ngẫu nhiên.
+     * Rỗng = không dùng ảnh decor.
+     */
+    decorImageIds?: string[];
     voiceId?: string;
     subtitleFont?: string;
     subtitlePreset?: string;
@@ -1169,6 +1179,8 @@ export interface StoryBatchItemProgress {
   message?: string;
   result?: { videoPath: string };
   error?: string;
+  /** Decor image this item drew from the batch rotation; "" when decor is off. */
+  decorImageName?: string;
 }
 
 export interface StoryBatchProgress {
@@ -1180,6 +1192,39 @@ export interface StoryBatchProgress {
   cancelledItems: number;
   currentIndex: number;
   items: StoryBatchItemProgress[];
+}
+
+/** Rectangle, in 1920x1080 output coordinates, that the video is fitted into. */
+export interface StoryDecorFrame {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * A full-frame photo whose chroma-green area the story video plays inside.
+ * `processedRelativePath` is the RGBA PNG (green already keyed out) that the
+ * render overlays; `relativePath` is the untouched upload.
+ */
+export interface StoryDecorImage {
+  id: string;
+  name: string;
+  filename: string;
+  relativePath?: string;
+  processedFilename?: string;
+  processedRelativePath?: string;
+  keyColor?: string;
+  similarity?: number;
+  blend?: number;
+  frame: StoryDecorFrame;
+  /** Grows the video past the frame edges so a green fringe can never show. */
+  overscan?: number;
+  /** False when the green region had to be placed by hand. */
+  autoDetected?: boolean;
+  enabled?: boolean;
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export interface WaveformOverlay {
@@ -1197,6 +1242,15 @@ export interface WaveformOverlay {
   scaleWidth?: number;
   position?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
   margin?: number;
+  /**
+   * Free placement: top-left corner in output-frame px. Unset = use position +
+   * margin. Sending null on an update clears it back to the corner.
+   */
+  x?: number | null;
+  y?: number | null;
+  /** Real size of the processed alpha MOV, so the editor can draw it true to scale. */
+  processedWidth?: number;
+  processedHeight?: number;
   createdAt: string;
   updatedAt?: string;
 }
@@ -1217,6 +1271,15 @@ export interface CtaOverlay {
   scaleWidth?: number;
   position?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
   margin?: number;
+  /**
+   * Free placement: top-left corner in output-frame px. Unset = use position +
+   * margin. Sending null on an update clears it back to the corner.
+   */
+  x?: number | null;
+  y?: number | null;
+  /** Real size of the processed alpha MOV, so the editor can draw it true to scale. */
+  processedWidth?: number;
+  processedHeight?: number;
   createdAt: string;
   updatedAt?: string;
 }

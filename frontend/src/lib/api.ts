@@ -258,6 +258,8 @@ import type {
   ParseScriptResponse,
   StartStoryHarvestRequest,
   StoryBatchProgress,
+  StoryDecorFrame,
+  StoryDecorImage,
   StoryHarvestDeleteRequest,
   StoryHarvestDeleteResponse,
   StoryHarvestItemsResponse,
@@ -863,6 +865,7 @@ export async function renderEffectPreview(payload: {
   includeOverlays?: boolean;
   compare?: boolean;
   maxSeconds?: number;
+  decorImageId?: string;
 }) {
   return requestJson<{ sessionId: string }>("/api/story-video/effect-preview/render", {
     method: "POST",
@@ -1065,4 +1068,52 @@ export async function updateCtaOverlay(id: string, payload: Partial<CtaOverlay>)
 
 export async function deleteCtaOverlay(id: string) {
   return requestJson<void>(`/api/story-video/cta-overlays/${id}`, { method: "DELETE" });
+}
+
+export async function getDecorImages() {
+  return requestJson<{ images: StoryDecorImage[] }>("/api/story-video/decor-images");
+}
+
+export async function uploadDecorImage(file: File) {
+  const fd = new FormData();
+  fd.append("file", file);
+  return requestJson<{ image: StoryDecorImage }>("/api/story-video/decor-images", {
+    method: "POST",
+    body: fd,
+  });
+}
+
+export async function updateDecorImage(id: string, payload: Partial<StoryDecorImage>) {
+  return requestJson<{ image: StoryDecorImage }>(`/api/story-video/decor-images/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteDecorImage(id: string) {
+  return requestJson<void>(`/api/story-video/decor-images/${id}`, { method: "DELETE" });
+}
+
+/** Re-run green-region detection on the original upload. */
+export async function detectDecorFrame(id: string) {
+  return requestJson<{ frame: StoryDecorFrame; keyColor: string }>(
+    `/api/story-video/decor-images/${id}/detect-frame`,
+    { method: "POST" },
+  );
+}
+
+/** Compose one still (a library frame fitted into the decor frame) for alignment. */
+export async function renderDecorFramePreview(
+  id: string,
+  payload: { libraryId?: string; sampleClipId?: string } = {},
+) {
+  return requestJson<{ previewPath: string }>(
+    `/api/story-video/decor-images/${id}/frame-preview`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
 }

@@ -185,6 +185,9 @@ class StoryVideoPipelineRunner:
         self.voice_id = config_dict.get("voice_id", "")
         self.waveform_overlay_id = str(config_dict.get("waveform_overlay_id", "") or "").strip()
         self.tv_effect_style_id = str(config_dict.get("tv_effect_style_id", "") or "").strip()
+        # Decor image ("khung TV"): a full-frame photo whose green screen the story
+        # video is scaled into. Assigned per video by the batch rotation; "" = off.
+        self.decor_image_id = str(config_dict.get("decor_image_id", "") or "").strip()
         # Opt-out for the TV style pass on a library whose clips are NOT pre-baked:
         # render the clips as they are (overlays + subtitle only). This also unlocks
         # the GPU overlay path, which the CPU-only style filter would otherwise block.
@@ -799,6 +802,36 @@ class StoryVideoPipelineRunner:
             and FFmpegHelper.cuda_overlay_available()
         )
 
+    def _resolve_decor_layer(self):
+        """(record, keyed PNG path) for this story's decor image, or None."""
+        if not self.decor_image_id:
+            return None
+        from src.utils.story_decor_images import resolve_decor_image
+
+        resolved = resolve_decor_image(self.decor_image_id)
+        if not resolved:
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] Decor image {self.decor_image_id} "
+                f"is unusable; rendering without it."
+            )
+        return resolved
+
+    @staticmethod
+    def _overlay_input_indices(tv_noise_paths, decor_path, waveform_path, cta_path) -> dict:
+        """Input slots for the overlay pass, shared by the CPU and GPU commands.
+
+        Order is base, tv-noise..., decor, waveform, cta — the same order both
+        commands add their `-i` flags in, so the filter labels line up whichever
+        path runs."""
+        next_index = 1 + len(tv_noise_paths)
+        indices = {"decor": None, "waveform": None, "cta": None}
+        for key, path in (("decor", decor_path), ("waveform", waveform_path), ("cta", cta_path)):
+            if path:
+                indices[key] = next_index
+                next_index += 1
+        indices["next"] = next_index
+        return indices
+
     def _gpu_overlay_tail(self, chain_label: str, ass_path: str = "") -> str:
         """Closing filter node for a GPU overlay chain.
 
@@ -821,21 +854,26 @@ class StoryVideoPipelineRunner:
         cta_path,
         cta_record,
         *,
+        decor_path=None,
+        decor_record=None,
         ss: float | None = None,
         ass_path: str = "",
         with_audio: bool = True,
     ) -> list:
         """GPU (overlay_cuda) variant of the direct overlay chain.
 
-        Input order mirrors the CPU command (base, tv-noise..., waveform, cta) so the
-        filter input indices line up. Only alpha overlays reach here — screen-blend
-        noise and CPU TV style keep the CPU path (see caller eligibility check).
+        Input order mirrors the CPU command (base, tv-noise..., decor, waveform, cta)
+        so the filter input indices line up. Only alpha overlays reach here —
+        screen-blend noise and CPU TV style keep the CPU path (see caller eligibility
+        check), as does a decor frame that needs a crop (no CUDA crop/pad filter).
 
         For a parallel time-segment, pass `ss` (input seek start), a rebased `ass_path`,
         and `with_audio=False` (audio is muxed back once after concatenation)."""
         from src.utils.story_cta_overlay import overlay_position_expr as cta_position_expr
+        from src.utils.story_decor_images import decor_fit_geometry, decor_input_args
         from src.utils.waveform_overlays import overlay_position_expr
 
+        fps = max(1, int(Config.TARGET_FPS))
         cmd = ["ffmpeg", "-y", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
         if ss is not None:
             cmd.extend(["-ss", str(ss)])
@@ -843,15 +881,18 @@ class StoryVideoPipelineRunner:
         for _record, overlay_path in tv_noise_paths:
             cmd.extend(["-stream_loop", "-1", "-i", overlay_path])
 
-        waveform_input_index = None
+        indices = self._overlay_input_indices(
+            tv_noise_paths, decor_path, waveform_path, cta_path
+        )
+        if decor_path:
+            cmd.extend(decor_input_args(decor_path))
         if waveform_path:
-            waveform_input_index = 1 + len(tv_noise_paths)
             cmd.extend(["-stream_loop", "-1", "-i", waveform_path])
-
-        cta_input_index = None
         if cta_path:
-            cta_input_index = 1 + len(tv_noise_paths) + (1 if waveform_path else 0)
             cmd.extend(["-stream_loop", "-1", "-i", cta_path])
+
+        waveform_input_index = indices["waveform"]
+        cta_input_index = indices["cta"]
 
         filter_parts = ["[0:v]scale_cuda=format=yuv420p[base]"]
         chain_label = "[base]"
@@ -866,6 +907,33 @@ class StoryVideoPipelineRunner:
                 f"{chain_label}[{noise_label}]overlay_cuda=0:0:eof_action=repeat:eval=init[{out_label}]"
             )
             chain_label = f"[{out_label}]"
+
+        if decor_path and decor_record:
+            geo = decor_fit_geometry(decor_record)
+            # The canvas the shrunk video lands on is a `split` of the chain, NOT a
+            # black lavfi source pushed through hwupload_cuda. An uploaded source
+            # carries its own CUDA hw frames context, and when a colour-tag change
+            # between two concatenated library clips forces a mid-render filter
+            # reconfigure, ffmpeg cannot bridge the two contexts: it tries to insert
+            # a software auto_scale into the overlay_cuda overlay pad and the whole
+            # GPU pass dies ("Impossible to convert ... Error reinitializing
+            # filters!"), silently dropping the render onto the ~3x slower CPU
+            # chain. Splitting keeps one context, so the reconfigure survives.
+            filter_parts.append(
+                f"[{indices['decor']}:v]setpts=PTS-STARTPTS,format=yuva420p,hwupload_cuda[decorimg]"
+            )
+            filter_parts.append(f"{chain_label}split=2[decorbg][decorsrc]")
+            filter_parts.append(
+                f"[decorsrc]scale_cuda={geo['fitW']}:{geo['fitH']}:format=yuv420p[decorfit]"
+            )
+            filter_parts.append(
+                f"[decorbg][decorfit]overlay_cuda={geo['fitX']}:{geo['fitY']}:eval=init[decorframed]"
+            )
+            filter_parts.append(
+                "[decorframed][decorimg]"
+                "overlay_cuda=0:0:eof_action=repeat:eval=init[decorout]"
+            )
+            chain_label = "[decorout]"
 
         if waveform_path and waveform_record and waveform_input_index is not None:
             x_expr, y_expr = overlay_position_expr(waveform_record)
@@ -911,6 +979,8 @@ class StoryVideoPipelineRunner:
         cta_path,
         cta_record,
         segments: int,
+        decor_path=None,
+        decor_record=None,
     ) -> str | None:
         """Run the GPU overlay+subtitle pass as N parallel time-segments, then concat.
 
@@ -934,6 +1004,7 @@ class StoryVideoPipelineRunner:
                 self._build_story_overlays_gpu_cmd(
                     current_video, seg_out, dur,
                     tv_noise_paths, waveform_path, waveform_record, cta_path, cta_record,
+                    decor_path=decor_path, decor_record=decor_record,
                     ss=start, ass_path=seg_ass, with_audio=False,
                 )
             )
@@ -1002,9 +1073,15 @@ class StoryVideoPipelineRunner:
         """Overlay TV noise layers and the configured waveform in a single FFmpeg pass."""
         from src.utils.story_library import is_fully_baked_library
 
+        decor_layer = self._resolve_decor_layer()
+        decor_record, decor_path = decor_layer if decor_layer else (None, None)
+
         # Fully-baked libraries already have style + waveform + CTA burned into the
         # clips, so the only remaining work is subtitle burn-in (the fastest path).
-        if is_fully_baked_library(self.library_id):
+        # A decor frame has to composite, so it cannot take that shortcut — and the
+        # baked-in waveform/CTA would end up shrunk inside the screen, which is why
+        # the route rejects the combination before we ever get here.
+        if is_fully_baked_library(self.library_id) and not decor_path:
             if self._subtitle_ass_path:
                 logger.info(
                     f"[StoryPipeline:{self.story_id}] Fully-baked library; subtitle-only pass."
@@ -1064,7 +1141,7 @@ class StoryVideoPipelineRunner:
 
         style_filter = self._tv_effect_filter()
 
-        if not tv_noise_paths and not waveform_path and not cta_path:
+        if not tv_noise_paths and not waveform_path and not cta_path and not decor_path:
             if style_filter:
                 return self._apply_tv_effect_only(current_video, audio_duration, style_filter)
             if self._subtitle_ass_path:
@@ -1081,8 +1158,11 @@ class StoryVideoPipelineRunner:
         has_screen_noise = any(
             overlay_blend_mode(record) == "screen" for record, _path in tv_noise_paths
         )
+        # A decor frame splits the stack in two — noise belongs inside the screen,
+        # waveform/CTA outside on the photo — so the single premerged alpha pack no
+        # longer describes it. Direct chain only.
         pack_path = None
-        if tv_noise_paths and not has_screen_noise:
+        if tv_noise_paths and not has_screen_noise and not decor_path:
             pack_path = get_or_create_story_overlay_pack(
                 tv_noise_paths,
                 waveform_record if waveform_path else None,
@@ -1111,15 +1191,20 @@ class StoryVideoPipelineRunner:
         for _record, overlay_path in tv_noise_paths:
             cmd.extend(["-stream_loop", "-1", "-i", overlay_path])
 
-        waveform_input_index = None
-        if waveform_path:
-            waveform_input_index = 1 + len(tv_noise_paths)
-            cmd.extend(["-stream_loop", "-1", "-i", waveform_path])
+        indices = self._overlay_input_indices(
+            tv_noise_paths, decor_path, waveform_path, cta_path
+        )
+        if decor_path:
+            from src.utils.story_decor_images import decor_input_args
 
-        cta_input_index = None
+            cmd.extend(decor_input_args(decor_path))
+        if waveform_path:
+            cmd.extend(["-stream_loop", "-1", "-i", waveform_path])
         if cta_path:
-            cta_input_index = 1 + len(tv_noise_paths) + (1 if waveform_path else 0)
             cmd.extend(["-stream_loop", "-1", "-i", cta_path])
+
+        waveform_input_index = indices["waveform"]
+        cta_input_index = indices["cta"]
 
         filter_parts: list[str] = []
         chain_label = "[0:v]"
@@ -1150,6 +1235,16 @@ class StoryVideoPipelineRunner:
                     f"{chain_label}[{noise_label}]overlay=0:0:format=auto:eof_action=repeat:eval=init[{out_label}]"
                 )
             chain_label = f"[{out_label}]"
+
+        # Decor sits between the two halves of the stack: everything above lands
+        # inside the screen, everything below goes on top of the photo.
+        if decor_path and decor_record and indices["decor"] is not None:
+            from src.utils.story_decor_images import decor_filter_parts
+
+            decor_parts, chain_label = decor_filter_parts(
+                chain_label, decor_record, indices["decor"]
+            )
+            filter_parts.extend(decor_parts)
 
         if waveform_path and waveform_record and waveform_input_index is not None:
             x_expr, y_expr = overlay_position_expr(waveform_record)
@@ -1198,10 +1293,24 @@ class StoryVideoPipelineRunner:
                 "Dang ap dung TV noise va song am...",
             )
 
+        # A decor frame whose rectangle isn't the source aspect needs crop+pad, and
+        # neither has a CUDA counterpart — that case stays on the CPU chain.
+        decor_gpu_ok = True
+        if decor_record:
+            from src.utils.story_decor_images import decor_fit_geometry
+
+            decor_gpu_ok = not decor_fit_geometry(decor_record)["needsCrop"]
+            if not decor_gpu_ok:
+                logger.info(
+                    f"[StoryPipeline:{self.story_id}] Decor frame is off-aspect "
+                    f"(needs crop); using the CPU overlay chain."
+                )
+
         use_gpu = (
             self._gpu_overlay_enabled()
             and not has_screen_noise
             and not style_filter
+            and decor_gpu_ok
         )
         ok = False
 
@@ -1223,6 +1332,8 @@ class StoryVideoPipelineRunner:
                 cta_path,
                 cta_record,
                 segments,
+                decor_path=decor_path,
+                decor_record=decor_record,
             )
             if seg_output and os.path.isfile(seg_output):
                 return seg_output
@@ -1239,6 +1350,8 @@ class StoryVideoPipelineRunner:
                 waveform_record,
                 cta_path,
                 cta_record,
+                decor_path=decor_path,
+                decor_record=decor_record,
             )
             logger.info(
                 f"[StoryPipeline:{self.story_id}] Applying story overlays on GPU (overlay_cuda)."

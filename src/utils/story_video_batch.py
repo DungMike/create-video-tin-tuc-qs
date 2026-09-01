@@ -99,6 +99,16 @@ class StoryVideoBatchRunner:
     output is identical to sequential rendering — only the scheduling differs.
     """
 
+    @staticmethod
+    def _decor_name(image_id: str) -> str:
+        """Display name for the decor image this item drew, for the batch UI."""
+        if not image_id:
+            return ""
+        from src.utils.story_decor_images import get_decor_image
+
+        record = get_decor_image(image_id)
+        return str(record.get("name") or image_id) if record else image_id
+
     def __init__(self, batch_id: str, story_configs: list[dict], *, optimize_mode: bool = False):
         self.batch_id = batch_id
         self.story_configs = story_configs
@@ -150,6 +160,8 @@ class StoryVideoBatchRunner:
                 "clip_tags": config.get("clip_tags", []),
                 "library_id": config.get("library_id", ""),
                 "skip_tv_effect": bool(config.get("skip_tv_effect", False)),
+                "decor_image_id": config.get("decor_image_id", ""),
+                "decor_image_name": self._decor_name(config.get("decor_image_id", "")),
                 "voice_id": config.get("voice_id", ""),
                 "intro_video_path": config.get("intro_video_path", ""),
                 "subtitle_path": config.get("subtitle_path", ""),

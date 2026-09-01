@@ -266,6 +266,19 @@ class Config:
     STORY_CTA_OVERLAY_WIDTH = int(os.getenv("STORY_CTA_OVERLAY_WIDTH", "360"))
     STORY_CTA_OVERLAY_DEFAULT_ENABLED = os.getenv("STORY_CTA_OVERLAY_DEFAULT_ENABLED", "true").lower() == "true"
 
+    # --- Story Decor Image (khung TV: anh nen phu toan khung, video chay trong vung xanh) ---
+    # Luu y: khac hoan toan block DECOR_IMAGE_* o tren (banner cua pipeline news-bulletin).
+    STORY_DECOR_DIR = os.path.join(STORAGE_DIR, "story_decor_images")
+    # Chroma green tieu chuan; moi anh tu do lai mau that lay tu vung xanh luc upload.
+    STORY_DECOR_KEY_COLOR = os.getenv("STORY_DECOR_KEY_COLOR", "0x00b140")
+    # Nguong hep hon CTA overlay: anh decor la anh chup that, co nhieu mau nam
+    # cach mau xanh khong xa (go, da, la cay). similarity+blend > ~0.20 la bat dau
+    # duc thung vao phong nen. Vung xanh la mang phang nen khong can nguong rong.
+    STORY_DECOR_SIMILARITY = float(os.getenv("STORY_DECOR_SIMILARITY", "0.15"))
+    STORY_DECOR_BLEND = float(os.getenv("STORY_DECOR_BLEND", "0.05"))
+    # Noi video ra ngoai khung mot chut de vien xanh con sot khong bao gio ho ra.
+    STORY_DECOR_OVERSCAN = float(os.getenv("STORY_DECOR_OVERSCAN", "0.01"))
+
     # --- Story TV Noise Overlay ---
     STORY_TV_NOISE_OVERLAY_DIR = os.path.join(STORAGE_DIR, "story_tv_noise_overlays")
     # Bo clip nguoi dung tai len de xem truoc ca chong hieu ung trong video that.

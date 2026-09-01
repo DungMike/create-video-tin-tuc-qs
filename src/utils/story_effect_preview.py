@@ -213,8 +213,12 @@ def build_source_set(file_storages, name: str = "") -> dict:
 # --------------------------------------------------------------------------- #
 # Preview render: the same chain the render pass builds
 # --------------------------------------------------------------------------- #
-def collect_active_layers() -> dict:
-    """Everything the render would composite, resolved to on-disk paths."""
+def collect_active_layers(decor_image_id: str = "") -> dict:
+    """Everything the render would composite, resolved to on-disk paths.
+
+    The decor image is the one layer that is not a global setting — it is picked
+    per render (and rotated per batch), so it has to be named explicitly here.
+    """
     from src.utils.story_cta_overlay import (
         get_active_cta_overlay,
         overlay_position_expr as cta_position_expr,
@@ -225,6 +229,7 @@ def collect_active_layers() -> dict:
         overlay_blend_mode,
         processed_abs_path as noise_processed_abs_path,
     )
+    from src.utils.story_decor_images import resolve_decor_image
     from src.utils.waveform_overlays import (
         get_default_waveform_overlay,
         overlay_position_expr,
@@ -242,7 +247,10 @@ def collect_active_layers() -> dict:
     cta_record = get_active_cta_overlay()
     cta_path = cta_processed_abs_path(cta_record) if cta_record else None
 
+    decor = resolve_decor_image(decor_image_id) if decor_image_id else None
+
     return {
+        "decor": decor,
         "noise": noise,
         "noiseLabels": [
             {
@@ -279,6 +287,7 @@ def build_preview_command(
     effect is actually doing what you wanted.
     """
     from src.processors.crt_effect_processor import get_tv_effect_filter
+    from src.utils.story_decor_images import decor_filter_parts, decor_input_args
     from src.utils.story_tv_noise_overlays import overlay_blend_mode
 
     if style_filter is None:
@@ -290,17 +299,28 @@ def build_preview_command(
     noise = layers["noise"] if include_overlays else []
     waveform = layers["waveform"] if include_overlays else None
     cta = layers["cta"] if include_overlays else None
+    # The decor frame is what the preview is usually being consulted about, so it
+    # is not gated on include_overlays the way the global stack is.
+    decor = layers.get("decor")
 
     cmd = ["ffmpeg", "-y", "-i", base_path]
     for _record, path in noise:
         cmd.extend(["-stream_loop", "-1", "-i", path])
-    waveform_index = None
+
+    # Input order matches the render pass: base, noise..., decor, waveform, cta.
+    next_index = 1 + len(noise)
+    decor_index = waveform_index = cta_index = None
+    if decor:
+        decor_index = next_index
+        next_index += 1
+        cmd.extend(decor_input_args(decor[1]))
     if waveform:
-        waveform_index = 1 + len(noise)
+        waveform_index = next_index
+        next_index += 1
         cmd.extend(["-stream_loop", "-1", "-i", waveform[1]])
-    cta_index = None
     if cta:
-        cta_index = 1 + len(noise) + (1 if waveform else 0)
+        cta_index = next_index
+        next_index += 1
         cmd.extend(["-stream_loop", "-1", "-i", cta[1]])
 
     parts: list[str] = []
@@ -330,6 +350,10 @@ def build_preview_command(
                 f"{chain}[{label}]overlay=0:0:format=auto:eof_action=repeat:eval=init[{out_label}]"
             )
         chain = f"[{out_label}]"
+
+    if decor and decor_index is not None:
+        decor_parts, chain = decor_filter_parts(chain, decor[0], decor_index)
+        parts.extend(decor_parts)
 
     if waveform and waveform_index is not None:
         x_expr, y_expr = layers["waveformPos"]
@@ -383,6 +407,7 @@ def render_preview(
     include_overlays: bool = True,
     compare: bool = False,
     max_seconds: float | None = None,
+    decor_image_id: str = "",
 ) -> dict:
     """Re-render the preview for a stored source set. Returns the updated record."""
     record = get_source(source_id)
@@ -394,7 +419,7 @@ def render_preview(
     if not os.path.isfile(base_path):
         raise EffectPreviewError("Video nen cua bo clip khong con tren dia.")
 
-    layers = collect_active_layers()
+    layers = collect_active_layers(decor_image_id)
     # New filename per render so the browser cannot serve a stale cached preview.
     filename = f"preview_{uuid.uuid4().hex[:8]}.mp4"
     output_path = os.path.join(directory, filename)
@@ -414,7 +439,8 @@ def render_preview(
     )
     logger.info(
         f"[EffectPreview] Rendering preview for {source_id} "
-        f"(style={include_style}, overlays={include_overlays}, compare={compare}, {duration:.1f}s)"
+        f"(style={include_style}, overlays={include_overlays}, compare={compare}, "
+        f"decor={decor_image_id or 'none'}, {duration:.1f}s)"
     )
     if not FFmpegHelper.run_command(cmd) or not os.path.isfile(output_path):
         raise EffectPreviewError("FFmpeg khong render duoc preview.")
@@ -433,6 +459,8 @@ def render_preview(
         "appliedStyle": include_style,
         "appliedOverlays": include_overlays,
         "appliedCompare": compare,
+        "appliedDecorId": decor_image_id or None,
+        "appliedDecorName": (layers["decor"][0].get("name") if layers.get("decor") else None),
         "previewSeconds": round(duration, 2),
         "appliedLayers": layers["noiseLabels"] if include_overlays else [],
         "updatedAt": _now(),

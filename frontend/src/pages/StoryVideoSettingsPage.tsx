@@ -1,13 +1,20 @@
 import { Check, Eye, Link as LinkIcon, Loader2, Save, Sparkles, Star, Trash2, Upload } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
 import { EmptyCard } from "@/components/empty-card";
 import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
+import { StoryDecorFrameEditor } from "@/components/StoryDecorFrameEditor";
+import { StoryOverlayPlacementEditor } from "@/components/StoryOverlayPlacementEditor";
 import { StoryLibraryManager } from "@/components/StoryLibraryManager";
 import { StoryLibraryNormalizePanel } from "@/components/StoryLibraryNormalizePanel";
 import { TopNav } from "@/components/top-nav";
+import {
+  cornerToPlacement,
+  type OverlayCorner,
+  type PlacementBox,
+} from "@/lib/overlayPlacement";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,13 +23,16 @@ import {
   ApiError,
   createSparkleOverlay,
   deleteCtaOverlay,
+  deleteDecorImage,
   deleteEffectPreviewSource,
   deleteTVNoiseOverlay,
   deleteWaveformOverlay,
   generateCustomTVEffectPreview,
   generateTVEffectStylePreview,
   generateTVNoiseDemo,
+  detectDecorFrame,
   getCtaOverlays,
+  getDecorImages,
   getTVEffectStyles,
   getTVNoiseOverlayJob,
   getEffectPreviewJob,
@@ -31,13 +41,16 @@ import {
   getSparklePresets,
   getWaveformOverlays,
   importTVNoiseOverlayFromYoutube,
+  renderDecorFramePreview,
   renderEffectPreview,
   saveCustomTVEffect,
   selectTVEffectStyle,
   updateCtaOverlay,
+  updateDecorImage,
   updateTVNoiseOverlay,
   updateWaveformOverlay,
   uploadCtaOverlay,
+  uploadDecorImage,
   uploadEffectPreviewSource,
   uploadTVNoiseOverlay,
   uploadWaveformOverlay,
@@ -46,6 +59,7 @@ import type {
   CtaOverlay,
   EffectPreviewSource,
   SparklePreset,
+  StoryDecorImage,
   TVEffectParams,
   TVEffectStyle,
   TVEffectTone,
@@ -126,6 +140,9 @@ type WaveformForm = {
   scaleWidth: string;
   position: NonNullable<WaveformOverlay["position"]>;
   margin: string;
+  /** Free coordinates in frame px; "" while the overlay is still on a corner preset. */
+  x: string;
+  y: string;
 };
 
 const DEFAULT_FORM: WaveformForm = {
@@ -135,6 +152,8 @@ const DEFAULT_FORM: WaveformForm = {
   scaleWidth: "420",
   position: "bottom_right",
   margin: "15",
+  x: "",
+  y: "",
 };
 
 type TVNoiseForm = {
@@ -197,6 +216,8 @@ function formFromOverlay(overlay?: WaveformOverlay): WaveformForm {
     scaleWidth: String(overlay.scaleWidth ?? DEFAULT_FORM.scaleWidth),
     position: overlay.position ?? DEFAULT_FORM.position,
     margin: String(overlay.margin ?? DEFAULT_FORM.margin),
+    x: overlay.x == null ? "" : String(overlay.x),
+    y: overlay.y == null ? "" : String(overlay.y),
   };
 }
 
@@ -208,6 +229,9 @@ type CtaForm = {
   scaleWidth: string;
   position: NonNullable<CtaOverlay["position"]>;
   margin: string;
+  /** Free coordinates in frame px; "" while the overlay is still on a corner preset. */
+  x: string;
+  y: string;
 };
 
 const DEFAULT_CTA_FORM: CtaForm = {
@@ -218,6 +242,8 @@ const DEFAULT_CTA_FORM: CtaForm = {
   scaleWidth: "360",
   position: "top_left",
   margin: "24",
+  x: "",
+  y: "",
 };
 
 function ctaFormFromOverlay(overlay?: CtaOverlay): CtaForm {
@@ -230,88 +256,81 @@ function ctaFormFromOverlay(overlay?: CtaOverlay): CtaForm {
     scaleWidth: String(overlay.scaleWidth ?? DEFAULT_CTA_FORM.scaleWidth),
     position: overlay.position ?? DEFAULT_CTA_FORM.position,
     margin: String(overlay.margin ?? DEFAULT_CTA_FORM.margin),
+    x: overlay.x == null ? "" : String(overlay.x),
+    y: overlay.y == null ? "" : String(overlay.y),
   };
 }
 
 // ---------------------------------------------------------------------------
-// Visual position preview: mirrors backend _position_expr (margin px on a
-// 1920x1080 frame; overlay height is an estimate since ffmpeg scales it W:-2).
+// Placement boxes for the drag editor. The overlay's true size comes from the
+// processed alpha MOV; until that has been probed (older uploads) the height is
+// estimated from the Width being typed, which is also what keeps the box
+// resizing live while the user edits that field.
 // ---------------------------------------------------------------------------
-const PREVIEW_FRAME_W = 1920;
-const PREVIEW_FRAME_H = 1080;
+const WAVEFORM_HEIGHT_RATIO = 0.3;
+const CTA_HEIGHT_RATIO = 0.6;
 
-type OverlayCorner = NonNullable<WaveformOverlay["position"]>;
+type PlacementFields = { position: OverlayCorner; margin: string; x: string; y: string };
 
-interface OverlayPreviewBox {
-  label: string;
-  position: OverlayCorner;
-  margin: number;
-  scaleWidth: number;
-  heightRatio: number;
-  className: string;
-  active?: boolean;
+/** A form's coordinates, or null while it is still on a corner preset. */
+function formCoord(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? Math.round(parsed) : null;
 }
 
-function overlayPreviewBoxStyle(box: OverlayPreviewBox): CSSProperties {
-  const widthPct = Math.max(2, Math.min(90, (box.scaleWidth / PREVIEW_FRAME_W) * 100));
-  const heightPct = Math.max(2, Math.min(90, ((box.scaleWidth * box.heightRatio) / PREVIEW_FRAME_H) * 100));
-  const xPct = Math.min(90, (box.margin / PREVIEW_FRAME_W) * 100);
-  const yPct = Math.min(90, (box.margin / PREVIEW_FRAME_H) * 100);
-  const style: CSSProperties = { width: `${widthPct}%`, height: `${heightPct}%` };
-  if (box.position === "top_left" || box.position === "top_right") style.top = `${yPct}%`;
-  else style.bottom = `${yPct}%`;
-  if (box.position === "top_left" || box.position === "bottom_left") style.left = `${xPct}%`;
-  else style.right = `${xPct}%`;
-  return style;
+/**
+ * Type one axis of a free placement.
+ *
+ * Editing X alone has to pin Y too, otherwise a half-set placement would fall
+ * back to the corner on the backend — so the untouched axis takes the corner it
+ * was already sitting on, which is where the user sees the overlay right now.
+ * Nothing is clamped here: rounding mid-keystroke would turn "700" into "600"
+ * as the digits arrive. The backend clamps what it stores, and the value comes
+ * back corrected on save.
+ */
+function moveTo<T extends PlacementFields>(form: T, box: PlacementBox, axis: "x" | "y", value: string): T {
+  if (value.trim() === "") return { ...form, x: "", y: "" };
+  const other = axis === "x" ? "y" : "x";
+  if (formCoord(form[other]) !== null) return { ...form, [axis]: value };
+
+  const corner = cornerToPlacement(form.position, Number(form.margin) || 0, box.width, box.height);
+  return { ...form, [axis]: value, [other]: String(corner[other]) };
 }
 
-const OVERLAY_PREVIEW_CORNERS: { corner: OverlayCorner; className: string }[] = [
-  { corner: "top_left", className: "left-1 top-1" },
-  { corner: "top_right", className: "right-1 top-1" },
-  { corner: "bottom_left", className: "bottom-1 left-1" },
-  { corner: "bottom_right", className: "bottom-1 right-1" },
-];
+function placementLabel(overlay: WaveformOverlay | CtaOverlay, fallback: OverlayCorner): string {
+  if (typeof overlay.x === "number" && typeof overlay.y === "number") {
+    return `${overlay.x}, ${overlay.y}`;
+  }
+  return overlay.position ?? fallback;
+}
 
-function OverlayPositionPreview({
-  boxes,
-  onPickCorner,
-}: {
-  boxes: OverlayPreviewBox[];
-  onPickCorner: (corner: OverlayCorner) => void;
-}) {
-  const active = boxes.find((box) => box.active);
-  return (
-    <div className="grid gap-1">
-      <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-border/70 bg-zinc-800">
-        <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500">Khung video 16:9</div>
-        {boxes.map((box) => (
-          <div
-            key={box.label}
-            style={overlayPreviewBoxStyle(box)}
-            className={`absolute flex items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-medium text-white/90 ${box.className} ${
-              box.active ? "z-10" : "opacity-50"
-            }`}
-          >
-            <span className="truncate">{box.label}</span>
-          </div>
-        ))}
-        {OVERLAY_PREVIEW_CORNERS.map(({ corner, className }) => (
-          <button
-            key={corner}
-            type="button"
-            title={`Chuyển "${active?.label ?? "overlay"}" về góc này`}
-            onClick={() => onPickCorner(corner)}
-            className={`absolute z-20 size-5 rounded border border-dashed ${className} ${
-              active?.position === corner ? "border-primary bg-primary/50" : "border-white/40 bg-white/10 hover:bg-white/30"
-            }`}
-          />
-        ))}
-      </div>
-      <p className="text-xs text-muted-foreground">
-        Mô phỏng vị trí theo Position / Margin / Width đang nhập (khung 1920×1080). Bấm ô vuông ở góc để đổi vị trí.
-      </p>
-    </div>
-  );
+function placementBox(
+  label: string,
+  form: PlacementFields & { scaleWidth: string },
+  overlay: WaveformOverlay | CtaOverlay | undefined,
+  fallback: { width: number; heightRatio: number },
+  className: string,
+  active: boolean,
+): PlacementBox {
+  const width = Number(form.scaleWidth) || fallback.width;
+  const aspect =
+    overlay?.processedWidth && overlay?.processedHeight
+      ? overlay.processedHeight / overlay.processedWidth
+      : fallback.heightRatio;
+  return {
+    label,
+    x: formCoord(form.x),
+    y: formCoord(form.y),
+    position: form.position,
+    margin: Number(form.margin) || 0,
+    width,
+    height: Math.round(width * aspect),
+    previewPath: overlay?.processedRelativePath,
+    className,
+    active,
+  };
 }
 
 function formFromNoiseOverlay(overlay?: TVNoiseOverlay): TVNoiseForm {
@@ -337,6 +356,12 @@ export function StoryVideoSettingsPage() {
   const [isCtaUploading, setIsCtaUploading] = useState(false);
   const [isCtaSaving, setIsCtaSaving] = useState(false);
   const [ctaPreviewBust, setCtaPreviewBust] = useState(0);
+  const [decorImages, setDecorImages] = useState<StoryDecorImage[]>([]);
+  const [selectedDecorId, setSelectedDecorId] = useState("");
+  const [isDecorUploading, setIsDecorUploading] = useState(false);
+  const [isDecorSaving, setIsDecorSaving] = useState(false);
+  const [decorPreviewPath, setDecorPreviewPath] = useState<string | null>(null);
+  const [isDecorPreviewLoading, setIsDecorPreviewLoading] = useState(false);
   const [tvNoiseOverlays, setTvNoiseOverlays] = useState<TVNoiseOverlay[]>([]);
   const [selectedNoiseId, setSelectedNoiseId] = useState("");
   const [noiseForm, setNoiseForm] = useState<TVNoiseForm>(DEFAULT_NOISE_FORM);
@@ -357,6 +382,7 @@ export function StoryVideoSettingsPage() {
   const [isPreviewRendering, setIsPreviewRendering] = useState(false);
   const [previewJobId, setPreviewJobId] = useState<string | null>(null);
   const [previewMessage, setPreviewMessage] = useState<string | null>(null);
+  const [previewDecorId, setPreviewDecorId] = useState("");
   const [previewOptions, setPreviewOptions] = useState({
     includeStyle: true,
     includeOverlays: true,
@@ -393,6 +419,32 @@ export function StoryVideoSettingsPage() {
     () => ctaOverlays.find((overlay) => overlay.id === selectedCtaId) ?? ctaOverlays.find((overlay) => overlay.isDefault) ?? ctaOverlays[0],
     [ctaOverlays, selectedCtaId],
   );
+  const selectedDecor = useMemo(
+    () => decorImages.find((item) => item.id === selectedDecorId) ?? decorImages[0],
+    [decorImages, selectedDecorId],
+  );
+
+  // Both overlay sections show the same two boxes, differing only in which one
+  // is being dragged — so each section renders the pair with `active` swapped.
+  const waveformBox = (active: boolean) =>
+    placementBox(
+      "Sóng âm",
+      form,
+      selected,
+      { width: 420, heightRatio: WAVEFORM_HEIGHT_RATIO },
+      "border-sky-300 bg-sky-500/70",
+      active,
+    );
+  const ctaBox = (active: boolean) =>
+    placementBox(
+      ctaForm.enabled ? "CTA" : "CTA (tắt)",
+      ctaForm,
+      selectedCta,
+      { width: 360, heightRatio: CTA_HEIGHT_RATIO },
+      "border-orange-300 bg-orange-500/60",
+      active,
+    );
+
   const selectedPreviewSource = useMemo(
     () => previewSources.find((item) => item.id === selectedPreviewId) ?? previewSources[0],
     [previewSources, selectedPreviewId],
@@ -477,11 +529,21 @@ export function StoryVideoSettingsPage() {
       .catch((err) => setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai hieu ung TV."));
   };
 
+  const loadDecorImages = async () => {
+    const res = await getDecorImages();
+    setDecorImages(res.images);
+    setSelectedDecorId((current) =>
+      current && res.images.some((item) => item.id === current) ? current : res.images[0]?.id ?? "",
+    );
+    return res.images;
+  };
+
   useEffect(() => {
     setIsLoading(true);
     Promise.all([
       loadOverlays(),
       loadCtaOverlays(),
+      loadDecorImages(),
       loadTVNoiseOverlays(),
       loadTVEffectStyles(),
       loadSparklePresets(),
@@ -509,6 +571,96 @@ export function StoryVideoSettingsPage() {
     }, 2000);
     return () => window.clearInterval(interval);
   }, [previewJobId]);
+
+  useEffect(() => {
+    setDecorPreviewPath(null);
+  }, [selectedDecorId]);
+
+  const handleDecorUpload = async (file: File | null) => {
+    if (!file) return;
+    setIsDecorUploading(true);
+    setErrorMessage(null);
+    try {
+      const res = await uploadDecorImage(file);
+      await loadDecorImages();
+      setSelectedDecorId(res.image.id);
+      if (res.image.autoDetected === false) {
+        setErrorMessage(
+          "Da upload nhung khong tim thay vung mau xanh. Hay keo khung thu cong tren canvas.",
+        );
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the upload anh decor.");
+    } finally {
+      setIsDecorUploading(false);
+    }
+  };
+
+  const handleDecorSave = async (updates: Partial<StoryDecorImage>) => {
+    if (!selectedDecor) return;
+    setIsDecorSaving(true);
+    setErrorMessage(null);
+    try {
+      const res = await updateDecorImage(selectedDecor.id, updates);
+      setDecorImages((current) =>
+        current.map((item) => (item.id === selectedDecor.id ? res.image : item)),
+      );
+      // Re-key or re-frame invalidates the composed still.
+      setDecorPreviewPath(null);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the luu anh decor.");
+    } finally {
+      setIsDecorSaving(false);
+    }
+  };
+
+  const handleDecorToggle = async (imageId: string, enabled: boolean) => {
+    setErrorMessage(null);
+    try {
+      const res = await updateDecorImage(imageId, { enabled });
+      setDecorImages((current) => current.map((item) => (item.id === imageId ? res.image : item)));
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the doi trang thai anh decor.");
+    }
+  };
+
+  const handleDecorDetect = async () => {
+    if (!selectedDecor) return null;
+    setErrorMessage(null);
+    try {
+      const res = await detectDecorFrame(selectedDecor.id);
+      return res.frame;
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong do duoc vung mau xanh.");
+      return null;
+    }
+  };
+
+  const handleDecorFramePreview = async () => {
+    if (!selectedDecor) return;
+    setIsDecorPreviewLoading(true);
+    setErrorMessage(null);
+    try {
+      const res = await renderDecorFramePreview(selectedDecor.id);
+      setDecorPreviewPath(`${res.previewPath}?t=${Date.now()}`);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong tao duoc preview khung.");
+    } finally {
+      setIsDecorPreviewLoading(false);
+    }
+  };
+
+  const handleDecorDelete = async (imageId: string) => {
+    setErrorMessage(null);
+    try {
+      await deleteDecorImage(imageId);
+      setSelectedDecorId("");
+      setDecorPreviewPath(null);
+      await loadDecorImages();
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the xoa anh decor.");
+    }
+  };
 
   const handlePreviewUpload = async (files: FileList | null) => {
     if (!files || !files.length) return;
@@ -541,6 +693,7 @@ export function StoryVideoSettingsPage() {
         includeOverlays: previewOptions.includeOverlays,
         compare: previewOptions.compare,
         maxSeconds: Number.isFinite(maxSeconds) && maxSeconds > 0 ? maxSeconds : undefined,
+        decorImageId: previewDecorId || undefined,
       });
       setPreviewJobId(res.sessionId);
     } catch (err) {
@@ -819,6 +972,9 @@ export function StoryVideoSettingsPage() {
         scaleWidth: Number(form.scaleWidth),
         position: form.position,
         margin: Number(form.margin),
+        // null clears the free placement, handing the overlay back to the corner.
+        x: formCoord(form.x),
+        y: formCoord(form.y),
       };
       const res = await updateWaveformOverlay(selected.id, payload);
       setOverlays((current) => current.map((item) => (item.id === selected.id ? res.overlay : { ...item, isDefault: false })));
@@ -871,6 +1027,9 @@ export function StoryVideoSettingsPage() {
         scaleWidth: Number(ctaForm.scaleWidth),
         position: ctaForm.position,
         margin: Number(ctaForm.margin),
+        // null clears the free placement, handing the overlay back to the corner.
+        x: formCoord(ctaForm.x),
+        y: formCoord(ctaForm.y),
       };
       const res = await updateCtaOverlay(selectedCta.id, payload);
       setCtaOverlays((current) =>
@@ -1509,7 +1668,7 @@ export function StoryVideoSettingsPage() {
                 </div>
               )}
 
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                 <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
                   <input
                     type="checkbox"
@@ -1535,6 +1694,21 @@ export function StoryVideoSettingsPage() {
                   So sanh canh nhau
                 </label>
                 <div className="grid min-w-0 gap-2">
+                  <Label>Anh decor</Label>
+                  <select
+                    value={previewDecorId}
+                    onChange={(event) => setPreviewDecorId(event.target.value)}
+                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                  >
+                    <option value="">Khong dung anh decor</option>
+                    {decorImages.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="grid min-w-0 gap-2">
                   <Label>Gioi han (giay)</Label>
                   <Input
                     type="number"
@@ -1546,6 +1720,12 @@ export function StoryVideoSettingsPage() {
                   />
                 </div>
               </div>
+
+              {selectedPreviewSource.appliedDecorName ? (
+                <p className="text-xs text-muted-foreground">
+                  Preview nay dang dung anh decor: <strong>{selectedPreviewSource.appliedDecorName}</strong>
+                </p>
+              ) : null}
 
               {selectedPreviewSource.appliedLayers?.length ? (
                 <div className="flex flex-wrap gap-2">
@@ -1617,7 +1797,7 @@ export function StoryVideoSettingsPage() {
                       ) : null}
                     </div>
                     <div className="mt-1 text-xs text-muted-foreground">
-                      {overlay.durationSeconds}s | {overlay.scaleWidth ?? 420}px | {overlay.position ?? "bottom_right"}
+                      {overlay.durationSeconds}s | {overlay.scaleWidth ?? 420}px | {placementLabel(overlay, "bottom_right")}
                     </div>
                   </button>
                 ))}
@@ -1633,27 +1813,9 @@ export function StoryVideoSettingsPage() {
                 <video src={`/media/${selected.relativePath}`} controls className="aspect-video w-full rounded-lg bg-black object-contain" />
               ) : null}
 
-              <OverlayPositionPreview
-                boxes={[
-                  {
-                    label: "Sóng âm",
-                    position: form.position,
-                    margin: Number(form.margin) || 0,
-                    scaleWidth: Number(form.scaleWidth) || 420,
-                    heightRatio: 0.3,
-                    className: "border-sky-300 bg-sky-500/70",
-                    active: true,
-                  },
-                  {
-                    label: ctaForm.enabled ? "CTA" : "CTA (tắt)",
-                    position: ctaForm.position,
-                    margin: Number(ctaForm.margin) || 0,
-                    scaleWidth: Number(ctaForm.scaleWidth) || 360,
-                    heightRatio: 0.6,
-                    className: "border-orange-300 bg-orange-500/60",
-                  },
-                ]}
-                onPickCorner={(corner) => setForm((current) => ({ ...current, position: corner }))}
+              <StoryOverlayPlacementEditor
+                boxes={[waveformBox(true), ctaBox(false)]}
+                onMove={({ x, y }) => setForm((current) => ({ ...current, x: String(x), y: String(y) }))}
               />
 
               <div className="grid gap-4 md:grid-cols-3">
@@ -1674,10 +1836,32 @@ export function StoryVideoSettingsPage() {
                   <Input type="number" min="64" step="2" value={form.scaleWidth} onChange={(event) => setForm((current) => ({ ...current, scaleWidth: event.target.value }))} />
                 </div>
                 <div className="grid gap-2">
-                  <Label>Position</Label>
+                  <Label>X (px)</Label>
+                  <Input
+                    type="number"
+                    step="2"
+                    placeholder="theo góc"
+                    value={form.x}
+                    onChange={(event) => setForm((current) => moveTo(current, waveformBox(true), "x", event.target.value))}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Y (px)</Label>
+                  <Input
+                    type="number"
+                    step="2"
+                    placeholder="theo góc"
+                    value={form.y}
+                    onChange={(event) => setForm((current) => moveTo(current, waveformBox(true), "y", event.target.value))}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Position (góc)</Label>
                   <select
                     value={form.position}
-                    onChange={(event) => setForm((current) => ({ ...current, position: event.target.value as WaveformForm["position"] }))}
+                    onChange={(event) =>
+                      setForm((current) => ({ ...current, position: event.target.value as WaveformForm["position"], x: "", y: "" }))
+                    }
                     className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                   >
                     <option value="bottom_right">Bottom right</option>
@@ -1688,9 +1872,14 @@ export function StoryVideoSettingsPage() {
                 </div>
                 <div className="grid gap-2">
                   <Label>Margin</Label>
-                  <Input type="number" min="0" step="1" value={form.margin} onChange={(event) => setForm((current) => ({ ...current, margin: event.target.value }))} />
+                  <Input type="number" min="0" step="1" value={form.margin} onChange={(event) => setForm((current) => ({ ...current, margin: event.target.value, x: "", y: "" }))} />
                 </div>
               </div>
+
+              <p className="text-xs text-muted-foreground">
+                Kéo overlay trong khung ở trên để đặt vào bất kỳ đâu — X/Y là toạ độ góc trên-trái của
+                sóng âm trong khung 1920×1080. Đổi Position hoặc Margin sẽ xoá toạ độ, quay về canh theo góc.
+              </p>
 
               <div className="flex flex-wrap gap-3">
                 <Button type="button" onClick={handleSave} disabled={isSaving}>
@@ -1757,7 +1946,7 @@ export function StoryVideoSettingsPage() {
                       </div>
                     </div>
                     <div className="mt-1 text-xs text-muted-foreground">
-                      {overlay.durationSeconds}s | {overlay.scaleWidth ?? 360}px | {overlay.position ?? "top_left"}
+                      {overlay.durationSeconds}s | {overlay.scaleWidth ?? 360}px | {placementLabel(overlay, "top_left")}
                     </div>
                   </button>
                 ))}
@@ -1802,27 +1991,9 @@ export function StoryVideoSettingsPage() {
                 Bật CTA overlay cho mọi video Story Video
               </label>
 
-              <OverlayPositionPreview
-                boxes={[
-                  {
-                    label: ctaForm.enabled ? "CTA" : "CTA (tắt)",
-                    position: ctaForm.position,
-                    margin: Number(ctaForm.margin) || 0,
-                    scaleWidth: Number(ctaForm.scaleWidth) || 360,
-                    heightRatio: 0.6,
-                    className: "border-orange-300 bg-orange-500/60",
-                    active: true,
-                  },
-                  {
-                    label: "Sóng âm",
-                    position: form.position,
-                    margin: Number(form.margin) || 0,
-                    scaleWidth: Number(form.scaleWidth) || 420,
-                    heightRatio: 0.3,
-                    className: "border-sky-300 bg-sky-500/70",
-                  },
-                ]}
-                onPickCorner={(corner) => setCtaForm((current) => ({ ...current, position: corner }))}
+              <StoryOverlayPlacementEditor
+                boxes={[ctaBox(true), waveformBox(false)]}
+                onMove={({ x, y }) => setCtaForm((current) => ({ ...current, x: String(x), y: String(y) }))}
               />
 
               <div className="grid gap-4 md:grid-cols-3">
@@ -1843,10 +2014,32 @@ export function StoryVideoSettingsPage() {
                   <Input type="number" min="64" step="2" value={ctaForm.scaleWidth} onChange={(event) => setCtaForm((current) => ({ ...current, scaleWidth: event.target.value }))} />
                 </div>
                 <div className="grid gap-2">
-                  <Label>Position</Label>
+                  <Label>X (px)</Label>
+                  <Input
+                    type="number"
+                    step="2"
+                    placeholder="theo góc"
+                    value={ctaForm.x}
+                    onChange={(event) => setCtaForm((current) => moveTo(current, ctaBox(true), "x", event.target.value))}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Y (px)</Label>
+                  <Input
+                    type="number"
+                    step="2"
+                    placeholder="theo góc"
+                    value={ctaForm.y}
+                    onChange={(event) => setCtaForm((current) => moveTo(current, ctaBox(true), "y", event.target.value))}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Position (góc)</Label>
                   <select
                     value={ctaForm.position}
-                    onChange={(event) => setCtaForm((current) => ({ ...current, position: event.target.value as CtaForm["position"] }))}
+                    onChange={(event) =>
+                      setCtaForm((current) => ({ ...current, position: event.target.value as CtaForm["position"], x: "", y: "" }))
+                    }
                     className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                   >
                     <option value="top_left">Top left</option>
@@ -1857,9 +2050,14 @@ export function StoryVideoSettingsPage() {
                 </div>
                 <div className="grid gap-2">
                   <Label>Margin</Label>
-                  <Input type="number" min="0" step="1" value={ctaForm.margin} onChange={(event) => setCtaForm((current) => ({ ...current, margin: event.target.value }))} />
+                  <Input type="number" min="0" step="1" value={ctaForm.margin} onChange={(event) => setCtaForm((current) => ({ ...current, margin: event.target.value, x: "", y: "" }))} />
                 </div>
               </div>
+
+              <p className="text-xs text-muted-foreground">
+                Kéo overlay trong khung ở trên để đặt vào bất kỳ đâu — X/Y là toạ độ góc trên-trái của
+                CTA trong khung 1920×1080. Đổi Position hoặc Margin sẽ xoá toạ độ, quay về canh theo góc.
+              </p>
 
               <div className="flex flex-wrap gap-3">
                 <Button type="button" onClick={handleCtaSave} disabled={isCtaSaving}>
@@ -1869,6 +2067,116 @@ export function StoryVideoSettingsPage() {
                 <Button type="button" variant="destructive" onClick={() => void handleCtaDelete(selectedCta.id)}>
                   <Trash2 className="mr-2 size-4" />
                   Xoa
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </PageSection>
+
+      <PageSection>
+        <div className="mb-4 space-y-1">
+          <h2 className="text-base font-semibold text-foreground">Ảnh decor (khung TV)</h2>
+          <p className="text-sm text-muted-foreground">
+            Ảnh chụp phủ kín khung hình, video nền chỉ chạy bên trong vùng màu xanh của ảnh.
+            Phần không phải nền xanh luôn đè lên trên video. Hiệu ứng TV và TV noise được áp vào
+            video <em>trước</em> khi thu nhỏ vào khung, còn sóng âm / CTA / phụ đề nằm trên ảnh decor.
+            Chọn ảnh nào tham gia xoay vòng ở trang render.
+          </p>
+        </div>
+        <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <Label>Upload ảnh decor (có vùng nền xanh)</Label>
+              <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
+                {isDecorUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
+                <span>{isDecorUploading ? "Đang tách nền xanh..." : "Chọn ảnh PNG / JPG / WEBP"}</span>
+                <Input
+                  type="file"
+                  accept=".png,.jpg,.jpeg,.webp,.bmp"
+                  className="hidden"
+                  disabled={isDecorUploading}
+                  onChange={(event) => {
+                    void handleDecorUpload(event.currentTarget.files?.[0] ?? null);
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Ảnh sẽ được kéo về đúng 1920x1080, nên dùng ảnh 16:9. Vùng xanh được dò tự động
+                ngay khi upload.
+              </p>
+            </div>
+
+            {decorImages.length ? (
+              <div className="grid gap-2">
+                {decorImages.map((item) => (
+                  <div
+                    key={item.id}
+                    className={`min-w-0 rounded-lg border p-2 transition-colors ${
+                      selectedDecor?.id === item.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setSelectedDecorId(item.id)}
+                      className="flex w-full min-w-0 items-center gap-3 text-left"
+                    >
+                      <img
+                        src={`/media/${item.processedRelativePath ?? item.relativePath}?t=${encodeURIComponent(item.updatedAt ?? "")}`}
+                        alt={item.name}
+                        className="h-12 w-20 shrink-0 rounded border border-border/50 object-cover"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-semibold text-foreground">{item.name}</span>
+                        <span className="block text-xs text-muted-foreground">
+                          Khung {item.frame.w}x{item.frame.h} @ {item.frame.x},{item.frame.y}
+                        </span>
+                      </span>
+                      {item.enabled === false ? (
+                        <Badge variant="secondary" className="rounded-full">Tắt</Badge>
+                      ) : null}
+                    </button>
+                    <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={item.enabled !== false}
+                        onChange={(event) => void handleDecorToggle(item.id, event.currentTarget.checked)}
+                        className="size-3.5"
+                      />
+                      Cho phép dùng khi render
+                    </label>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyCard
+                title="Chưa có ảnh decor"
+                description="Upload ảnh có vùng nền xanh (ví dụ phòng khách với TV màn hình xanh) để bắt đầu."
+              />
+            )}
+          </div>
+
+          {selectedDecor ? (
+            <div className="grid gap-4">
+              <StoryDecorFrameEditor
+                key={selectedDecor.id}
+                image={selectedDecor}
+                previewPath={decorPreviewPath}
+                isPreviewLoading={isDecorPreviewLoading}
+                isSaving={isDecorSaving}
+                onRequestPreview={() => void handleDecorFramePreview()}
+                onDetectFrame={handleDecorDetect}
+                onSave={handleDecorSave}
+              />
+              <div className="flex flex-wrap gap-2 border-t border-border/60 pt-4">
+                <Button
+                  type="button"
+                  variant="destructive"
+                  onClick={() => void handleDecorDelete(selectedDecor.id)}
+                >
+                  <Trash2 className="mr-2 size-4" />
+                  Xoá ảnh decor
                 </Button>
               </div>
             </div>

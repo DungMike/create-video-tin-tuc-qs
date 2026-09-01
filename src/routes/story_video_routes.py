@@ -1551,6 +1551,37 @@ def generate_tv_effect_style_preview():
 # ---------------------------------------------------------------------------
 # 9c. Subtitle fonts / presets / preview
 # ---------------------------------------------------------------------------
+def _resolve_decor_selection(image_ids, library_id, count):
+    """Validate a decor selection and deal it out across ``count`` videos.
+
+    Returns ``(assignments, error_response)``. A fully-baked library already has
+    the waveform and CTA burned into its clips, which would end up shrunk inside
+    the TV screen instead of on top of the photo — so that combination is refused
+    here rather than silently rendering something wrong.
+    """
+    from src.utils.story_decor_images import build_decor_rotation
+    from src.utils.story_library import is_fully_baked_library
+
+    wanted = [str(item or "").strip() for item in (image_ids or []) if str(item or "").strip()]
+    if not wanted:
+        return [], None
+
+    if is_fully_baked_library(library_id):
+        return None, _error(
+            "Thu vien da bake san hieu ung/song am/CTA nen khong dung duoc anh decor. "
+            "Hay chon thu vien chua bake.",
+            code="decor_baked_library_conflict",
+        )
+
+    assignments = build_decor_rotation(wanted, count)
+    if not assignments:
+        return None, _error(
+            "Khong co anh decor nao dung duoc (chua tach nen hoac da bi xoa).",
+            code="decor_unusable",
+        )
+    return assignments, None
+
+
 def _subtitle_config_from_payload(payload: dict) -> dict:
     """Map camelCase subtitle payload keys to pipeline config keys (without subtitle_path)."""
     from src.utils.story_subtitles import get_subtitle_preset
@@ -1742,6 +1773,16 @@ def create_story_video():
     if not input_value:
         return _error("inputValue không được để trống.", code="missing_input_value")
 
+    # A single render takes one decor image; the rotation only applies to batches.
+    decor_selection, decor_error = _resolve_decor_selection(
+        [str(data.get("decorImageId") or "").strip()],
+        str(data.get("libraryId", "") or "").strip(),
+        1,
+    )
+    if decor_error is not None:
+        return decor_error
+    decor_image_id = decor_selection[0] if decor_selection else ""
+
     config_dict = {
         "input_type": input_type,
         "input_value": input_value,
@@ -1752,6 +1793,7 @@ def create_story_video():
         "tv_effect_style_id": str(data.get("tvEffectStyleId", "")).strip(),
         "skip_tv_effect": bool(data.get("skipTvEffect", False)),
         "waveform_overlay_id": str(data.get("waveformOverlayId", "")).strip(),
+        "decor_image_id": decor_image_id,
         "voice_id": str(data.get("voiceId", "")).strip(),
         "subtitle_path": subtitle_path,
         **_subtitle_config_from_payload(data),
@@ -2016,6 +2058,17 @@ def create_story_batch():
             shutil.rmtree(batch_dir, ignore_errors=True)
             return _error("Intro không tồn tại.", code="intro_not_found", status=404)
 
+    # Decor images ("khung TV") rotate across the batch: one shuffled deck dealt
+    # out so every run of N videos uses all N images in a different order.
+    decor_assignments, decor_error = _resolve_decor_selection(
+        shared_config.get("decorImageIds"),
+        str(shared_config.get("libraryId", "") or "").strip(),
+        len(items),
+    )
+    if decor_error is not None:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+        return decor_error
+
     # Build story configs
     story_configs = []
     for idx, item in enumerate(items):
@@ -2087,6 +2140,7 @@ def create_story_batch():
             "tv_effect_style_id": str(shared_config.get("tvEffectStyleId", "")).strip(),
             "skip_tv_effect": bool(shared_config.get("skipTvEffect", False)),
             "waveform_overlay_id": str(shared_config.get("waveformOverlayId", "")).strip(),
+            "decor_image_id": decor_assignments[idx] if decor_assignments else "",
             "voice_id": str(shared_config.get("voiceId", "")).strip(),
             "subtitle_path": subtitle_path,
             "intro_video_path": intro_video_path,
@@ -2102,7 +2156,8 @@ def create_story_batch():
 
     logger.info(
         f"[StoryVideo] Started batch: batch_id={batch_id}, items={len(story_configs)}, "
-        f"optimize_mode={optimize_mode}"
+        f"optimize_mode={optimize_mode}, "
+        f"decor_images={len(set(decor_assignments)) if decor_assignments else 0}"
     )
     return jsonify({"batchId": batch_id}), 202
 
@@ -2136,6 +2191,8 @@ def get_batch_progress(batch_id: str):
             "message": source.get("message", ""),
             "result": source.get("result"),
             "error": source.get("error"),
+            # Which decor image this item drew from the batch rotation.
+            "decorImageName": story.get("decor_image_name", ""),
         })
 
     batch_status = progress.get("status", "pending")
@@ -2227,6 +2284,7 @@ def retry_batch_failed(batch_id: str):
             "clip_tags": s.get("clip_tags", []),
             "library_id": s.get("library_id", ""),
             "skip_tv_effect": bool(s.get("skip_tv_effect", False)),
+            "decor_image_id": s.get("decor_image_id", ""),
             "voice_id": s.get("voice_id", ""),
             "intro_video_path": s.get("intro_video_path", ""),
             "subtitle_path": s.get("subtitle_path", ""),
@@ -2255,9 +2313,16 @@ def retry_batch_failed(batch_id: str):
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/waveform-overlays", methods=["GET"])
 def get_waveform_overlays():
-    from src.utils.waveform_overlays import load_waveform_index
+    from src.utils.overlay_placement import backfill_processed_sizes
+    from src.utils.waveform_overlays import (
+        load_waveform_index,
+        processed_abs_path,
+        save_waveform_index,
+    )
 
     data = load_waveform_index()
+    if backfill_processed_sizes(data.get("overlays", []), processed_abs_path):
+        save_waveform_index(data)
     return jsonify({"overlays": data.get("overlays", [])})
 
 
@@ -2364,6 +2429,12 @@ def update_waveform_overlay_config(overlay_id: str):
             updates["position"] = position
         if "margin" in data:
             updates["margin"] = max(0, int(data.get("margin")))
+        # Free placement. Sent as a pair; either both or neither, since half a
+        # coordinate would silently fall back to the corner. The utils clamp
+        # them to the frame, so no range check belongs here.
+        for key in ("x", "y"):
+            if key in data:
+                updates[key] = None if data.get(key) is None else int(data.get(key))
     except (TypeError, ValueError):
         return _error("Cau hinh waveform khong hop le.", code="invalid_waveform_config")
 
@@ -2397,10 +2468,18 @@ def delete_waveform_overlay(overlay_id: str):
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/cta-overlays", methods=["GET"])
 def get_cta_overlays():
-    from src.utils.story_cta_overlay import ensure_default_cta_overlay, load_cta_index
+    from src.utils.overlay_placement import backfill_processed_sizes
+    from src.utils.story_cta_overlay import (
+        ensure_default_cta_overlay,
+        load_cta_index,
+        processed_abs_path,
+        save_cta_index,
+    )
 
     ensure_default_cta_overlay()  # seed-on-first-load so the UI always shows the default
     data = load_cta_index()
+    if backfill_processed_sizes(data.get("overlays", []), processed_abs_path):
+        save_cta_index(data)
     return jsonify({"overlays": data.get("overlays", [])})
 
 
@@ -2453,6 +2532,11 @@ def update_cta_overlay_config(overlay_id: str):
             updates["position"] = position
         if "margin" in data:
             updates["margin"] = max(0, int(data.get("margin")))
+        # Free placement; null clears it back to the corner. The utils clamp the
+        # coordinates to the frame, so no range check belongs here.
+        for key in ("x", "y"):
+            if key in data:
+                updates[key] = None if data.get(key) is None else int(data.get(key))
     except (TypeError, ValueError):
         return _error("Cau hinh CTA khong hop le.", code="invalid_cta_config")
 
@@ -2476,6 +2560,172 @@ def delete_cta_overlay(overlay_id: str):
 
     logger.info(f"[StoryVideo] CTA overlay deleted: {overlay_id}")
     return jsonify({"deleted": True, "overlayId": overlay_id})
+
+
+# ---------------------------------------------------------------------------
+# 19b. Decor image management ("khung TV": a full-frame photo whose green screen
+#      the story video plays inside). CRUD mirrors the CTA overlay endpoints; the
+#      two extras are green-region auto-detection and a still alignment preview.
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/decor-images", methods=["GET"])
+def get_decor_images():
+    from src.utils.story_decor_images import load_decor_index
+
+    images = load_decor_index().get("images", [])
+    images.sort(key=lambda item: str(item.get("createdAt") or ""))
+    return jsonify({"images": images})
+
+
+@story_video_bp.route("/api/story-video/decor-images", methods=["POST"])
+def upload_decor_image():
+    from src.utils.story_decor_images import create_decor_image
+
+    upload_file = request.files.get("file") or request.files.get("image")
+    if not upload_file or not upload_file.filename:
+        return _error("Chua chon file anh decor.", code="no_file")
+
+    try:
+        record = create_decor_image(upload_file)
+    except ValueError as exc:
+        return _error(str(exc), code="invalid_decor_image")
+    except Exception as exc:
+        logger.error(f"[StoryVideo] Decor image upload failed: {exc}", exc_info=True)
+        return _error(f"Khong the xu ly anh decor: {exc}", code="decor_upload_failed", status=500)
+
+    logger.info(f"[StoryVideo] Decor image uploaded: {record['id']}")
+    return jsonify({"image": record}), 201
+
+
+@story_video_bp.route("/api/story-video/decor-images/<image_id>", methods=["PATCH"])
+def patch_decor_image(image_id: str):
+    from src.utils.story_decor_images import update_decor_image
+
+    payload = request.get_json(silent=True) or {}
+    updates = {}
+    for key in ("name", "keyColor", "enabled", "frame"):
+        if key in payload:
+            updates[key] = payload[key]
+    for key in ("similarity", "blend", "overscan"):
+        if key in payload and payload[key] is not None:
+            try:
+                updates[key] = float(payload[key])
+            except (TypeError, ValueError):
+                return _error(f"Gia tri {key} khong hop le.", code="invalid_value")
+
+    try:
+        record = update_decor_image(image_id, updates)
+    except Exception as exc:
+        logger.error(f"[StoryVideo] Decor image update failed: {exc}", exc_info=True)
+        return _error(f"Khong the cap nhat anh decor: {exc}", code="decor_update_failed", status=500)
+    if not record:
+        return _error("Anh decor khong ton tai.", code="decor_not_found", status=404)
+    return jsonify({"image": record})
+
+
+@story_video_bp.route("/api/story-video/decor-images/<image_id>", methods=["DELETE"])
+def delete_decor_image(image_id: str):
+    from src.utils.story_decor_images import delete_decor_image_record
+
+    if not delete_decor_image_record(image_id):
+        return _error("Anh decor khong ton tai.", code="decor_not_found", status=404)
+
+    logger.info(f"[StoryVideo] Decor image deleted: {image_id}")
+    return jsonify({"deleted": True, "imageId": image_id})
+
+
+@story_video_bp.route("/api/story-video/decor-images/<image_id>/detect-frame", methods=["POST"])
+def detect_decor_image_frame(image_id: str):
+    """Re-run green-region detection on the original upload."""
+    from src.utils.story_decor_images import (
+        decor_source_abs_path,
+        detect_green_frame,
+        get_decor_image,
+    )
+
+    record = get_decor_image(image_id)
+    if not record:
+        return _error("Anh decor khong ton tai.", code="decor_not_found", status=404)
+
+    source_path = decor_source_abs_path(record)
+    if not source_path:
+        return _error("File anh goc khong con tren dia.", code="decor_source_missing", status=404)
+
+    detected = detect_green_frame(source_path)
+    if not detected:
+        return _error(
+            "Khong tim thay vung mau xanh trong anh. Hay keo khung thu cong.",
+            code="decor_no_green",
+        )
+    frame, key_color = detected
+    return jsonify({"frame": frame, "keyColor": key_color})
+
+
+@story_video_bp.route("/api/story-video/decor-images/<image_id>/frame-preview", methods=["POST"])
+def preview_decor_image_frame(image_id: str):
+    """Compose one still: a library frame fitted into the decor frame, PNG on top.
+
+    Synchronous and sub-second (one frame, no clip encode), so the canvas editor
+    can show what the current alignment actually produces without waiting on a
+    video render. Mirrors the crt-demo endpoint, and reuses the exact filter the
+    render builds so the still cannot disagree with it.
+    """
+    from src.utils.ffmpeg_helper import FFmpegHelper
+    from src.utils.story_decor_images import (
+        decor_filter_parts,
+        get_decor_image,
+        processed_abs_path,
+    )
+
+    data = request.get_json(silent=True) or {}
+    record = get_decor_image(image_id)
+    if not record:
+        return _error("Anh decor khong ton tai.", code="decor_not_found", status=404)
+
+    decor_path = processed_abs_path(record)
+    if not decor_path:
+        return _error("Anh decor chua duoc tach nen.", code="decor_not_processed", status=409)
+
+    sample_path = _find_sample_clip(data.get("sampleClipId"), data.get("libraryId"))
+    if not sample_path or not os.path.isfile(sample_path):
+        return _error(
+            "Khong co clip mau trong thu vien. Hay them clip truoc.",
+            code="no_sample",
+            status=404,
+        )
+
+    preview_dir = os.path.join(Config.STORY_DECOR_DIR, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    # A new filename each time so the browser cannot serve a stale cached still.
+    output_path = os.path.join(preview_dir, f"{image_id}_{str(uuid.uuid4())[:8]}.jpg")
+
+    target = Config.TARGET_RESOLUTION.replace("x", ":")
+    parts = [f"[0:v]scale={target},setsar=1[src]"]
+    decor_parts, chain = decor_filter_parts("[src]", record, 1)
+    parts.extend(decor_parts)
+    parts.append(f"{chain}format=yuv420p[v]")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", "1", "-i", sample_path,
+        "-i", decor_path,
+        "-filter_complex", ";".join(parts),
+        "-map", "[v]", "-frames:v", "1", "-q:v", "3",
+        output_path,
+    ]
+    if not FFmpegHelper.run_command(cmd) or not os.path.isfile(output_path):
+        return _error("FFmpeg khong tao duoc preview khung.", code="decor_preview_failed", status=500)
+
+    # Keep only the newest still per decor image.
+    for name in os.listdir(preview_dir):
+        stale = os.path.join(preview_dir, name)
+        if name.startswith(f"{image_id}_") and stale != output_path:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+
+    rel = os.path.relpath(output_path, Config.STORAGE_DIR).replace(os.sep, "/")
+    return jsonify({"previewPath": rel})
 
 
 # ---------------------------------------------------------------------------
@@ -2632,6 +2882,7 @@ def render_effect_preview():
     include_style = bool(data.get("includeStyle", True))
     include_overlays = bool(data.get("includeOverlays", True))
     compare = bool(data.get("compare", False))
+    decor_image_id = str(data.get("decorImageId") or "").strip()
     try:
         max_seconds = float(data.get("maxSeconds") or 0)
     except (TypeError, ValueError):
@@ -2658,6 +2909,7 @@ def render_effect_preview():
                 include_overlays=include_overlays,
                 compare=compare,
                 max_seconds=max_seconds,
+                decor_image_id=decor_image_id,
             )
             payload = {"status": "completed", "message": "Preview da san sang.", "source": updated}
         except Exception as exc:
