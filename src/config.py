@@ -40,6 +40,9 @@ class Config:
     VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "8M")
     FFMPEG_COMMAND_TIMEOUT_SECONDS = int(os.getenv("FFMPEG_COMMAND_TIMEOUT_SECONDS", "0"))
     FFMPEG_IMAGE_CLIP_TIMEOUT_SECONDS = int(os.getenv("FFMPEG_IMAGE_CLIP_TIMEOUT_SECONDS", "120"))
+    # Sparkle sources are generated once and cached; the slowest preset
+    # (shimmer_sweep) runs at ~0.25x realtime, so a 30s loop needs ~2 minutes.
+    FFMPEG_STORY_SPARKLE_TIMEOUT_SECONDS = int(os.getenv("FFMPEG_STORY_SPARKLE_TIMEOUT_SECONDS", "900"))
     IMAGE_MOTION_CACHE_ENABLED = os.getenv("IMAGE_MOTION_CACHE_ENABLED", "true").lower() == "true"
     IMAGE_MOTION_WORKERS = int(os.getenv("IMAGE_MOTION_WORKERS", "4"))
     # Number of story videos to render concurrently within one batch. The render is
@@ -304,9 +307,27 @@ class Config:
     STORY_CTA_OVERLAY_WIDTH = int(os.getenv("STORY_CTA_OVERLAY_WIDTH", "360"))
     STORY_CTA_OVERLAY_DEFAULT_ENABLED = os.getenv("STORY_CTA_OVERLAY_DEFAULT_ENABLED", "true").lower() == "true"
 
+    # --- Story Decor Image (khung TV: anh nen phu toan khung, video chay trong vung xanh) ---
+    # Luu y: khac hoan toan block DECOR_IMAGE_* o tren (banner cua pipeline news-bulletin).
+    STORY_DECOR_DIR = os.path.join(STORAGE_DIR, "story_decor_images")
+    # Chroma green tieu chuan; moi anh tu do lai mau that lay tu vung xanh luc upload.
+    STORY_DECOR_KEY_COLOR = os.getenv("STORY_DECOR_KEY_COLOR", "0x00b140")
+    # Nguong hep hon CTA overlay: anh decor la anh chup that, co nhieu mau nam
+    # cach mau xanh khong xa (go, da, la cay). similarity+blend > ~0.20 la bat dau
+    # duc thung vao phong nen. Vung xanh la mang phang nen khong can nguong rong.
+    STORY_DECOR_SIMILARITY = float(os.getenv("STORY_DECOR_SIMILARITY", "0.15"))
+    STORY_DECOR_BLEND = float(os.getenv("STORY_DECOR_BLEND", "0.05"))
+    # Noi video ra ngoai khung mot chut de vien xanh con sot khong bao gio ho ra.
+    STORY_DECOR_OVERSCAN = float(os.getenv("STORY_DECOR_OVERSCAN", "0.01"))
+
     # --- Story TV Noise Overlay ---
     STORY_TV_NOISE_OVERLAY_DIR = os.path.join(STORAGE_DIR, "story_tv_noise_overlays")
+    # Bo clip nguoi dung tai len de xem truoc ca chong hieu ung trong video that.
+    STORY_EFFECT_PREVIEW_DIR = os.path.join(STORAGE_DIR, "story_effect_previews")
     STORY_TV_NOISE_TOLERANCE = float(os.getenv("STORY_TV_NOISE_TOLERANCE", "0.08"))
     STORY_TV_NOISE_SOFTNESS = float(os.getenv("STORY_TV_NOISE_SOFTNESS", "0.02"))
     STORY_TV_NOISE_OPACITY = float(os.getenv("STORY_TV_NOISE_OPACITY", "0.35"))
+    # blendMode="luma": day mau lop sang ve trang va chuan hoa dinh alpha ve 1.0
+    # truoc khi nhan opacity (xem preprocess_tv_noise_overlay).
+    STORY_TV_NOISE_LUMA_GAIN = float(os.getenv("STORY_TV_NOISE_LUMA_GAIN", "2.0"))
     STORY_TV_NOISE_DEMO_SECONDS = float(os.getenv("STORY_TV_NOISE_DEMO_SECONDS", "3"))

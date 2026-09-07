@@ -393,6 +393,11 @@ def search_provider_videos(
     min_width: int | None = None,
     min_height: int | None = None,
 ) -> dict:
+    """Search one provider. ``orientation`` chi co tac dung voi Pexels.
+
+    Pixabay video endpoint khong co tham so orientation (chi min_width/min_height),
+    nen caller phai tu loc theo width/height tren ket qua tra ve.
+    """
     if provider == "pixabay":
         size = PIXABAY_MAX_PER_PAGE if per_page is None else max(3, min(PIXABAY_MAX_PER_PAGE, per_page))
         return search_pixabay_videos(query, page, size, min_width=min_width, min_height=min_height)

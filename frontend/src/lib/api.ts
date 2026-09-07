@@ -242,6 +242,7 @@ import type {
   CRTDemoResponse,
   CRTPresetsResponse,
   CRTSettings,
+  CommitStoryHarvestResponse,
   CreateStoryBatchRequest,
   CreateStoryLibraryRequest,
   CreateStoryVideoRequest,
@@ -253,8 +254,16 @@ import type {
   DownloadProgress,
   BakeStoryLibraryRequest,
   BakeStoryLibraryResponse,
+  LocalAudioFolderScan,
   ParseScriptResponse,
+  StartStoryHarvestRequest,
   StoryBatchProgress,
+  StoryDecorFrame,
+  StoryDecorImage,
+  StoryHarvestDeleteRequest,
+  StoryHarvestDeleteResponse,
+  StoryHarvestItemsResponse,
+  StoryHarvestJob,
   StoryLibrariesResponse,
   StoryLibraryBakeJob,
   StoryLibraryBulkDeleteRequest,
@@ -279,6 +288,10 @@ import type {
   SubtitleFontInfo,
   SubtitlePresetInfo,
   TVEffectCustomSaveResponse,
+  EffectPreviewJob,
+  EffectPreviewSource,
+  SparkleCreateResponse,
+  SparklePresetsResponse,
   TVEffectParams,
   TVEffectPreviewResponse,
   TVEffectStylesResponse,
@@ -629,6 +642,68 @@ export async function importSelectedStoryVideos(
   });
 }
 
+// === Bulk harvest: tải hết theo từ khoá trước, chọn lọc sau ===
+// Luồng riêng, độc lập với searchStoryProviderVideos/importSelectedStoryVideos ở trên.
+
+export async function startStoryHarvest(payload: StartStoryHarvestRequest) {
+  return requestJson<StoryHarvestJob>("/api/story-video/library/harvest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listStoryHarvestJobs() {
+  return requestJson<{ jobs: StoryHarvestJob[] }>("/api/story-video/library/harvest");
+}
+
+export async function getStoryHarvestJob(jobId: string) {
+  return requestJson<StoryHarvestJob>(`/api/story-video/library/harvest/${jobId}`);
+}
+
+export async function getStoryHarvestItems(jobId: string, page = 1, perPage = 24, keyword?: string) {
+  const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
+  if (keyword) params.set("keyword", keyword);
+  return requestJson<StoryHarvestItemsResponse>(
+    `/api/story-video/library/harvest/${jobId}/items?${params}`,
+  );
+}
+
+export async function cancelStoryHarvest(jobId: string) {
+  return requestJson<StoryHarvestJob>(`/api/story-video/library/harvest/${jobId}/cancel`, {
+    method: "POST",
+  });
+}
+
+export async function deleteStoryHarvestItems(jobId: string, payload: StoryHarvestDeleteRequest) {
+  return requestJson<StoryHarvestDeleteResponse>(
+    `/api/story-video/library/harvest/${jobId}/items/delete`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function commitStoryHarvest(jobId: string, libraryId: string, deleteStaging = true) {
+  return requestJson<CommitStoryHarvestResponse>(
+    `/api/story-video/library/harvest/${jobId}/commit`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ libraryId, deleteStaging }),
+    },
+  );
+}
+
+export async function deleteStoryHarvestJob(jobId: string) {
+  return requestJson<{ deleted: boolean; jobId: string }>(
+    `/api/story-video/library/harvest/${jobId}`,
+    { method: "DELETE" },
+  );
+}
+
 export async function deleteStoryClip(libraryId: string, clipId: string) {
   return requestJson<void>(`/api/story-video/library/${clipId}`, {
     method: "DELETE",
@@ -839,6 +914,61 @@ export async function updateTVNoiseOverlay(id: string, payload: Partial<TVNoiseO
   });
 }
 
+export async function getEffectPreviewSources() {
+  return requestJson<{ sources: EffectPreviewSource[] }>("/api/story-video/effect-preview/sources");
+}
+
+export async function uploadEffectPreviewSource(files: File[], name?: string) {
+  const fd = new FormData();
+  for (const file of files) fd.append("files", file);
+  if (name) fd.append("name", name);
+  return requestJson<{ source: EffectPreviewSource }>("/api/story-video/effect-preview/sources", {
+    method: "POST",
+    body: fd,
+  });
+}
+
+export async function deleteEffectPreviewSource(id: string) {
+  return requestJson<{ deleted: string }>(`/api/story-video/effect-preview/sources/${id}`, { method: "DELETE" });
+}
+
+export async function renderEffectPreview(payload: {
+  sourceId: string;
+  includeStyle?: boolean;
+  includeOverlays?: boolean;
+  compare?: boolean;
+  maxSeconds?: number;
+  decorImageId?: string;
+}) {
+  return requestJson<{ sessionId: string }>("/api/story-video/effect-preview/render", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getEffectPreviewJob(sessionId: string) {
+  return requestJson<EffectPreviewJob>(`/api/story-video/effect-preview/jobs/${sessionId}`);
+}
+
+export async function getSparklePresets() {
+  return requestJson<SparklePresetsResponse>("/api/story-video/sparkle-presets");
+}
+
+export async function createSparkleOverlay(payload: {
+  presetId: string;
+  params?: Record<string, number>;
+  name?: string;
+  opacity?: number;
+  lumaGain?: number;
+}) {
+  return requestJson<SparkleCreateResponse>("/api/story-video/sparkle-overlays", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function deleteTVNoiseOverlay(id: string) {
   return requestJson<void>(`/api/story-video/tv-noise-overlays/${id}`, { method: "DELETE" });
 }
@@ -892,6 +1022,15 @@ export async function createStoryBatch(payload: CreateStoryBatchRequest, audioFi
     subtitleFiles.forEach((f) => fd.append("subtitle_files", f));
   }
   return requestJson<{ batchId: string }>("/api/story-video/batch/create", { method: "POST", body: fd });
+}
+
+/** Scan a folder on the machine running the backend — no upload, just paths. */
+export async function scanLocalAudioFolder(path: string) {
+  return requestJson<LocalAudioFolderScan>("/api/story-video/batch/local-folder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
 }
 
 export async function startStoryDriveAudioImport(folderUrl: string) {
@@ -1023,6 +1162,41 @@ export async function startYoutubeDownload(payload: {
   });
 }
 
+export async function getDecorImages() {
+  return requestJson<{ images: StoryDecorImage[]; groups?: string[] }>(
+    "/api/story-video/decor-images",
+  );
+}
+
+export async function uploadDecorImage(file: File, group?: string) {
+  const form = new FormData();
+  form.append("file", file);
+  if (group) form.append("group", group);
+  return requestJson<{ image: StoryDecorImage }>("/api/story-video/decor-images", {
+    method: "POST",
+    body: form,
+  });
+}
+
+export async function renameDecorGroup(from: string, to: string) {
+  return requestJson<{ moved: number; groups: string[] }>(
+    "/api/story-video/decor-images/group",
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to }),
+    },
+  );
+}
+
+export async function updateDecorImage(id: string, payload: Partial<StoryDecorImage>) {
+  return requestJson<{ image: StoryDecorImage }>(`/api/story-video/decor-images/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function getYoutubeDownloadJob(sessionId: string) {
   return requestJson<YoutubeDownloadJob>(`/api/youtube-download/jobs/${sessionId}`);
 }
@@ -1042,4 +1216,31 @@ export async function deleteYoutubeDownloadFile(outputDir: string, name: string)
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ outputDir, name }),
   });
+}
+
+export async function deleteDecorImage(id: string) {
+  return requestJson<void>(`/api/story-video/decor-images/${id}`, { method: "DELETE" });
+}
+
+/** Re-run green-region detection on the original upload. */
+export async function detectDecorFrame(id: string) {
+  return requestJson<{ frame: StoryDecorFrame; keyColor: string }>(
+    `/api/story-video/decor-images/${id}/detect-frame`,
+    { method: "POST" },
+  );
+}
+
+/** Compose one still (a library frame fitted into the decor frame) for alignment. */
+export async function renderDecorFramePreview(
+  id: string,
+  payload: { libraryId?: string; sampleClipId?: string } = {},
+) {
+  return requestJson<{ previewPath: string }>(
+    `/api/story-video/decor-images/${id}/frame-preview`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
 }

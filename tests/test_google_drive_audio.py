@@ -175,9 +175,10 @@ def test_story_batch_create_copies_drive_audio_before_starting_runner(drive_impo
     captured: dict = {}
 
     class FakeRunner:
-        def __init__(self, batch_id: str, story_configs: list[dict]):
+        def __init__(self, batch_id: str, story_configs: list[dict], **kwargs):
             captured["batchId"] = batch_id
             captured["storyConfigs"] = story_configs
+            captured["kwargs"] = kwargs
 
         def start_async(self):
             captured["started"] = True

@@ -15,8 +15,8 @@ class SharedClipBag:
     """One shuffled deck per clip pool, shared by all videos of a batch.
 
     Batch stories render in parallel (STORY_BATCH_MAX_WORKERS), so draws are
-    serialized under a lock. Each distinct pool — library + clip-tag filter —
-    gets its own deck, keyed via ``pool_key()``.
+    serialized under a lock. Each distinct pool — the selected libraries +
+    clip-tag filter — gets its own deck, keyed via ``pool_key()``.
     """
 
     def __init__(self):
@@ -24,10 +24,22 @@ class SharedClipBag:
         self._decks: dict[tuple, list[tuple[str, float]]] = {}
 
     @staticmethod
-    def pool_key(library_id, clip_tags) -> tuple:
-        """Identify a pool: stories with the same library and tag filter share a deck."""
+    def pool_key(library_ids, clip_tags) -> tuple:
+        """Identify a pool: stories with the same libraries and tag filter share a deck.
+
+        ``library_ids`` is a single id or an iterable of ids (a render can draw
+        from several libraries at once); they are sorted so the order the user
+        ticked the libraries in never splits one pool into two decks.
+        """
+        if library_ids is None:
+            raw_ids = []
+        elif isinstance(library_ids, str):
+            raw_ids = [library_ids]
+        else:
+            raw_ids = list(library_ids)
+        ids = tuple(sorted({str(lid) for lid in raw_ids if str(lid or "").strip()}))
         tags = tuple(sorted(str(tag).lower() for tag in (clip_tags or [])))
-        return (str(library_id or ""), tags)
+        return (ids, tags)
 
     def draw(
         self,

@@ -612,3 +612,62 @@ def library_clip_duration(library_id=None, default: int = 0) -> int:
     except (TypeError, ValueError):
         value = 0
     return value if value > 0 else default
+
+
+# --------------------------------------------------------------------------- #
+# Multi-library selection (a render can draw clips from several libraries)
+# --------------------------------------------------------------------------- #
+def resolve_library_ids(values=None) -> list[str]:
+    """Normalize a multi-library selection into resolvable ids, order preserved.
+
+    Accepts a single id (str) or any iterable of ids — each is put through
+    ``resolve_library_id``, blanks and duplicates are dropped. An empty/unusable
+    selection falls back to the default library (``[]`` only when no library
+    exists at all), so callers can always treat the result as "the libraries this
+    render draws from".
+    """
+    if values is None:
+        raw_values = []
+    elif isinstance(values, str):
+        raw_values = [values]
+    else:
+        raw_values = list(values)
+
+    resolved: list[str] = []
+    for value in raw_values:
+        lid = resolve_library_id(value)
+        if lid and lid not in resolved:
+            resolved.append(lid)
+
+    if not resolved:
+        default_id = get_default_library_id()
+        return [default_id] if default_id else []
+    return resolved
+
+
+def any_styled_library(library_ids=None) -> bool:
+    """True when at least one selected library is a pre-baked "styled" library.
+
+    A mixed selection renders under the baked profile: the style pass is skipped
+    for the whole video so the already-styled clips are never styled twice.
+    """
+    return any(is_styled_library(lid) for lid in resolve_library_ids(library_ids))
+
+
+def any_fully_baked_library(library_ids=None) -> bool:
+    """True when at least one selected library has style + waveform + CTA baked in."""
+    return any(is_fully_baked_library(lid) for lid in resolve_library_ids(library_ids))
+
+
+def libraries_clip_duration(library_ids=None, default: int = 0) -> int:
+    """Smallest per-clip unit duration across the selected libraries.
+
+    The concat demuxer writes one ``outpoint`` for every segment, so a mixed
+    selection has to trim to the shortest unit — anything longer would overrun
+    the clips coming from the library built with the smaller unit.
+    """
+    durations = [
+        library_clip_duration(lid, default) for lid in resolve_library_ids(library_ids)
+    ]
+    positive = [value for value in durations if value > 0]
+    return min(positive) if positive else default

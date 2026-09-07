@@ -33,3 +33,6 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+tests/test_google_drive_audio.py
+tests/benchmarks/samples.zip
+tests/test_google_drive_audio.py

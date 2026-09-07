@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EmptyCard } from "@/components/empty-card";
 import { PaginationBar } from "@/components/pagination-bar";
 import { StatusAlert } from "@/components/status-alert";
+import { StoryBulkHarvestPanel } from "@/components/StoryBulkHarvestPanel";
 import { StoryLibraryBakeDialog } from "@/components/StoryLibraryBakeDialog";
 import { StoryLibraryPrefetchPanel } from "@/components/StoryLibraryPrefetchPanel";
 import { StoryLibraryResumeBake } from "@/components/StoryLibraryResumeBake";
@@ -689,9 +690,21 @@ export function StoryLibraryManager({
         <TabsList className="w-fit">
           <TabsTrigger value="pixabay">Pixabay</TabsTrigger>
           <TabsTrigger value="pexels">Pexels</TabsTrigger>
+          <TabsTrigger value="bulk">Tải hàng loạt</TabsTrigger>
           <TabsTrigger value="upload">Upload</TabsTrigger>
           <TabsTrigger value="prefetch">Tai truoc &rarr; loc</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="bulk" className="mt-0">
+          <StoryBulkHarvestPanel
+            libraryId={activeLibraryId}
+            disabled={bulkActionsDisabled}
+            onCommitted={() => {
+              setPage(1);
+              void loadLibrary(1);
+            }}
+          />
+        </TabsContent>
 
         {PROVIDERS.map((provider) => (
           <TabsContent key={provider} value={provider} className="mt-0">

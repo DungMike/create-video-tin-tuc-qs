@@ -53,6 +53,8 @@ _download_sessions: dict[str, dict] = {}
 _download_sessions_lock = threading.Lock()
 _tv_noise_jobs: dict[str, dict] = {}
 _tv_noise_jobs_lock = threading.Lock()
+_effect_preview_jobs: dict[str, dict] = {}
+_effect_preview_jobs_lock = threading.Lock()
 
 
 def _error(message: str, code: str = "bad_request", status: int = 400):
@@ -96,6 +98,34 @@ def _resolve_or_404(raw_library_id):
     if get_library_record(raw) is None:
         return None, _error("Thư viện không tồn tại.", code="library_not_found", status=404)
     return raw, None
+
+
+def _resolve_library_ids_or_404(raw_library_ids, raw_library_id=None):
+    """Validate a multi-library render selection -> (ids, error_response).
+
+    Accepts ``libraryIds`` (list) and falls back to the single ``libraryId`` sent
+    by clients from before multi-select. Duplicates are dropped keeping the click
+    order, and an unknown id is a hard 404 rather than a silent fallback so the
+    user never renders from a library they did not pick.
+    """
+    ensure_libraries_registry()
+    raw_values = raw_library_ids if isinstance(raw_library_ids, (list, tuple)) else []
+    candidates = [str(value or "").strip() for value in raw_values]
+    candidates = [value for value in candidates if value]
+    if not candidates:
+        candidates = [str(raw_library_id or "").strip()]
+
+    resolved: list[str] = []
+    for raw in candidates:
+        library_id, err = _resolve_or_404(raw)
+        if err is not None:
+            return None, err
+        if library_id and library_id not in resolved:
+            resolved.append(library_id)
+
+    if not resolved:
+        return None, _error("Chưa chọn thư viện clip nguồn.", code="missing_library")
+    return resolved, None
 
 
 def _new_tv_noise_job(action: str, overlay_id: str = "") -> str:
@@ -781,6 +811,268 @@ def delete_story_prefetch_session(session_id: str):
 
     prefetch.discard_session(session_id)
     return jsonify({"deleted": True, "sessionId": session_id})
+
+
+# ---------------------------------------------------------------------------
+# 4e. Bulk harvest — tai het video theo tu khoa TRUOC, chon loc SAU.
+#
+# Luong doc lap voi 4b/4c o tren: thay vi preview tung ket qua tu CDN provider
+# roi moi tai, o day search -> tai het ve staging -> preview tu o cung -> xoa
+# video thua -> chi video con lai moi cat clip va vao thu vien.
+# Xem src/utils/story_bulk_harvest.py.
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/library/harvest", methods=["POST"])
+def start_story_harvest():
+    from src.utils.story_bulk_harvest import start_harvest_job
+
+    data = request.get_json(silent=True) or {}
+    library_id, err = _resolve_or_404(data.get("libraryId"))
+    if err:
+        return err
+
+    raw_keywords = data.get("keywords")
+    if isinstance(raw_keywords, str):
+        raw_keywords = raw_keywords.replace(",", "\n").split("\n")
+    if not isinstance(raw_keywords, list):
+        return _error("keywords phai la array hoac chuoi.", code="invalid_keywords")
+
+    providers = data.get("providers")
+    if not isinstance(providers, list):
+        return _error("providers phai la array.", code="invalid_providers")
+
+    tags = data.get("tags") or []
+    if not isinstance(tags, list):
+        return _error("tags phai la array.", code="invalid_tags")
+
+    try:
+        max_per_keyword = max(0, int(data.get("maxPerKeyword") or 0))
+    except (TypeError, ValueError):
+        return _error("maxPerKeyword khong hop le.", code="invalid_max_per_keyword")
+
+    try:
+        progress = start_harvest_job(
+            keywords=raw_keywords,
+            providers=providers,
+            library_id=library_id,
+            tags=tags,
+            landscape_only=bool(data.get("landscapeOnly", True)),
+            max_per_keyword=max_per_keyword,
+        )
+    except ValueError as exc:
+        return _error(str(exc), code="invalid_harvest_request")
+
+    return jsonify(progress), 202
+
+
+@story_video_bp.route("/api/story-video/library/harvest", methods=["GET"])
+def list_story_harvest_jobs():
+    from src.utils.story_bulk_harvest import list_harvest_jobs
+
+    return jsonify({"jobs": list_harvest_jobs()})
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>", methods=["GET"])
+def get_story_harvest_job(job_id: str):
+    from src.utils.story_bulk_harvest import load_harvest_progress
+
+    progress = load_harvest_progress(job_id)
+    if not progress:
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+    return jsonify(progress)
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>/items", methods=["GET"])
+def get_story_harvest_items(job_id: str):
+    from src.utils.story_bulk_harvest import load_harvest_manifest, load_harvest_progress
+
+    if not load_harvest_progress(job_id):
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+        per_page = min(100, max(1, int(request.args.get("per_page", 24))))
+    except ValueError:
+        return _error("page/per_page khong hop le.", code="invalid_pagination")
+
+    all_items = [
+        item for item in load_harvest_manifest(job_id).get("items", [])
+        if item.get("status") == "kept"
+    ]
+    keywords = sorted({item.get("keyword") or "" for item in all_items if item.get("keyword")})
+
+    keyword = request.args.get("keyword", "").strip()
+    items = [item for item in all_items if item.get("keyword") == keyword] if keyword else all_items
+
+    total = len(items)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    start = (page - 1) * per_page
+
+    return jsonify({
+        "items": items[start:start + per_page],
+        "total": total,
+        "page": page,
+        "perPage": per_page,
+        "totalPages": total_pages,
+        "keywords": keywords,
+        "keptTotal": len(all_items),
+    })
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>/cancel", methods=["POST"])
+def cancel_story_harvest(job_id: str):
+    from src.utils.story_bulk_harvest import request_harvest_cancel
+
+    progress = request_harvest_cancel(job_id)
+    if not progress:
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+    return jsonify(progress)
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>/items/delete", methods=["POST"])
+def delete_story_harvest_items(job_id: str):
+    from src.utils.story_bulk_harvest import (
+        delete_harvest_items,
+        load_harvest_manifest,
+        load_harvest_progress,
+    )
+
+    progress = load_harvest_progress(job_id)
+    if not progress:
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+
+    # Worker ghi de nguyen file manifest, nen xoa item khi job dang chay se bi
+    # ghi de mat. Doi job dung han (hoac huy) roi moi chon loc.
+    if progress.get("status") in {"running", "cancelling"}:
+        return _error(
+            "Job dang tai video. Hay doi tai xong hoac huy truoc khi xoa.",
+            code="harvest_running",
+            status=409,
+        )
+
+    data = request.get_json(silent=True) or {}
+    scope = str(data.get("scope") or "ids").strip().lower()
+
+    if scope == "all":
+        result = delete_harvest_items(job_id, delete_all=True)
+    elif scope == "keyword":
+        keyword = str(data.get("keyword") or "").strip()
+        if not keyword:
+            return _error("Can truyen keyword khi scope='keyword'.", code="invalid_keyword")
+        item_ids = [
+            item["itemId"] for item in load_harvest_manifest(job_id).get("items", [])
+            if item.get("status") == "kept" and item.get("keyword") == keyword
+        ]
+        result = delete_harvest_items(job_id, item_ids)
+    elif scope == "ids":
+        raw_ids = data.get("itemIds")
+        if not isinstance(raw_ids, list):
+            return _error("itemIds phai la array.", code="invalid_item_ids")
+        item_ids = [str(value).strip() for value in raw_ids if str(value).strip()]
+        if not item_ids:
+            return _error("Can it nhat 1 itemId de xoa.", code="invalid_item_ids")
+        result = delete_harvest_items(job_id, item_ids)
+    else:
+        return _error("scope phai la 'ids', 'keyword' hoac 'all'.", code="invalid_scope")
+
+    return jsonify({"scope": scope, **result})
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>/commit", methods=["POST"])
+def commit_story_harvest(job_id: str):
+    from src.utils.story_bulk_harvest import load_harvest_manifest, load_harvest_progress
+
+    progress = load_harvest_progress(job_id)
+    if not progress:
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+
+    if progress.get("status") in {"running", "cancelling"}:
+        return _error(
+            "Job dang tai video. Hay doi tai xong hoac huy truoc khi nhap thu vien.",
+            code="harvest_running",
+            status=409,
+        )
+
+    data = request.get_json(silent=True) or {}
+    library_id, err = _resolve_or_404(data.get("libraryId") or progress.get("libraryId"))
+    if err:
+        return err
+
+    pending = [
+        item for item in load_harvest_manifest(job_id).get("items", [])
+        if item.get("status") == "kept"
+    ]
+    if not pending:
+        return _error("Khong con video nao de nhap thu vien.", code="no_harvest_items")
+
+    delete_staging = bool(data.get("deleteStaging", True))
+    session_id = f"hvc-{str(uuid.uuid4())[:8]}"
+
+    # Dung chung _download_sessions + GET /download-progress/<id> co san nen
+    # frontend poll bang dung mot ham getStoryDownloadProgress.
+    with _download_sessions_lock:
+        _download_sessions[session_id] = {
+            "sessionId": session_id,
+            "status": "splitting",
+            "current": 0,
+            "total": len(pending),
+            "message": "Bat dau cat clip va nhap thu vien...",
+            "addedClips": 0,
+            "libraryId": library_id,
+        }
+
+    def _run_commit():
+        from src.utils.story_bulk_harvest import commit_harvest_job
+
+        def progress_cb(progress_data):
+            with _download_sessions_lock:
+                if session_id in _download_sessions:
+                    _download_sessions[session_id].update(progress_data)
+
+        try:
+            result = commit_harvest_job(
+                job_id,
+                library_id=library_id,
+                session_id=session_id,
+                progress_callback=progress_cb,
+                delete_staging=delete_staging,
+            )
+            added_count = len(result) if isinstance(result, list) else 0
+            with _download_sessions_lock:
+                _download_sessions[session_id].update({
+                    "status": "completed",
+                    "current": len(pending),
+                    "total": len(pending),
+                    "message": f"Hoan tat! Da them {added_count} clips.",
+                    "addedClips": added_count,
+                })
+        except Exception as exc:
+            logger.error(f"[StoryVideo] Harvest commit failed: {exc}", exc_info=True)
+            with _download_sessions_lock:
+                _download_sessions[session_id].update({
+                    "status": "failed",
+                    "message": f"Loi: {str(exc)}",
+                })
+
+    threading.Thread(target=_run_commit, daemon=True).start()
+    return jsonify({"sessionId": session_id, "total": len(pending)}), 202
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>", methods=["DELETE"])
+def delete_story_harvest_job(job_id: str):
+    from src.utils.story_bulk_harvest import delete_harvest_job, load_harvest_progress
+
+    progress = load_harvest_progress(job_id)
+    if not progress:
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+    if progress.get("status") in {"running", "cancelling"}:
+        return _error(
+            "Job dang chay. Hay huy truoc khi xoa.",
+            code="harvest_running",
+            status=409,
+        )
+
+    delete_harvest_job(job_id)
+    return jsonify({"deleted": True, "jobId": job_id})
 
 
 # ---------------------------------------------------------------------------
@@ -1542,6 +1834,56 @@ def generate_tv_effect_style_preview():
 # ---------------------------------------------------------------------------
 # 9c. Subtitle fonts / presets / preview
 # ---------------------------------------------------------------------------
+def _resolve_decor_selection(image_ids, library_ids, count):
+    """Validate a decor selection and deal it out across ``count`` videos.
+
+    Returns ``(assignments, error_response)``. A fully-baked library already has
+    the waveform and CTA burned into its clips, which would end up shrunk inside
+    the TV screen instead of on top of the photo — so that combination is refused
+    here rather than silently rendering something wrong. One fully-baked library
+    anywhere in the selection is enough: its clips land in the same pool.
+    """
+    from src.utils.story_decor_images import build_decor_rotation
+    from src.utils.story_library import any_fully_baked_library
+
+    wanted = [str(item or "").strip() for item in (image_ids or []) if str(item or "").strip()]
+    if not wanted:
+        return [], None
+
+    if any_fully_baked_library(library_ids):
+        return None, _error(
+            "Thu vien da bake san hieu ung/song am/CTA nen khong dung duoc anh decor. "
+            "Hay chon thu vien chua bake.",
+            code="decor_baked_library_conflict",
+        )
+
+    assignments = build_decor_rotation(wanted, count)
+    if not assignments:
+        return None, _error(
+            "Khong co anh decor nao dung duoc (chua tach nen hoac da bi xoa).",
+            code="decor_unusable",
+        )
+    return assignments, None
+
+
+def _resolve_overlay_rotation(overlay_ids, count, build_rotation, empty_message, empty_code):
+    """Validate a waveform/CTA selection and deal it out across ``count`` videos.
+
+    Returns ``(assignments, error_response)``. An empty selection is not an
+    error: it means "keep the current behaviour" — the default waveform and the
+    CTA enabled on the settings page. A non-empty selection where nothing
+    resolves is a hard error rather than a silent fallback.
+    """
+    wanted = [str(item or "").strip() for item in (overlay_ids or []) if str(item or "").strip()]
+    if not wanted:
+        return [], None
+
+    assignments = build_rotation(wanted, count)
+    if not assignments:
+        return None, _error(empty_message, code=empty_code)
+    return assignments, None
+
+
 def _subtitle_config_from_payload(payload: dict) -> dict:
     """Map camelCase subtitle payload keys to pipeline config keys (without subtitle_path)."""
     from src.utils.story_subtitles import get_subtitle_preset
@@ -1708,6 +2050,14 @@ def create_story_video():
         if sub_ext != "srt":
             return _error("File subtitle phải có định dạng .srt.", code="invalid_subtitle_format")
 
+    # Validated before anything is written to disk, so a bad selection never
+    # leaves an orphan story dir behind.
+    library_ids, library_error = _resolve_library_ids_or_404(
+        data.get("libraryIds"), data.get("libraryId")
+    )
+    if library_error is not None:
+        return library_error
+
     story_id = f"sv-{str(uuid.uuid4())[:8]}"
     story_dir = os.path.join(Config.STORY_VIDEO_DIR, story_id)
     os.makedirs(story_dir, exist_ok=True)
@@ -1733,15 +2083,27 @@ def create_story_video():
     if not input_value:
         return _error("inputValue không được để trống.", code="missing_input_value")
 
+    # A single render takes one decor image; the rotation only applies to batches.
+    decor_selection, decor_error = _resolve_decor_selection(
+        [str(data.get("decorImageId") or "").strip()],
+        library_ids,
+        1,
+    )
+    if decor_error is not None:
+        return decor_error
+    decor_image_id = decor_selection[0] if decor_selection else ""
+
     config_dict = {
         "input_type": input_type,
         "input_value": input_value,
         "output_name": output_name,
         "clip_tags": data.get("clipTags", []),
-        "library_id": str(data.get("libraryId", "") or "").strip(),
+        "library_ids": library_ids,
         "crt_settings": data.get("crtSettings", {}),
         "tv_effect_style_id": str(data.get("tvEffectStyleId", "")).strip(),
+        "skip_tv_effect": bool(data.get("skipTvEffect", False)),
         "waveform_overlay_id": str(data.get("waveformOverlayId", "")).strip(),
+        "decor_image_id": decor_image_id,
         "voice_id": str(data.get("voiceId", "")).strip(),
         "subtitle_path": subtitle_path,
         **_subtitle_config_from_payload(data),
@@ -1855,6 +2217,83 @@ def get_drive_audio_import(session_id: str):
 
 
 # ---------------------------------------------------------------------------
+# 13b. POST /api/story-video/batch/local-folder - scan a folder on this machine
+# ---------------------------------------------------------------------------
+LOCAL_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+
+
+@story_video_bp.route("/api/story-video/batch/local-folder", methods=["POST"])
+def scan_local_audio_folder():
+    """List audio (+ paired .srt) inside a folder on the machine running this server.
+
+    Backend and browser share the same filesystem here, so a batch can reference the
+    originals by absolute path instead of re-uploading gigabytes through the form.
+    """
+    data = request.get_json(silent=True) or {}
+    raw_path = str(data.get("path", "") or "").strip().strip('"').strip("'")
+    if not raw_path:
+        return _error("Nhap duong dan thu muc.", code="empty_path")
+
+    folder = os.path.abspath(os.path.expandvars(os.path.expanduser(raw_path)))
+    if not os.path.isdir(folder):
+        return _error(f"Thu muc khong ton tai: {folder}", code="folder_not_found", status=404)
+
+    recursive = bool(data.get("recursive", True))
+
+    # Collect audio and subtitles per directory so an .srt only pairs with an audio
+    # file of the same stem sitting next to it (same rule the browser picker uses).
+    items: list[dict] = []
+    total_bytes = 0
+    paired_count = 0
+    orphan_subtitles = 0
+
+    walker = os.walk(folder) if recursive else [(folder, [], os.listdir(folder))]
+    for dir_path, _dirs, filenames in walker:
+        subtitles: dict[str, str] = {}
+        audio_names: list[str] = []
+        for name in filenames:
+            ext = os.path.splitext(name)[1].lower()
+            if ext == ".srt":
+                subtitles[os.path.splitext(name)[0].lower()] = os.path.join(dir_path, name)
+            elif ext in LOCAL_AUDIO_EXTENSIONS:
+                audio_names.append(name)
+
+        used_stems: set[str] = set()
+        for name in sorted(audio_names, key=str.lower):
+            audio_path = os.path.join(dir_path, name)
+            stem = os.path.splitext(name)[0]
+            subtitle_path = subtitles.get(stem.lower(), "")
+            if subtitle_path:
+                paired_count += 1
+                used_stems.add(stem.lower())
+            try:
+                size_bytes = os.path.getsize(audio_path)
+            except OSError:
+                size_bytes = 0
+            total_bytes += size_bytes
+            items.append({
+                "audioPath": audio_path,
+                "audioName": name,
+                "outputName": stem,
+                "subtitlePath": subtitle_path,
+                "subtitleName": os.path.basename(subtitle_path) if subtitle_path else "",
+                "sizeMb": round(size_bytes / (1024 * 1024), 2),
+            })
+        orphan_subtitles += len(set(subtitles) - used_stems)
+
+    if not items:
+        return _error(f"Khong tim thay file audio nao trong: {folder}", code="no_audio_found", status=404)
+
+    return jsonify({
+        "path": folder,
+        "items": items,
+        "totalSizeMb": round(total_bytes / (1024 * 1024), 1),
+        "pairedCount": paired_count,
+        "orphanSubtitles": orphan_subtitles,
+    })
+
+
+# ---------------------------------------------------------------------------
 # 14. POST /api/story-video/batch/create - batch of stories
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/batch/create", methods=["POST"])
@@ -1880,6 +2319,14 @@ def create_story_batch():
 
     if not items or not isinstance(items, list):
         return _error("Cần ít nhất 1 item.", code="empty_items")
+
+    # Resolved once for the whole batch, before the batch dir exists, so a bad
+    # selection fails without leaving files behind.
+    library_ids, library_error = _resolve_library_ids_or_404(
+        shared_config.get("libraryIds"), shared_config.get("libraryId")
+    )
+    if library_error is not None:
+        return library_error
 
     batch_id = f"sb-{str(uuid.uuid4())[:8]}"
     batch_dir = os.path.join(Config.STORY_VIDEO_DIR, "batches", batch_id)
@@ -1929,6 +2376,45 @@ def create_story_batch():
             shutil.rmtree(batch_dir, ignore_errors=True)
             return _error("Intro không tồn tại.", code="intro_not_found", status=404)
 
+    # Decor images ("khung TV") rotate across the batch: one shuffled deck dealt
+    # out so every run of N videos uses all N images in a different order.
+    decor_assignments, decor_error = _resolve_decor_selection(
+        shared_config.get("decorImageIds"),
+        library_ids,
+        len(items),
+    )
+    if decor_error is not None:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+        return decor_error
+
+    # Song am va CTA cung xoay vong theo cach do: chon nhieu cau hinh thi moi N
+    # video lien tiep dung du N cau hinh, thu tu ngau nhien. Khong chon = giu
+    # nguyen hanh vi cu (waveform mac dinh + CTA dang bat o trang cau hinh).
+    from src.utils.story_cta_overlay import build_cta_rotation
+    from src.utils.waveform_overlays import build_waveform_rotation
+
+    waveform_assignments, waveform_error = _resolve_overlay_rotation(
+        shared_config.get("waveformOverlayIds"),
+        len(items),
+        build_waveform_rotation,
+        "Khong co song am nao dung duoc (chua xu ly xong hoac da bi xoa).",
+        "waveform_unusable",
+    )
+    if waveform_error is not None:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+        return waveform_error
+
+    cta_assignments, cta_error = _resolve_overlay_rotation(
+        shared_config.get("ctaOverlayIds"),
+        len(items),
+        build_cta_rotation,
+        "Khong co CTA overlay nao dung duoc (chua xu ly xong hoac da bi xoa).",
+        "cta_unusable",
+    )
+    if cta_error is not None:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+        return cta_error
+
     # Build story configs
     story_configs = []
     for idx, item in enumerate(items):
@@ -1937,6 +2423,8 @@ def create_story_batch():
         output_name = str(item.get("outputName", f"story_{idx + 1}")).strip()
 
         # Map local upload indexes or Drive staging tokens to durable batch files.
+        # An absolute path is taken as-is: the file already lives on this machine, so
+        # the pipeline reads the original instead of a re-uploaded copy.
         if input_type == "audio_file":
             if input_value.isdigit():
                 file_idx = int(input_value)
@@ -1946,6 +2434,14 @@ def create_story_batch():
                 input_value = audio_name_map[input_value]
             elif secure_filename(input_value) in audio_name_map:
                 input_value = audio_name_map[secure_filename(input_value)]
+            elif os.path.isabs(input_value):
+                if not os.path.isfile(input_value):
+                    shutil.rmtree(batch_dir, ignore_errors=True)
+                    return _error(
+                        f"Khong tim thay file audio local: {input_value}",
+                        code="local_audio_not_found",
+                        status=404,
+                    )
         elif input_type == "drive_audio":
             try:
                 input_value, _original_name = copy_staged_audio_to_batch(input_value, batch_dir, idx)
@@ -1966,6 +2462,18 @@ def create_story_batch():
                 subtitle_path = subtitle_name_map[subtitle_ref]
             elif secure_filename(subtitle_ref) in subtitle_name_map:
                 subtitle_path = subtitle_name_map[secure_filename(subtitle_ref)]
+            elif os.path.isabs(subtitle_ref):
+                if not subtitle_ref.lower().endswith(".srt"):
+                    shutil.rmtree(batch_dir, ignore_errors=True)
+                    return _error("File subtitle phải có định dạng .srt.", code="invalid_subtitle_format")
+                if not os.path.isfile(subtitle_ref):
+                    shutil.rmtree(batch_dir, ignore_errors=True)
+                    return _error(
+                        f"Khong tim thay file subtitle local: {subtitle_ref}",
+                        code="local_subtitle_not_found",
+                        status=404,
+                    )
+                subtitle_path = subtitle_ref
 
         story_configs.append({
             "story_id": f"sv-{str(uuid.uuid4())[:8]}",
@@ -1973,10 +2481,18 @@ def create_story_batch():
             "input_value": input_value,
             "output_name": output_name,
             "clip_tags": shared_config.get("clipTags", []),
-            "library_id": str(shared_config.get("libraryId", "") or "").strip(),
+            "library_ids": library_ids,
             "crt_settings": shared_config.get("crtSettings", {}),
             "tv_effect_style_id": str(shared_config.get("tvEffectStyleId", "")).strip(),
-            "waveform_overlay_id": str(shared_config.get("waveformOverlayId", "")).strip(),
+            "skip_tv_effect": bool(shared_config.get("skipTvEffect", False)),
+            # `waveformOverlayId` (so it) van duoc doc cho client cu.
+            "waveform_overlay_id": (
+                waveform_assignments[idx]
+                if waveform_assignments
+                else str(shared_config.get("waveformOverlayId", "")).strip()
+            ),
+            "cta_overlay_id": cta_assignments[idx] if cta_assignments else "",
+            "decor_image_id": decor_assignments[idx] if decor_assignments else "",
             "voice_id": str(shared_config.get("voiceId", "")).strip(),
             "subtitle_path": subtitle_path,
             "intro_video_path": intro_video_path,
@@ -1992,7 +2508,10 @@ def create_story_batch():
 
     logger.info(
         f"[StoryVideo] Started batch: batch_id={batch_id}, items={len(story_configs)}, "
-        f"optimize_mode={optimize_mode}"
+        f"optimize_mode={optimize_mode}, "
+        f"decor_images={len(set(decor_assignments)) if decor_assignments else 0}, "
+        f"waveforms={len(set(waveform_assignments)) if waveform_assignments else 0}, "
+        f"cta_overlays={len(set(cta_assignments)) if cta_assignments else 0}"
     )
     return jsonify({"batchId": batch_id}), 202
 
@@ -2026,6 +2545,10 @@ def get_batch_progress(batch_id: str):
             "message": source.get("message", ""),
             "result": source.get("result"),
             "error": source.get("error"),
+            # Which decor image / waveform / CTA this item drew from the batch rotation.
+            "decorImageName": story.get("decor_image_name", ""),
+            "waveformName": story.get("waveform_overlay_name", ""),
+            "ctaOverlayName": story.get("cta_overlay_name", ""),
         })
 
     batch_status = progress.get("status", "pending")
@@ -2115,7 +2638,13 @@ def retry_batch_failed(batch_id: str):
             "input_value": input_value,
             "output_name": s.get("output_name", ""),
             "clip_tags": s.get("clip_tags", []),
-            "library_id": s.get("library_id", ""),
+            # Batches rendered before multi-select only carry the singular key.
+            "library_ids": s.get("library_ids") or [s.get("library_id", "")],
+            "skip_tv_effect": bool(s.get("skip_tv_effect", False)),
+            "decor_image_id": s.get("decor_image_id", ""),
+            # Retry giu dung song am / CTA ma item da boc o lan chay truoc.
+            "waveform_overlay_id": s.get("waveform_overlay_id", ""),
+            "cta_overlay_id": s.get("cta_overlay_id", ""),
             "voice_id": s.get("voice_id", ""),
             "intro_video_path": s.get("intro_video_path", ""),
             "subtitle_path": s.get("subtitle_path", ""),
@@ -2144,9 +2673,16 @@ def retry_batch_failed(batch_id: str):
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/waveform-overlays", methods=["GET"])
 def get_waveform_overlays():
-    from src.utils.waveform_overlays import load_waveform_index
+    from src.utils.overlay_placement import backfill_processed_sizes
+    from src.utils.waveform_overlays import (
+        load_waveform_index,
+        processed_abs_path,
+        save_waveform_index,
+    )
 
     data = load_waveform_index()
+    if backfill_processed_sizes(data.get("overlays", []), processed_abs_path):
+        save_waveform_index(data)
     return jsonify({"overlays": data.get("overlays", [])})
 
 
@@ -2253,6 +2789,12 @@ def update_waveform_overlay_config(overlay_id: str):
             updates["position"] = position
         if "margin" in data:
             updates["margin"] = max(0, int(data.get("margin")))
+        # Free placement. Sent as a pair; either both or neither, since half a
+        # coordinate would silently fall back to the corner. The utils clamp
+        # them to the frame, so no range check belongs here.
+        for key in ("x", "y"):
+            if key in data:
+                updates[key] = None if data.get(key) is None else int(data.get(key))
     except (TypeError, ValueError):
         return _error("Cau hinh waveform khong hop le.", code="invalid_waveform_config")
 
@@ -2286,10 +2828,18 @@ def delete_waveform_overlay(overlay_id: str):
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/cta-overlays", methods=["GET"])
 def get_cta_overlays():
-    from src.utils.story_cta_overlay import ensure_default_cta_overlay, load_cta_index
+    from src.utils.overlay_placement import backfill_processed_sizes
+    from src.utils.story_cta_overlay import (
+        ensure_default_cta_overlay,
+        load_cta_index,
+        processed_abs_path,
+        save_cta_index,
+    )
 
     ensure_default_cta_overlay()  # seed-on-first-load so the UI always shows the default
     data = load_cta_index()
+    if backfill_processed_sizes(data.get("overlays", []), processed_abs_path):
+        save_cta_index(data)
     return jsonify({"overlays": data.get("overlays", [])})
 
 
@@ -2342,6 +2892,11 @@ def update_cta_overlay_config(overlay_id: str):
             updates["position"] = position
         if "margin" in data:
             updates["margin"] = max(0, int(data.get("margin")))
+        # Free placement; null clears it back to the corner. The utils clamp the
+        # coordinates to the frame, so no range check belongs here.
+        for key in ("x", "y"):
+            if key in data:
+                updates[key] = None if data.get(key) is None else int(data.get(key))
     except (TypeError, ValueError):
         return _error("Cau hinh CTA khong hop le.", code="invalid_cta_config")
 
@@ -2365,6 +2920,198 @@ def delete_cta_overlay(overlay_id: str):
 
     logger.info(f"[StoryVideo] CTA overlay deleted: {overlay_id}")
     return jsonify({"deleted": True, "overlayId": overlay_id})
+
+
+# ---------------------------------------------------------------------------
+# 19b. Decor image management ("khung TV": a full-frame photo whose green screen
+#      the story video plays inside). CRUD mirrors the CTA overlay endpoints; the
+#      two extras are green-region auto-detection and a still alignment preview.
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/decor-images", methods=["GET"])
+def get_decor_images():
+    from src.utils.story_decor_images import list_decor_groups, load_decor_index
+
+    images = load_decor_index().get("images", [])
+    images.sort(key=lambda item: str(item.get("createdAt") or ""))
+    # Groups are derived from the records, so the UI never has to reconcile a
+    # separate list against the images it is showing.
+    return jsonify({"images": images, "groups": list_decor_groups()})
+
+
+@story_video_bp.route("/api/story-video/decor-images", methods=["POST"])
+def upload_decor_image():
+    from src.utils.story_decor_images import create_decor_image
+
+    upload_file = request.files.get("file") or request.files.get("image")
+    if not upload_file or not upload_file.filename:
+        return _error("Chua chon file anh decor.", code="no_file")
+
+    try:
+        record = create_decor_image(upload_file, group=request.form.get("group") or "")
+    except ValueError as exc:
+        return _error(str(exc), code="invalid_decor_image")
+    except Exception as exc:
+        logger.error(f"[StoryVideo] Decor image upload failed: {exc}", exc_info=True)
+        return _error(f"Khong the xu ly anh decor: {exc}", code="decor_upload_failed", status=500)
+
+    logger.info(f"[StoryVideo] Decor image uploaded: {record['id']}")
+    return jsonify({"image": record}), 201
+
+
+@story_video_bp.route("/api/story-video/decor-images/<image_id>", methods=["PATCH"])
+def patch_decor_image(image_id: str):
+    from src.utils.story_decor_images import update_decor_image
+
+    payload = request.get_json(silent=True) or {}
+    updates = {}
+    for key in ("name", "keyColor", "enabled", "frame", "group"):
+        if key in payload:
+            updates[key] = payload[key]
+    for key in ("similarity", "blend", "overscan"):
+        if key in payload and payload[key] is not None:
+            try:
+                updates[key] = float(payload[key])
+            except (TypeError, ValueError):
+                return _error(f"Gia tri {key} khong hop le.", code="invalid_value")
+
+    try:
+        record = update_decor_image(image_id, updates)
+    except Exception as exc:
+        logger.error(f"[StoryVideo] Decor image update failed: {exc}", exc_info=True)
+        return _error(f"Khong the cap nhat anh decor: {exc}", code="decor_update_failed", status=500)
+    if not record:
+        return _error("Anh decor khong ton tai.", code="decor_not_found", status=404)
+    return jsonify({"image": record})
+
+
+@story_video_bp.route("/api/story-video/decor-images/group", methods=["PATCH"])
+def rename_decor_image_group():
+    """Rename a theme group across every image that carries it.
+
+    The static "group" segment cannot be shadowed by the sibling
+    ``<image_id>`` PATCH rule: Werkzeug ranks argument-free rules above ones
+    with a converter, whatever order they were registered in.
+    """
+    from src.utils.story_decor_images import list_decor_groups, rename_decor_group
+
+    payload = request.get_json(silent=True) or {}
+    old_group = str(payload.get("from") or "")
+    new_group = str(payload.get("to") or "")
+
+    try:
+        moved = rename_decor_group(old_group, new_group)
+    except Exception as exc:
+        logger.error(f"[StoryVideo] Decor group rename failed: {exc}", exc_info=True)
+        return _error(f"Khong the doi ten nhom: {exc}", code="decor_group_rename_failed", status=500)
+
+    logger.info(f"[StoryVideo] Decor group renamed: '{old_group}' -> '{new_group}' ({moved} anh)")
+    return jsonify({"moved": moved, "groups": list_decor_groups()})
+
+
+@story_video_bp.route("/api/story-video/decor-images/<image_id>", methods=["DELETE"])
+def delete_decor_image(image_id: str):
+    from src.utils.story_decor_images import delete_decor_image_record
+
+    if not delete_decor_image_record(image_id):
+        return _error("Anh decor khong ton tai.", code="decor_not_found", status=404)
+
+    logger.info(f"[StoryVideo] Decor image deleted: {image_id}")
+    return jsonify({"deleted": True, "imageId": image_id})
+
+
+@story_video_bp.route("/api/story-video/decor-images/<image_id>/detect-frame", methods=["POST"])
+def detect_decor_image_frame(image_id: str):
+    """Re-run green-region detection on the original upload."""
+    from src.utils.story_decor_images import (
+        decor_source_abs_path,
+        detect_green_frame,
+        get_decor_image,
+    )
+
+    record = get_decor_image(image_id)
+    if not record:
+        return _error("Anh decor khong ton tai.", code="decor_not_found", status=404)
+
+    source_path = decor_source_abs_path(record)
+    if not source_path:
+        return _error("File anh goc khong con tren dia.", code="decor_source_missing", status=404)
+
+    detected = detect_green_frame(source_path)
+    if not detected:
+        return _error(
+            "Khong tim thay vung mau xanh trong anh. Hay keo khung thu cong.",
+            code="decor_no_green",
+        )
+    frame, key_color = detected
+    return jsonify({"frame": frame, "keyColor": key_color})
+
+
+@story_video_bp.route("/api/story-video/decor-images/<image_id>/frame-preview", methods=["POST"])
+def preview_decor_image_frame(image_id: str):
+    """Compose one still: a library frame fitted into the decor frame, PNG on top.
+
+    Synchronous and sub-second (one frame, no clip encode), so the canvas editor
+    can show what the current alignment actually produces without waiting on a
+    video render. Mirrors the crt-demo endpoint, and reuses the exact filter the
+    render builds so the still cannot disagree with it.
+    """
+    from src.utils.ffmpeg_helper import FFmpegHelper
+    from src.utils.story_decor_images import (
+        decor_filter_parts,
+        get_decor_image,
+        processed_abs_path,
+    )
+
+    data = request.get_json(silent=True) or {}
+    record = get_decor_image(image_id)
+    if not record:
+        return _error("Anh decor khong ton tai.", code="decor_not_found", status=404)
+
+    decor_path = processed_abs_path(record)
+    if not decor_path:
+        return _error("Anh decor chua duoc tach nen.", code="decor_not_processed", status=409)
+
+    sample_path = _find_sample_clip(data.get("sampleClipId"), data.get("libraryId"))
+    if not sample_path or not os.path.isfile(sample_path):
+        return _error(
+            "Khong co clip mau trong thu vien. Hay them clip truoc.",
+            code="no_sample",
+            status=404,
+        )
+
+    preview_dir = os.path.join(Config.STORY_DECOR_DIR, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    # A new filename each time so the browser cannot serve a stale cached still.
+    output_path = os.path.join(preview_dir, f"{image_id}_{str(uuid.uuid4())[:8]}.jpg")
+
+    target = Config.TARGET_RESOLUTION.replace("x", ":")
+    parts = [f"[0:v]scale={target},setsar=1[src]"]
+    decor_parts, chain = decor_filter_parts("[src]", record, 1)
+    parts.extend(decor_parts)
+    parts.append(f"{chain}format=yuv420p[v]")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", "1", "-i", sample_path,
+        "-i", decor_path,
+        "-filter_complex", ";".join(parts),
+        "-map", "[v]", "-frames:v", "1", "-q:v", "3",
+        output_path,
+    ]
+    if not FFmpegHelper.run_command(cmd) or not os.path.isfile(output_path):
+        return _error("FFmpeg khong tao duoc preview khung.", code="decor_preview_failed", status=500)
+
+    # Keep only the newest still per decor image.
+    for name in os.listdir(preview_dir):
+        stale = os.path.join(preview_dir, name)
+        if name.startswith(f"{image_id}_") and stale != output_path:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+
+    rel = os.path.relpath(output_path, Config.STORAGE_DIR).replace(os.sep, "/")
+    return jsonify({"previewPath": rel})
 
 
 # ---------------------------------------------------------------------------
@@ -2468,6 +3215,201 @@ def import_tv_noise_from_youtube():
     return jsonify({"sessionId": session_id, "overlay": overlay}), 202
 
 
+@story_video_bp.route("/api/story-video/effect-preview/sources", methods=["GET"])
+def list_effect_preview_sources():
+    from src.utils.story_effect_preview import load_sources
+
+    return jsonify({"sources": load_sources()})
+
+
+@story_video_bp.route("/api/story-video/effect-preview/sources", methods=["POST"])
+def upload_effect_preview_source():
+    """Upload a handful of short clips and build the preview base video."""
+    from src.utils.story_effect_preview import EffectPreviewError, build_source_set
+
+    files = request.files.getlist("files") or request.files.getlist("file")
+    if not files:
+        return _error("Chua chon video nao.", code="no_files")
+
+    try:
+        record = build_source_set(files, str(request.form.get("name") or ""))
+    except EffectPreviewError as exc:
+        return _error(str(exc), code="effect_preview_source_failed")
+    except Exception as exc:
+        logger.error(f"[StoryVideo] Effect preview source failed: {exc}", exc_info=True)
+        return _error(f"Khong the tao bo clip preview: {exc}", code="effect_preview_source_failed", status=500)
+    return jsonify({"source": record}), 201
+
+
+@story_video_bp.route("/api/story-video/effect-preview/sources/<source_id>", methods=["DELETE"])
+def delete_effect_preview_source(source_id: str):
+    from src.utils.story_effect_preview import delete_source
+
+    if not delete_source(source_id):
+        return _error("Khong tim thay bo clip preview.", code="source_not_found", status=404)
+    return jsonify({"deleted": source_id})
+
+
+@story_video_bp.route("/api/story-video/effect-preview/render", methods=["POST"])
+def render_effect_preview():
+    """Re-apply the current effect stack to a stored clip set.
+
+    Runs on a worker thread: a 30-60s preview takes a while, and the point of the
+    feature is to keep tweaking settings and re-rendering.
+    """
+    from src.utils.story_effect_preview import get_source
+
+    data = request.get_json(silent=True) or {}
+    source_id = str(data.get("sourceId") or "").strip()
+    record = get_source(source_id)
+    if not record:
+        return _error("Khong tim thay bo clip preview.", code="source_not_found", status=404)
+
+    include_style = bool(data.get("includeStyle", True))
+    include_overlays = bool(data.get("includeOverlays", True))
+    compare = bool(data.get("compare", False))
+    decor_image_id = str(data.get("decorImageId") or "").strip()
+    try:
+        max_seconds = float(data.get("maxSeconds") or 0)
+    except (TypeError, ValueError):
+        max_seconds = 0.0
+
+    session_id = f"efp-{str(uuid.uuid4())[:8]}"
+    with _effect_preview_jobs_lock:
+        _effect_preview_jobs[session_id] = {
+            "sessionId": session_id,
+            "status": "processing",
+            "message": "Dang render preview...",
+            "sourceId": source_id,
+            "source": None,
+            "error": None,
+        }
+
+    def _worker():
+        from src.utils.story_effect_preview import render_preview
+
+        try:
+            updated = render_preview(
+                source_id,
+                include_style=include_style,
+                include_overlays=include_overlays,
+                compare=compare,
+                max_seconds=max_seconds,
+                decor_image_id=decor_image_id,
+            )
+            payload = {"status": "completed", "message": "Preview da san sang.", "source": updated}
+        except Exception as exc:
+            logger.error(f"[StoryVideo] Effect preview render failed: {exc}", exc_info=True)
+            payload = {"status": "failed", "message": str(exc), "error": str(exc)}
+        with _effect_preview_jobs_lock:
+            if session_id in _effect_preview_jobs:
+                _effect_preview_jobs[session_id].update(payload)
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({"sessionId": session_id}), 202
+
+
+@story_video_bp.route("/api/story-video/effect-preview/jobs/<session_id>", methods=["GET"])
+def get_effect_preview_job(session_id: str):
+    with _effect_preview_jobs_lock:
+        job = _effect_preview_jobs.get(session_id)
+    if not job:
+        return _error("Preview job khong ton tai.", code="job_not_found", status=404)
+    return jsonify(job)
+
+
+@story_video_bp.route("/api/story-video/sparkle-presets", methods=["GET"])
+def get_sparkle_presets():
+    from src.utils.story_sparkle_presets import SPARKLE_PARAM_SPEC, list_sparkle_presets
+
+    return jsonify({"presets": list_sparkle_presets(), "paramSpec": SPARKLE_PARAM_SPEC})
+
+
+@story_video_bp.route("/api/story-video/sparkle-overlays", methods=["POST"])
+def create_sparkle_overlay():
+    """Generate a sparkle layer and register it as an overlay.
+
+    Generation takes 25-90s depending on preset, so it runs on a worker thread and
+    reports through the existing TV noise job tracker. The resulting record is an
+    ordinary overlay from there on: the same list, demo, enable/opacity/order and
+    delete endpoints manage it.
+    """
+    from src.utils.story_sparkle_presets import get_sparkle_preset, sanitize_sparkle_params
+    from src.utils.story_tv_noise_overlays import mark_tv_noise_failed
+
+    data = request.get_json(silent=True) or {}
+    preset_id = str(data.get("presetId") or "").strip()
+    preset = get_sparkle_preset(preset_id)
+    if not preset:
+        return _error("Preset lap lanh khong hop le.", code="invalid_sparkle_preset", status=404)
+
+    raw_params = data.get("params")
+    if raw_params is not None and not isinstance(raw_params, dict):
+        return _error("params khong hop le.", code="invalid_params")
+    params = sanitize_sparkle_params(preset_id, raw_params)
+
+    name = str(data.get("name") or "").strip() or preset["name"]
+    try:
+        opacity = max(0.0, min(1.0, float(data.get("opacity", 0.7))))
+        luma_gain = max(1.0, min(8.0, float(data.get("lumaGain", Config.STORY_TV_NOISE_LUMA_GAIN))))
+    except (TypeError, ValueError):
+        return _error("opacity/lumaGain khong hop le.", code="invalid_params")
+
+    session_id = _new_tv_noise_job("create_sparkle")
+    _update_tv_noise_job(session_id, message="Dang dung lop lap lanh...")
+
+    def _worker():
+        from src.utils.story_sparkle_presets import generate_sparkle_source
+        from src.utils.story_tv_noise_overlays import (
+            create_generated_overlay,
+            run_tv_noise_preprocess,
+        )
+
+        overlay_id = ""
+        try:
+            _update_tv_noise_job(session_id, status="generating", message="Dang dung lop lap lanh...")
+            source_path = generate_sparkle_source(preset_id, params)
+
+            record = create_generated_overlay(
+                name,
+                source_path,
+                kind="sparkle",
+                meta={"presetId": preset_id, "params": params},
+                blend_mode="luma",
+                opacity=opacity,
+                luma_gain=luma_gain,
+            )
+            overlay_id = str(record["id"])
+            _update_tv_noise_job(
+                session_id, status="processing", message="Dang tao alpha MOV...", overlayId=overlay_id
+            )
+
+            processed = run_tv_noise_preprocess(overlay_id)
+            if processed and processed.get("status") == "ready":
+                _update_tv_noise_job(
+                    session_id,
+                    status="completed",
+                    current=1,
+                    message="Lop lap lanh da san sang.",
+                    overlayId=overlay_id,
+                )
+            else:
+                error = (processed or {}).get("error") or "Sparkle preprocess failed."
+                _update_tv_noise_job(
+                    session_id, status="failed", current=1, message=error, error=error, overlayId=overlay_id
+                )
+        except Exception as exc:
+            logger.error(f"[StoryVideo] Sparkle overlay creation failed: {exc}", exc_info=True)
+            if overlay_id:
+                mark_tv_noise_failed(overlay_id, str(exc))
+            _update_tv_noise_job(
+                session_id, status="failed", current=1, message=str(exc), error=str(exc), overlayId=overlay_id
+            )
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({"sessionId": session_id, "presetId": preset_id, "params": params}), 202
+
+
 @story_video_bp.route("/api/story-video/tv-noise-overlays/jobs/<session_id>", methods=["GET"])
 def get_tv_noise_job(session_id: str):
     with _tv_noise_jobs_lock:
@@ -2484,7 +3426,7 @@ def update_tv_noise_overlay_config(overlay_id: str):
     data = request.get_json(silent=True) or {}
     updates = {}
     try:
-        for key in ("enabled", "name", "order", "opacity", "tolerance", "softness", "blendMode"):
+        for key in ("enabled", "name", "order", "opacity", "tolerance", "softness", "blendMode", "lumaGain"):
             if key in data:
                 updates[key] = data.get(key)
         overlay, should_regenerate = update_tv_noise_overlay(overlay_id, updates)

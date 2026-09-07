@@ -107,8 +107,10 @@ def storage_relative_path(abs_path: str) -> str:
     Files under OUTPUT_DIR — which may live on a different drive — are returned
     with an ``output/`` prefix. When OUTPUT_DIR is the default ``./storage/output``
     this yields exactly the same ``output/...`` strings as before, so the mapping
-    is backward compatible. Anything else falls back to the absolute path so
-    callers never crash on cross-drive inputs.
+    is backward compatible. Files under STORY_RAW_DIR — overridable on its own,
+    the deployment parks it on a big slow disk — get a ``story_raw/`` prefix, which
+    the ``/media/`` route maps back. Anything else falls back to the absolute path
+    so callers never crash on cross-drive inputs.
     """
     abs_norm = os.path.abspath(abs_path)
     storage_root = os.path.abspath(Config.STORAGE_DIR)
@@ -120,6 +122,11 @@ def storage_relative_path(abs_path: str) -> str:
         rel = os.path.relpath(abs_norm, output_root).replace("\\", "/")
         return "output" if rel == "." else f"output/{rel}"
 
+    story_raw_root = os.path.abspath(Config.STORY_RAW_DIR)
+    if _is_within(abs_norm, story_raw_root):
+        rel = os.path.relpath(abs_norm, story_raw_root).replace("\\", "/")
+        return "story_raw" if rel == "." else f"story_raw/{rel}"
+
     return abs_norm.replace("\\", "/")
 
 
@@ -127,8 +134,9 @@ def storage_absolute_path(rel_path: str) -> str:
     """Inverse of :func:`storage_relative_path`.
 
     Absolute inputs are returned normalized. ``output/...`` paths resolve against
-    OUTPUT_DIR (which may be on another drive); everything else resolves against
-    STORAGE_DIR. With the default OUTPUT_DIR under storage this is a no-op change.
+    OUTPUT_DIR and ``story_raw/...`` against STORY_RAW_DIR (either may be on
+    another drive); everything else resolves against STORAGE_DIR. With the default
+    OUTPUT_DIR under storage this is a no-op change.
     """
     norm = (rel_path or "").replace("\\", "/")
     if os.path.isabs(norm):
@@ -136,6 +144,9 @@ def storage_absolute_path(rel_path: str) -> str:
     if norm == "output" or norm.startswith("output/"):
         sub = norm[len("output"):].lstrip("/")
         return os.path.normpath(os.path.join(os.path.abspath(Config.OUTPUT_DIR), sub))
+    if norm == "story_raw" or norm.startswith("story_raw/"):
+        sub = norm[len("story_raw"):].lstrip("/")
+        return os.path.normpath(os.path.join(os.path.abspath(Config.STORY_RAW_DIR), sub))
     return os.path.normpath(os.path.join(os.path.abspath(Config.STORAGE_DIR), norm))
 
 

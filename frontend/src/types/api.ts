@@ -705,6 +705,101 @@ export interface StoryProviderVideoSearchResponse {
   perPage: number;
 }
 
+// === Bulk harvest: tải hết video theo từ khoá trước, chọn lọc sau ===
+
+export type StoryHarvestStatus =
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "stopped_disk";
+
+export interface StoryHarvestJob {
+  jobId: string;
+  status: StoryHarvestStatus;
+  libraryId: string;
+  keywords: string[];
+  providers: StoryVideoProvider[];
+  tags: string[];
+  landscapeOnly: boolean;
+  /** 0 = tải hết theo totalHits của provider. */
+  maxPerKeyword: number;
+  keywordIndex: number;
+  keywordTotal: number;
+  currentKeyword: string;
+  currentProvider: StoryVideoProvider;
+  /** Số request API đã dùng — chỉ search mới tốn quota, tải file thì không. */
+  searchRequests: number;
+  downloaded: number;
+  skipped: number;
+  failed: number;
+  bytesDownloaded: number;
+  message: string;
+  startedAt: string;
+  updatedAt: string;
+  error: string | null;
+  /** Chỉ có ở endpoint list. */
+  keptItems?: number;
+  totalItems?: number;
+}
+
+export interface StoryHarvestItem {
+  itemId: string;
+  provider: StoryVideoProvider;
+  videoId: string;
+  keyword: string;
+  title: string;
+  filename: string;
+  relativePath: string;
+  /** URL /media/... — file nằm trên máy này, preview không gọi tới provider. */
+  previewPath: string;
+  duration: number;
+  width: number;
+  height: number;
+  pageUrl: string;
+  author: string;
+  bytes: number;
+  status: "kept" | "deleted" | "committed";
+  createdAt: string;
+}
+
+export interface StoryHarvestItemsResponse {
+  items: StoryHarvestItem[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+  keywords: string[];
+  keptTotal: number;
+}
+
+export interface StartStoryHarvestRequest {
+  libraryId: string;
+  keywords: string[];
+  providers: StoryVideoProvider[];
+  tags?: string[];
+  landscapeOnly?: boolean;
+  maxPerKeyword?: number;
+}
+
+export type StoryHarvestDeleteRequest =
+  | { scope: "ids"; itemIds: string[] }
+  | { scope: "keyword"; keyword: string }
+  | { scope: "all" };
+
+export interface StoryHarvestDeleteResponse {
+  scope: "ids" | "keyword" | "all";
+  deletedCount: number;
+  failedItemIds: string[];
+  remainingCount: number;
+}
+
+export interface CommitStoryHarvestResponse {
+  sessionId: string;
+  total: number;
+}
+
 export interface StoryLibraryResponse {
   clips: StoryClip[];
   total: number;
@@ -963,6 +1058,9 @@ export interface TVEffectParams {
   flicker: number;
   flickerSpeed: number;
   soften: number;
+  bloom: number;
+  bloomThreshold: number;
+  bloomRadius: number;
 }
 
 export interface TVEffectStyle {
@@ -1000,21 +1098,86 @@ export interface TVNoiseOverlay {
   status: "processing" | "ready" | "failed";
   enabled: boolean;
   order: number;
-  // "alpha" (lumakey, default) or "screen" (black-background textures: dust, light leak...).
-  blendMode?: "alpha" | "screen";
+  // "alpha" (lumakey, default), "screen" (black-background textures: dust, light
+  // leak...), or "luma" (alpha from the source's own brightness — sparkle layers).
+  blendMode?: "alpha" | "screen" | "luma";
   opacity: number;
   tolerance: number;
   softness: number;
+  // "luma" only: pushes the layer's colour to white and normalises the alpha peak
+  // before opacity is applied.
+  lumaGain?: number;
+  // Set on generated layers (sparkle); absent on uploaded/imported ones.
+  kind?: string;
+  meta?: { presetId?: string; params?: Record<string, number> };
   sourceUrl?: string;
   error?: string | null;
   createdAt: string;
   updatedAt?: string;
 }
 
+export interface SparklePreset {
+  id: string;
+  name: string;
+  description: string;
+  paramsUsed: string[];
+  params: Record<string, number>;
+}
+
+export interface SparkleParamSpec {
+  min: number;
+  max: number;
+  default: number;
+}
+
+export interface SparklePresetsResponse {
+  presets: SparklePreset[];
+  paramSpec: Record<string, SparkleParamSpec>;
+}
+
+export interface SparkleCreateResponse {
+  sessionId: string;
+  presetId: string;
+  params: Record<string, number>;
+}
+
+export interface EffectPreviewClip {
+  name: string;
+  durationSeconds: number;
+}
+
+export interface EffectPreviewSource {
+  id: string;
+  name: string;
+  clipCount: number;
+  clips: EffectPreviewClip[];
+  durationSeconds: number;
+  basePath: string;
+  previewPath: string | null;
+  previewSeconds?: number;
+  appliedStyle?: boolean;
+  appliedOverlays?: boolean;
+  appliedCompare?: boolean;
+  appliedDecorId?: string | null;
+  appliedDecorName?: string | null;
+  appliedLayers?: { id?: string; name?: string; kind?: string; blendMode?: string; opacity?: number }[];
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface EffectPreviewJob {
+  sessionId: string;
+  status: "processing" | "completed" | "failed";
+  message: string;
+  sourceId: string;
+  source: EffectPreviewSource | null;
+  error?: string | null;
+}
+
 export interface TVNoiseOverlayJob {
   sessionId: string;
-  status: "processing" | "downloading" | "completed" | "failed";
-  action: "upload" | "import_youtube" | string;
+  status: "processing" | "downloading" | "generating" | "completed" | "failed";
+  action: "upload" | "import_youtube" | "create_sparkle" | string;
   current: number;
   total: number;
   message: string;
@@ -1051,14 +1214,41 @@ export interface DriveAudioImportProgress {
   error?: string | null;
 }
 
+export interface LocalAudioFolderItem {
+  audioPath: string;
+  audioName: string;
+  outputName: string;
+  subtitlePath: string;
+  subtitleName: string;
+  sizeMb: number;
+}
+
+export interface LocalAudioFolderScan {
+  path: string;
+  items: LocalAudioFolderItem[];
+  totalSizeMb: number;
+  pairedCount: number;
+  orphanSubtitles: number;
+}
+
 export interface CreateStoryVideoRequest {
   inputType: "audio_file" | "script_url";
   inputValue: string;
   outputName: string;
+  /** @deprecated Dùng `libraryIds`; backend vẫn nhận key này cho client cũ. */
   libraryId?: string;
+  /**
+   * Các thư viện clip nguồn cho lần render này. Backend gộp clip của tất cả
+   * thư viện thành một pool rồi rút ngẫu nhiên không lặp lại.
+   */
+  libraryIds?: string[];
   clipTags?: string[];
   crtSettings?: CRTSettings;
+  /** Bỏ qua bước hiệu ứng TV khi render (thư viện chưa bake hiệu ứng). */
+  skipTvEffect?: boolean;
   waveformOverlayId?: string;
+  /** Ảnh decor (khung TV) dùng cho render đơn. "" = tắt. */
+  decorImageId?: string;
   voiceId?: string;
   subtitleFont?: string;
   subtitlePreset?: string;
@@ -1081,21 +1271,45 @@ export interface StoryVideoProgress {
 export interface CreateStoryBatchItem {
   id: string;
   inputType: "audio_file" | "script_url" | "drive_audio";
+  /** Upload index ("0", "1", ...) for uploaded audio, or an absolute local path. */
   inputValue: string;
   outputName: string;
+  /** Upload index for an uploaded .srt, or an absolute local path. */
   subtitleFile?: string;
 }
 
 export interface CreateStoryBatchRequest {
   items: CreateStoryBatchItem[];
   sharedConfig: {
+    /** @deprecated Dùng `libraryIds`; backend vẫn nhận key này cho client cũ. */
     libraryId?: string;
+    /** Các thư viện clip nguồn dùng chung cho cả batch (pool gộp). */
+    libraryIds?: string[];
     introId?: string;
     /** Optimize mode: suspend competing apps + boost ffmpeg priority for this batch. */
     optimizeMode?: boolean;
     clipTags?: string[];
     crtSettings?: CRTSettings;
+    /** Bỏ qua bước hiệu ứng TV khi render (thư viện chưa bake hiệu ứng). */
+    skipTvEffect?: boolean;
+    /** @deprecated Dùng `waveformOverlayIds`; backend vẫn nhận key này cho client cũ. */
     waveformOverlayId?: string;
+    /**
+     * Sóng âm tham gia xoay vòng cho batch này (cùng cơ chế bộ bài xáo như
+     * `decorImageIds`). Rỗng = dùng sóng âm mặc định ở trang cấu hình.
+     */
+    waveformOverlayIds?: string[];
+    /**
+     * CTA overlay tham gia xoay vòng cho batch này. Rỗng = dùng CTA đang bật ở
+     * trang cấu hình (hành vi cũ).
+     */
+    ctaOverlayIds?: string[];
+    /**
+     * Ảnh decor tham gia xoay vòng cho batch này. Backend xáo bộ bài rồi chia
+     * lần lượt, nên mỗi N video liên tiếp dùng đủ N ảnh theo thứ tự ngẫu nhiên.
+     * Rỗng = không dùng ảnh decor.
+     */
+    decorImageIds?: string[];
     voiceId?: string;
     subtitleFont?: string;
     subtitlePreset?: string;
@@ -1128,6 +1342,12 @@ export interface StoryBatchItemProgress {
   message?: string;
   result?: { videoPath: string };
   error?: string;
+  /** Decor image this item drew from the batch rotation; "" when decor is off. */
+  decorImageName?: string;
+  /** Sóng âm item này bốc được; "" khi batch không xoay vòng sóng âm. */
+  waveformName?: string;
+  /** CTA overlay item này bốc được; "" khi batch không xoay vòng CTA. */
+  ctaOverlayName?: string;
 }
 
 export interface StoryBatchProgress {
@@ -1139,6 +1359,41 @@ export interface StoryBatchProgress {
   cancelledItems: number;
   currentIndex: number;
   items: StoryBatchItemProgress[];
+}
+
+/** Rectangle, in 1920x1080 output coordinates, that the video is fitted into. */
+export interface StoryDecorFrame {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * A full-frame photo whose chroma-green area the story video plays inside.
+ * `processedRelativePath` is the RGBA PNG (green already keyed out) that the
+ * render overlays; `relativePath` is the untouched upload.
+ */
+export interface StoryDecorImage {
+  id: string;
+  name: string;
+  /** Theme this decor belongs to ("den chua", "lang que"...); "" = chua phan nhom. */
+  group?: string;
+  filename: string;
+  relativePath?: string;
+  processedFilename?: string;
+  processedRelativePath?: string;
+  keyColor?: string;
+  similarity?: number;
+  blend?: number;
+  frame: StoryDecorFrame;
+  /** Grows the video past the frame edges so a green fringe can never show. */
+  overscan?: number;
+  /** False when the green region had to be placed by hand. */
+  autoDetected?: boolean;
+  enabled?: boolean;
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export interface WaveformOverlay {
@@ -1156,6 +1411,15 @@ export interface WaveformOverlay {
   scaleWidth?: number;
   position?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
   margin?: number;
+  /**
+   * Free placement: top-left corner in output-frame px. Unset = use position +
+   * margin. Sending null on an update clears it back to the corner.
+   */
+  x?: number | null;
+  y?: number | null;
+  /** Real size of the processed alpha MOV, so the editor can draw it true to scale. */
+  processedWidth?: number;
+  processedHeight?: number;
   createdAt: string;
   updatedAt?: string;
 }
@@ -1176,6 +1440,15 @@ export interface CtaOverlay {
   scaleWidth?: number;
   position?: "top_left" | "top_right" | "bottom_left" | "bottom_right";
   margin?: number;
+  /**
+   * Free placement: top-left corner in output-frame px. Unset = use position +
+   * margin. Sending null on an update clears it back to the corner.
+   */
+  x?: number | null;
+  y?: number | null;
+  /** Real size of the processed alpha MOV, so the editor can draw it true to scale. */
+  processedWidth?: number;
+  processedHeight?: number;
   createdAt: string;
   updatedAt?: string;
 }

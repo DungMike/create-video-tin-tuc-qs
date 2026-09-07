@@ -21,7 +21,7 @@ from src.utils.logger import logger
 from src.utils.story_clip_bag import SharedClipBag
 from src.utils.story_library import (
     load_story_library_index,
-    resolve_library_id,
+    resolve_library_ids,
     story_library_root,
 )
 from src.utils.tts_audio import (
@@ -181,10 +181,27 @@ class StoryVideoPipelineRunner:
         self.input_value = config_dict.get("input_value", "")
         self.output_name = config_dict.get("output_name", "")
         self.clip_tags = config_dict.get("clip_tags", [])
-        self.library_id = str(config_dict.get("library_id", "") or "").strip()
+        # A render can draw clips from several libraries at once: their pools are
+        # merged into one deck so a clip only repeats after every clip of every
+        # selected library has been used. `library_id` (singular) is still read so
+        # configs written before multi-select — old batch progress files, retries —
+        # keep working.
+        self.library_ids = resolve_library_ids(
+            config_dict.get("library_ids") or config_dict.get("library_id")
+        )
         self.voice_id = config_dict.get("voice_id", "")
         self.waveform_overlay_id = str(config_dict.get("waveform_overlay_id", "") or "").strip()
+        # Song am / CTA duoc batch gan cho tung video theo vong xoay; "" = dung
+        # ban ghi mac dinh (waveform) / dang bat (CTA) o trang cau hinh.
+        self.cta_overlay_id = str(config_dict.get("cta_overlay_id", "") or "").strip()
         self.tv_effect_style_id = str(config_dict.get("tv_effect_style_id", "") or "").strip()
+        # Decor image ("khung TV"): a full-frame photo whose green screen the story
+        # video is scaled into. Assigned per video by the batch rotation; "" = off.
+        self.decor_image_id = str(config_dict.get("decor_image_id", "") or "").strip()
+        # Opt-out for the TV style pass on a library whose clips are NOT pre-baked:
+        # render the clips as they are (overlays + subtitle only). This also unlocks
+        # the GPU overlay path, which the CPU-only style filter would otherwise block.
+        self.skip_tv_effect = bool(config_dict.get("skip_tv_effect", False))
         self.subtitle_path = str(config_dict.get("subtitle_path", "") or "").strip()
         # Optional intro clip (already normalized to the canonical output spec on
         # upload) prepended to the front of the finished video. "" = no intro.
@@ -222,12 +239,17 @@ class StoryVideoPipelineRunner:
         self._save_progress()
 
     def _segment_duration(self) -> int:
-        """Per-clip/unit duration for this library (pre-baked 'full' libraries use 10s units)."""
+        """Per-clip/unit duration for the selected libraries (pre-baked 'full' ones use 10s units).
+
+        A multi-library selection trims to the smallest unit: the concat demuxer
+        writes one ``outpoint`` for every segment, so a longer one would overrun
+        the clips coming from the library built with the shorter unit.
+        """
         if self._seg_dur_cache is None:
-            from src.utils.story_library import library_clip_duration
+            from src.utils.story_library import libraries_clip_duration
 
             default = max(1, int(Config.STORY_CLIP_DURATION))
-            self._seg_dur_cache = max(1, library_clip_duration(self.library_id, default))
+            self._seg_dur_cache = max(1, libraries_clip_duration(self.library_ids, default))
         return self._seg_dur_cache
 
     @staticmethod
@@ -347,7 +369,9 @@ class StoryVideoPipelineRunner:
             clips = self._select_clips(audio_duration)
             self._raise_if_cancel_requested()
             if not clips:
-                library_hint = f" (thu vien: {self.library_id})" if self.library_id else ""
+                library_hint = (
+                    f" (thu vien: {', '.join(self.library_ids)})" if self.library_ids else ""
+                )
                 self._update_progress(
                     "select_clips",
                     15,
@@ -479,39 +503,48 @@ class StoryVideoPipelineRunner:
         logger.error(f"[StoryPipeline:{self.story_id}] Unknown input_type: {self.input_type}")
         return None
 
-    def _select_clips(self, audio_duration: float) -> list[str]:
-        """Select prebuilt story-library clips without re-encoding them."""
-        index = _load_story_library_index(self.library_id)
-        all_clips = index.get("assets", [])
+    def _filter_assets_by_tags(self, all_clips: list[dict]) -> list[dict]:
+        """Narrow one library's assets to the clip-tag/clip-id selection.
 
-        if self.clip_tags:
-            selected_values = {str(value).lower() for value in self.clip_tags}
-            selected_by_id = [
+        Ids and tags only mean something inside the index they came from, so this
+        runs per library: a selection matching nothing in *this* library falls
+        back to all of its clips rather than dropping the library from the pool.
+        """
+        if not self.clip_tags:
+            return all_clips
+
+        selected_values = {str(value).lower() for value in self.clip_tags}
+        filtered = [
+            clip
+            for clip in all_clips
+            if str(clip.get("id", "")).lower() in selected_values
+        ]
+        if not filtered:
+            filtered = [
                 clip
                 for clip in all_clips
-                if str(clip.get("id", "")).lower() in selected_values
+                if any(str(tag).lower() in selected_values for tag in clip.get("tags", []))
             ]
-            filtered = selected_by_id
-            if not filtered:
-                filtered = [
-                    clip
-                    for clip in all_clips
-                    if any(str(tag).lower() in selected_values for tag in clip.get("tags", []))
-                ]
-            if not filtered:
-                logger.warning(
-                    f"[StoryPipeline:{self.story_id}] No clips match selection {self.clip_tags}, using all clips."
-                )
-                filtered = all_clips
-        else:
+        if not filtered:
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] No clips match selection {self.clip_tags}, using all clips."
+            )
             filtered = all_clips
+        return filtered
 
-        valid_clips: list[tuple[str, float]] = []
+    def _library_pool(self, library_id: str) -> list[tuple[str, float]]:
+        """Usable ``(clip_path, duration)`` candidates from a single library."""
+        library_root = story_library_root(library_id)
+        filtered = self._filter_assets_by_tags(
+            _load_story_library_index(library_id).get("assets", [])
+        )
+
+        candidates: list[tuple[str, float]] = []
         for clip in filtered:
             rel_path = clip.get("relative_path", "")
             if not rel_path:
                 continue
-            clip_path = os.path.join(story_library_root(self.library_id), rel_path)
+            clip_path = os.path.join(library_root, rel_path)
             if not os.path.isfile(clip_path):
                 continue
 
@@ -522,29 +555,54 @@ class StoryVideoPipelineRunner:
             if duration <= 0:
                 duration = FFmpegHelper.probe_duration(clip_path)
             if duration > 0:
-                valid_clips.append((clip_path, duration))
+                candidates.append((clip_path, duration))
 
         # Drop clips whose resolution doesn't match the pipeline target: a base
         # concatenated from mismatched clips breaks the CUDA-only overlay filter
         # chain mid-stream (NVDEC hits the parameter change and scale_cuda/
         # overlay_cuda can't reconfigure -> "Function not implemented"). Excluding
         # them here just shrinks the pool the random draw below picks from, so a
-        # different clip is used in its place automatically.
-        valid_clips, excluded_clips = filter_valid_clips(
-            story_library_root(self.library_id), valid_clips
-        )
+        # different clip is used in its place automatically. Run per library: the
+        # probe-spec cache lives in the library's own directory.
+        candidates, excluded_clips = filter_valid_clips(library_root, candidates)
         if excluded_clips:
             logger.warning(
-                f"[StoryPipeline:{self.story_id}] Excluded {len(excluded_clips)} clip(s) with "
+                f"[StoryPipeline:{self.story_id}] [{library_id}] Excluded {len(excluded_clips)} clip(s) with "
                 f"mismatched resolution/pix_fmt/color tags (expected {Config.TARGET_RESOLUTION} "
                 f"{Config.CLIP_EXPECTED_PIX_FMT}/{Config.CLIP_EXPECTED_COLOR_RANGE}/"
                 f"{Config.CLIP_EXPECTED_COLOR_SPACE}): "
                 f"{excluded_clips[:3]}{' ...' if len(excluded_clips) > 3 else ''}"
             )
+        return candidates
+
+    def _select_clips(self, audio_duration: float) -> list[str]:
+        """Select prebuilt story-library clips without re-encoding them.
+
+        Clips from every selected library are merged into ONE pool, so the draw
+        below spreads picks across all of them and only repeats a clip after the
+        whole merged pool has been used.
+        """
+        valid_clips: list[tuple[str, float]] = []
+        per_library_counts: list[str] = []
+        for library_id in self.library_ids:
+            library_clips = self._library_pool(library_id)
+            valid_clips.extend(library_clips)
+            per_library_counts.append(f"{library_id}={len(library_clips)}")
 
         if not valid_clips:
-            logger.error(f"[StoryPipeline:{self.story_id}] No valid clips found in story library.")
+            logger.error(
+                f"[StoryPipeline:{self.story_id}] No valid clips found in story "
+                f"librar{'ies' if len(self.library_ids) > 1 else 'y'} "
+                f"{', '.join(self.library_ids) or '(none)'}."
+            )
             return []
+
+        if len(self.library_ids) > 1:
+            logger.info(
+                f"[StoryPipeline:{self.story_id}] Clip pool merged from "
+                f"{len(self.library_ids)} libraries ({', '.join(per_library_counts)}), "
+                f"total={len(valid_clips)}."
+            )
 
         segment_duration = self._segment_duration()
         min_duration = max(0.5, segment_duration - 0.25)
@@ -558,7 +616,7 @@ class StoryVideoPipelineRunner:
             # whole batch, so a clip repeats only after the entire pool has
             # been used at least once (ceil(picks/pool) cap instead of the
             # unbounded overlap independent shuffles produce).
-            key = SharedClipBag.pool_key(resolve_library_id(self.library_id), self.clip_tags)
+            key = SharedClipBag.pool_key(self.library_ids, self.clip_tags)
             picked: set[str] = set()
             while selected_duration < target_duration:
                 self._raise_if_cancel_requested()
@@ -792,12 +850,22 @@ class StoryVideoPipelineRunner:
 
         Pre-baked "styled" libraries already have the style burned into every
         clip, so the style pass is skipped to avoid double-styling (and to take
-        the much cheaper overlay-only render path).
+        the much cheaper overlay-only render path). `skip_tv_effect` asks for the
+        same cheap path on a library that was never baked. A selection mixing
+        baked and unbaked libraries follows the baked profile: styling the whole
+        video would style the baked clips twice.
         """
         from src.processors.crt_effect_processor import get_tv_effect_filter
-        from src.utils.story_library import is_styled_library
+        from src.utils.story_library import any_styled_library
 
-        if is_styled_library(self.library_id):
+        if self.skip_tv_effect:
+            logger.info(
+                f"[StoryPipeline:{self.story_id}] TV style disabled for this render; "
+                f"skipping the style pass."
+            )
+            return ""
+
+        if any_styled_library(self.library_ids):
             logger.info(
                 f"[StoryPipeline:{self.story_id}] Styled library selected; skipping TV style pass."
             )
@@ -837,6 +905,36 @@ class StoryVideoPipelineRunner:
             and FFmpegHelper.cuda_overlay_available()
         )
 
+    def _resolve_decor_layer(self):
+        """(record, keyed PNG path) for this story's decor image, or None."""
+        if not self.decor_image_id:
+            return None
+        from src.utils.story_decor_images import resolve_decor_image
+
+        resolved = resolve_decor_image(self.decor_image_id)
+        if not resolved:
+            logger.warning(
+                f"[StoryPipeline:{self.story_id}] Decor image {self.decor_image_id} "
+                f"is unusable; rendering without it."
+            )
+        return resolved
+
+    @staticmethod
+    def _overlay_input_indices(tv_noise_paths, decor_path, waveform_path, cta_path) -> dict:
+        """Input slots for the overlay pass, shared by the CPU and GPU commands.
+
+        Order is base, tv-noise..., decor, waveform, cta — the same order both
+        commands add their `-i` flags in, so the filter labels line up whichever
+        path runs."""
+        next_index = 1 + len(tv_noise_paths)
+        indices = {"decor": None, "waveform": None, "cta": None}
+        for key, path in (("decor", decor_path), ("waveform", waveform_path), ("cta", cta_path)):
+            if path:
+                indices[key] = next_index
+                next_index += 1
+        indices["next"] = next_index
+        return indices
+
     def _gpu_overlay_tail(self, chain_label: str, ass_path: str = "") -> str:
         """Closing filter node for a GPU overlay chain.
 
@@ -859,21 +957,26 @@ class StoryVideoPipelineRunner:
         cta_path,
         cta_record,
         *,
+        decor_path=None,
+        decor_record=None,
         ss: float | None = None,
         ass_path: str = "",
         with_audio: bool = True,
     ) -> list:
         """GPU (overlay_cuda) variant of the direct overlay chain.
 
-        Input order mirrors the CPU command (base, tv-noise..., waveform, cta) so the
-        filter input indices line up. Only alpha overlays reach here — screen-blend
-        noise and CPU TV style keep the CPU path (see caller eligibility check).
+        Input order mirrors the CPU command (base, tv-noise..., decor, waveform, cta)
+        so the filter input indices line up. Only alpha overlays reach here —
+        screen-blend noise and CPU TV style keep the CPU path (see caller eligibility
+        check), as does a decor frame that needs a crop (no CUDA crop/pad filter).
 
         For a parallel time-segment, pass `ss` (input seek start), a rebased `ass_path`,
         and `with_audio=False` (audio is muxed back once after concatenation)."""
         from src.utils.story_cta_overlay import overlay_position_expr as cta_position_expr
+        from src.utils.story_decor_images import decor_fit_geometry, decor_input_args
         from src.utils.waveform_overlays import overlay_position_expr
 
+        fps = max(1, int(Config.TARGET_FPS))
         cmd = ["ffmpeg", "-y", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
         if ss is not None:
             cmd.extend(["-ss", str(ss)])
@@ -881,15 +984,18 @@ class StoryVideoPipelineRunner:
         for _record, overlay_path in tv_noise_paths:
             cmd.extend(["-stream_loop", "-1", "-i", overlay_path])
 
-        waveform_input_index = None
+        indices = self._overlay_input_indices(
+            tv_noise_paths, decor_path, waveform_path, cta_path
+        )
+        if decor_path:
+            cmd.extend(decor_input_args(decor_path))
         if waveform_path:
-            waveform_input_index = 1 + len(tv_noise_paths)
             cmd.extend(["-stream_loop", "-1", "-i", waveform_path])
-
-        cta_input_index = None
         if cta_path:
-            cta_input_index = 1 + len(tv_noise_paths) + (1 if waveform_path else 0)
             cmd.extend(["-stream_loop", "-1", "-i", cta_path])
+
+        waveform_input_index = indices["waveform"]
+        cta_input_index = indices["cta"]
 
         filter_parts = ["[0:v]scale_cuda=format=yuv420p[base]"]
         chain_label = "[base]"
@@ -904,6 +1010,33 @@ class StoryVideoPipelineRunner:
                 f"{chain_label}[{noise_label}]overlay_cuda=0:0:eof_action=repeat:eval=init[{out_label}]"
             )
             chain_label = f"[{out_label}]"
+
+        if decor_path and decor_record:
+            geo = decor_fit_geometry(decor_record)
+            # The canvas the shrunk video lands on is a `split` of the chain, NOT a
+            # black lavfi source pushed through hwupload_cuda. An uploaded source
+            # carries its own CUDA hw frames context, and when a colour-tag change
+            # between two concatenated library clips forces a mid-render filter
+            # reconfigure, ffmpeg cannot bridge the two contexts: it tries to insert
+            # a software auto_scale into the overlay_cuda overlay pad and the whole
+            # GPU pass dies ("Impossible to convert ... Error reinitializing
+            # filters!"), silently dropping the render onto the ~3x slower CPU
+            # chain. Splitting keeps one context, so the reconfigure survives.
+            filter_parts.append(
+                f"[{indices['decor']}:v]setpts=PTS-STARTPTS,format=yuva420p,hwupload_cuda[decorimg]"
+            )
+            filter_parts.append(f"{chain_label}split=2[decorbg][decorsrc]")
+            filter_parts.append(
+                f"[decorsrc]scale_cuda={geo['fitW']}:{geo['fitH']}:format=yuv420p[decorfit]"
+            )
+            filter_parts.append(
+                f"[decorbg][decorfit]overlay_cuda={geo['fitX']}:{geo['fitY']}:eval=init[decorframed]"
+            )
+            filter_parts.append(
+                "[decorframed][decorimg]"
+                "overlay_cuda=0:0:eof_action=repeat:eval=init[decorout]"
+            )
+            chain_label = "[decorout]"
 
         if waveform_path and waveform_record and waveform_input_index is not None:
             x_expr, y_expr = overlay_position_expr(waveform_record)
@@ -952,6 +1085,8 @@ class StoryVideoPipelineRunner:
         cta_path,
         cta_record,
         segments: int,
+        decor_path=None,
+        decor_record=None,
     ) -> str | None:
         """Run the GPU overlay+subtitle pass as N parallel time-segments, then concat.
 
@@ -975,6 +1110,7 @@ class StoryVideoPipelineRunner:
                 self._build_story_overlays_gpu_cmd(
                     current_video, seg_out, dur,
                     tv_noise_paths, waveform_path, waveform_record, cta_path, cta_record,
+                    decor_path=decor_path, decor_record=decor_record,
                     ss=start, ass_path=seg_ass, with_audio=False,
                 )
             )
@@ -1044,11 +1180,19 @@ class StoryVideoPipelineRunner:
 
     def _apply_story_overlays(self, current_video: str, audio_duration: float) -> str | None:
         """Overlay TV noise layers and the configured waveform in a single FFmpeg pass."""
-        from src.utils.story_library import is_fully_baked_library
+        from src.utils.story_library import any_fully_baked_library
+
+        decor_layer = self._resolve_decor_layer()
+        decor_record, decor_path = decor_layer if decor_layer else (None, None)
 
         # Fully-baked libraries already have style + waveform + CTA burned into the
         # clips, so the only remaining work is subtitle burn-in (the fastest path).
-        if is_fully_baked_library(self.library_id):
+        # A selection mixing one in follows the same path — overlaying again would
+        # stack a second waveform/CTA on the baked clips.
+        # A decor frame has to composite, so it cannot take that shortcut — and the
+        # baked-in waveform/CTA would end up shrunk inside the screen, which is why
+        # the route rejects the combination before we ever get here.
+        if any_fully_baked_library(self.library_ids) and not decor_path:
             if self._subtitle_ass_path:
                 logger.info(
                     f"[StoryPipeline:{self.story_id}] Fully-baked library; subtitle-only pass."
@@ -1061,6 +1205,7 @@ class StoryVideoPipelineRunner:
 
         from src.utils.story_cta_overlay import (
             get_active_cta_overlay,
+            get_cta_overlay,
             overlay_position_expr as cta_position_expr,
             processed_abs_path as cta_processed_abs_path,
         )
@@ -1072,20 +1217,14 @@ class StoryVideoPipelineRunner:
         )
         from src.utils.waveform_overlays import (
             get_default_waveform_overlay,
-            load_waveform_index,
+            get_waveform_overlay,
             overlay_position_expr,
             processed_abs_path as waveform_processed_abs_path,
         )
 
         tv_noise_records = get_active_tv_noise_overlays()
 
-        waveform_record = None
-        if self.waveform_overlay_id:
-            waveform_records = load_waveform_index().get("overlays", [])
-            waveform_record = next(
-                (item for item in waveform_records if item.get("id") == self.waveform_overlay_id),
-                None,
-            )
+        waveform_record = get_waveform_overlay(self.waveform_overlay_id)
         if not waveform_record:
             waveform_record = get_default_waveform_overlay()
 
@@ -1094,7 +1233,11 @@ class StoryVideoPipelineRunner:
             logger.warning(f"[StoryPipeline:{self.story_id}] Waveform processed file is missing.")
             waveform_record = None
 
-        cta_record = get_active_cta_overlay()
+        # Batch gan CTA cho tung video theo vong xoay; id khong tra cuu duoc thi
+        # ve lai CTA dang bat o trang cau hinh, giong cach waveform xu ly o tren.
+        cta_record = get_cta_overlay(self.cta_overlay_id)
+        if not cta_record:
+            cta_record = get_active_cta_overlay()
         cta_path = cta_processed_abs_path(cta_record) if cta_record else None
         if cta_record and not cta_path:
             logger.warning(f"[StoryPipeline:{self.story_id}] CTA processed file is missing.")
@@ -1108,7 +1251,7 @@ class StoryVideoPipelineRunner:
 
         style_filter = self._tv_effect_filter()
 
-        if not tv_noise_paths and not waveform_path and not cta_path:
+        if not tv_noise_paths and not waveform_path and not cta_path and not decor_path:
             if style_filter:
                 return self._apply_tv_effect_only(current_video, audio_duration, style_filter)
             if self._subtitle_ass_path:
@@ -1125,8 +1268,11 @@ class StoryVideoPipelineRunner:
         has_screen_noise = any(
             overlay_blend_mode(record) == "screen" for record, _path in tv_noise_paths
         )
+        # A decor frame splits the stack in two — noise belongs inside the screen,
+        # waveform/CTA outside on the photo — so the single premerged alpha pack no
+        # longer describes it. Direct chain only.
         pack_path = None
-        if tv_noise_paths and not has_screen_noise:
+        if tv_noise_paths and not has_screen_noise and not decor_path:
             pack_path = get_or_create_story_overlay_pack(
                 tv_noise_paths,
                 waveform_record if waveform_path else None,
@@ -1155,15 +1301,20 @@ class StoryVideoPipelineRunner:
         for _record, overlay_path in tv_noise_paths:
             cmd.extend(["-stream_loop", "-1", "-i", overlay_path])
 
-        waveform_input_index = None
-        if waveform_path:
-            waveform_input_index = 1 + len(tv_noise_paths)
-            cmd.extend(["-stream_loop", "-1", "-i", waveform_path])
+        indices = self._overlay_input_indices(
+            tv_noise_paths, decor_path, waveform_path, cta_path
+        )
+        if decor_path:
+            from src.utils.story_decor_images import decor_input_args
 
-        cta_input_index = None
+            cmd.extend(decor_input_args(decor_path))
+        if waveform_path:
+            cmd.extend(["-stream_loop", "-1", "-i", waveform_path])
         if cta_path:
-            cta_input_index = 1 + len(tv_noise_paths) + (1 if waveform_path else 0)
             cmd.extend(["-stream_loop", "-1", "-i", cta_path])
+
+        waveform_input_index = indices["waveform"]
+        cta_input_index = indices["cta"]
 
         filter_parts: list[str] = []
         chain_label = "[0:v]"
@@ -1194,6 +1345,16 @@ class StoryVideoPipelineRunner:
                     f"{chain_label}[{noise_label}]overlay=0:0:format=auto:eof_action=repeat:eval=init[{out_label}]"
                 )
             chain_label = f"[{out_label}]"
+
+        # Decor sits between the two halves of the stack: everything above lands
+        # inside the screen, everything below goes on top of the photo.
+        if decor_path and decor_record and indices["decor"] is not None:
+            from src.utils.story_decor_images import decor_filter_parts
+
+            decor_parts, chain_label = decor_filter_parts(
+                chain_label, decor_record, indices["decor"]
+            )
+            filter_parts.extend(decor_parts)
 
         if waveform_path and waveform_record and waveform_input_index is not None:
             x_expr, y_expr = overlay_position_expr(waveform_record)
@@ -1240,10 +1401,24 @@ class StoryVideoPipelineRunner:
                 "Dang ap dung TV noise va song am...",
             )
 
+        # A decor frame whose rectangle isn't the source aspect needs crop+pad, and
+        # neither has a CUDA counterpart — that case stays on the CPU chain.
+        decor_gpu_ok = True
+        if decor_record:
+            from src.utils.story_decor_images import decor_fit_geometry
+
+            decor_gpu_ok = not decor_fit_geometry(decor_record)["needsCrop"]
+            if not decor_gpu_ok:
+                logger.info(
+                    f"[StoryPipeline:{self.story_id}] Decor frame is off-aspect "
+                    f"(needs crop); using the CPU overlay chain."
+                )
+
         use_gpu = (
             self._gpu_overlay_enabled()
             and not has_screen_noise
             and not style_filter
+            and decor_gpu_ok
         )
         ok = False
 
@@ -1265,6 +1440,8 @@ class StoryVideoPipelineRunner:
                 cta_path,
                 cta_record,
                 segments,
+                decor_path=decor_path,
+                decor_record=decor_record,
             )
             if seg_output and os.path.isfile(seg_output):
                 return seg_output
@@ -1281,6 +1458,8 @@ class StoryVideoPipelineRunner:
                 waveform_record,
                 cta_path,
                 cta_record,
+                decor_path=decor_path,
+                decor_record=decor_record,
             )
             logger.info(
                 f"[StoryPipeline:{self.story_id}] Applying story overlays on GPU (overlay_cuda)."
@@ -1640,7 +1819,7 @@ class StoryVideoPipelineRunner:
         copy_cmd = [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0", "-i", concat_file,
-            "-c", "copy",
+            "-c", "copy", "-movflags", "+faststart",
             copy_out,
         ]
         ok = FFmpegHelper.run_command(
@@ -1668,6 +1847,7 @@ class StoryVideoPipelineRunner:
         reencode_cmd.extend(FFmpegHelper.get_nvenc_flags())
         reencode_cmd.extend([
             "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k",
+            "-movflags", "+faststart",
             reencode_out,
         ])
         ok = FFmpegHelper.run_command(

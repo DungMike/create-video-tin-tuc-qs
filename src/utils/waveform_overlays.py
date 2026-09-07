@@ -12,6 +12,12 @@ from werkzeug.utils import secure_filename
 from src.config import Config
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.logger import logger
+from src.utils.overlay_placement import (
+    apply_placement_updates,
+    corner_expr,
+    placement_expr,
+    probe_overlay_size,
+)
 
 
 def _index_path() -> str:
@@ -48,20 +54,15 @@ def _absolute(filename: str) -> str:
 
 
 def _position_expr(position: str, margin: int) -> tuple[str, str]:
-    safe_margin = max(0, int(margin))
-    if position == "top_left":
-        return str(safe_margin), str(safe_margin)
-    if position == "top_right":
-        return f"W-w-{safe_margin}", str(safe_margin)
-    if position == "bottom_left":
-        return str(safe_margin), f"H-h-{safe_margin}"
-    return f"W-w-{safe_margin}", f"H-h-{safe_margin}"
+    return corner_expr(position, margin)
 
 
 def overlay_position_expr(record: dict) -> tuple[str, str]:
-    return _position_expr(
-        str(record.get("position") or Config.WAVEFORM_OVERLAY_POSITION),
-        int(record.get("margin") or Config.WAVEFORM_OVERLAY_MARGIN),
+    """Where this waveform sits: free x/y when set, else the legacy corner."""
+    return placement_expr(
+        record,
+        default_position=Config.WAVEFORM_OVERLAY_POSITION,
+        default_margin=Config.WAVEFORM_OVERLAY_MARGIN,
     )
 
 
@@ -80,6 +81,28 @@ def get_default_waveform_overlay() -> dict | None:
         return None
     default = next((item for item in valid if item.get("isDefault")), None)
     return default or valid[0]
+
+
+def get_waveform_overlay(overlay_id: str) -> dict | None:
+    """Ban ghi waveform theo id, chi tra ve khi file alpha da xu ly con ton tai."""
+    wanted = str(overlay_id or "").strip()
+    if not wanted:
+        return None
+    overlays = load_waveform_index().get("overlays", [])
+    record = next((item for item in overlays if item.get("id") == wanted), None)
+    return record if record and processed_abs_path(record) else None
+
+
+def build_waveform_rotation(overlay_ids: list[str], count: int) -> list[str]:
+    """Chia cac song am da chon cho ``count`` video (bo bai xao).
+
+    Cac id khong tra cuu duoc (da xoa, chua xu ly xong) bi loai truoc khi chia,
+    dung nhu :func:`src.utils.story_decor_images.build_decor_rotation`.
+    """
+    from src.utils.asset_rotation import deal_rotation
+
+    usable = [overlay_id for overlay_id in overlay_ids if get_waveform_overlay(overlay_id)]
+    return deal_rotation(usable, count)
 
 
 def preprocess_waveform_overlay(source_path: str, record: dict) -> str:
@@ -115,6 +138,14 @@ def preprocess_waveform_overlay(source_path: str, record: dict) -> str:
         raise RuntimeError("FFmpeg failed to preprocess waveform overlay.")
     if not os.path.isfile(output_path):
         raise RuntimeError("Processed waveform overlay was not created.")
+
+    # `scale={width}:-2` means the height is only known now. Record it so the
+    # placement editor can draw the overlay at its true size and free
+    # coordinates can be clamped against it.
+    size = probe_overlay_size(output_path)
+    if size:
+        record["processedWidth"], record["processedHeight"] = size
+
     return processed_filename
 
 
@@ -172,10 +203,6 @@ def update_waveform_overlay(overlay_id: str, updates: dict) -> dict | None:
             record[key] = updates[key]
             regenerate = True
 
-    for key in ("position", "margin"):
-        if key in updates and updates[key] is not None:
-            record[key] = updates[key]
-
     if updates.get("isDefault") is True:
         for item in overlays:
             item["isDefault"] = item.get("id") == overlay_id
@@ -193,6 +220,10 @@ def update_waveform_overlay(overlay_id: str, updates: dict) -> dict | None:
                 os.remove(_absolute(str(old_processed)))
             except OSError:
                 pass
+
+    # After any re-encode: a new scaleWidth changes the overlay's size, and the
+    # coordinates are clamped against that size.
+    apply_placement_updates(record, updates)
 
     record["updatedAt"] = datetime.now().isoformat()
     save_waveform_index(index)

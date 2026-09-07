@@ -1,41 +1,72 @@
-import { Check, Eye, Link as LinkIcon, Loader2, Save, Sparkles, Star, Trash2, Upload } from "lucide-react";
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { Check, Eye, Link as LinkIcon, Loader2, Pencil, Save, Sparkles, Star, Trash2, Upload, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
 import { EmptyCard } from "@/components/empty-card";
 import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
+import { StoryDecorFrameEditor } from "@/components/StoryDecorFrameEditor";
+import { StoryOverlayPlacementEditor } from "@/components/StoryOverlayPlacementEditor";
 import { StoryLibraryManager } from "@/components/StoryLibraryManager";
 import { StoryLibraryNormalizePanel } from "@/components/StoryLibraryNormalizePanel";
 import { TopNav } from "@/components/top-nav";
+import {
+  cornerToPlacement,
+  type OverlayCorner,
+  type PlacementBox,
+} from "@/lib/overlayPlacement";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   ApiError,
+  createSparkleOverlay,
   deleteCtaOverlay,
+  deleteDecorImage,
+  deleteEffectPreviewSource,
   deleteTVNoiseOverlay,
   deleteWaveformOverlay,
   generateCustomTVEffectPreview,
   generateTVEffectStylePreview,
   generateTVNoiseDemo,
+  detectDecorFrame,
   getCtaOverlays,
+  getDecorImages,
   getTVEffectStyles,
   getTVNoiseOverlayJob,
+  getEffectPreviewJob,
+  getEffectPreviewSources,
   getTVNoiseOverlays,
+  getSparklePresets,
   getWaveformOverlays,
   importTVNoiseOverlayFromYoutube,
+  renameDecorGroup,
+  renderDecorFramePreview,
+  renderEffectPreview,
   saveCustomTVEffect,
   selectTVEffectStyle,
   updateCtaOverlay,
+  updateDecorImage,
   updateTVNoiseOverlay,
   updateWaveformOverlay,
   uploadCtaOverlay,
+  uploadDecorImage,
+  uploadEffectPreviewSource,
   uploadTVNoiseOverlay,
   uploadWaveformOverlay,
 } from "@/lib/api";
-import type { CtaOverlay, TVEffectParams, TVEffectStyle, TVEffectTone, TVNoiseOverlay, WaveformOverlay } from "@/types/api";
+import type {
+  CtaOverlay,
+  EffectPreviewSource,
+  SparklePreset,
+  StoryDecorImage,
+  TVEffectParams,
+  TVEffectStyle,
+  TVEffectTone,
+  TVNoiseOverlay,
+  WaveformOverlay,
+} from "@/types/api";
 
 const DEFAULT_EFFECT_PARAMS: TVEffectParams = {
   tone: "none",
@@ -50,6 +81,9 @@ const DEFAULT_EFFECT_PARAMS: TVEffectParams = {
   flicker: 0,
   flickerSpeed: 3,
   soften: 0,
+  bloom: 0,
+  bloomThreshold: 0.75,
+  bloomRadius: 0.5,
 };
 
 const TONE_OPTIONS: { value: TVEffectTone; label: string }[] = [
@@ -76,6 +110,9 @@ const EFFECT_PARAM_FIELDS: { key: EffectNumericKey; label: string; min: number; 
   { key: "flicker", label: "Độ nháy sáng", min: 0, max: 0.08, step: 0.005 },
   { key: "flickerSpeed", label: "Tốc độ nháy (Hz)", min: 0.5, max: 15, step: 0.5 },
   { key: "soften", label: "Làm mềm", min: 0, max: 1, step: 0.05 },
+  { key: "bloom", label: "Bloom (toả sáng)", min: 0, max: 1, step: 0.05 },
+  { key: "bloomThreshold", label: "Ngưỡng bloom", min: 0.5, max: 0.95, step: 0.01 },
+  { key: "bloomRadius", label: "Bán kính bloom", min: 0, max: 1, step: 0.05 },
 ];
 
 type EffectForm = Record<EffectNumericKey, string> & { tone: TVEffectTone };
@@ -104,6 +141,9 @@ type WaveformForm = {
   scaleWidth: string;
   position: NonNullable<WaveformOverlay["position"]>;
   margin: string;
+  /** Free coordinates in frame px; "" while the overlay is still on a corner preset. */
+  x: string;
+  y: string;
 };
 
 const DEFAULT_FORM: WaveformForm = {
@@ -113,6 +153,8 @@ const DEFAULT_FORM: WaveformForm = {
   scaleWidth: "420",
   position: "bottom_right",
   margin: "15",
+  x: "",
+  y: "",
 };
 
 type TVNoiseForm = {
@@ -121,6 +163,7 @@ type TVNoiseForm = {
   opacity: string;
   tolerance: string;
   softness: string;
+  lumaGain: string;
   order: string;
 };
 
@@ -130,8 +173,40 @@ const DEFAULT_NOISE_FORM: TVNoiseForm = {
   opacity: "0.35",
   tolerance: "0.08",
   softness: "0.02",
+  lumaGain: "2",
   order: "1",
 };
+
+const BLEND_MODE_HINTS: Record<NonNullable<TVNoiseOverlay["blendMode"]>, string> = {
+  alpha:
+    "Alpha: key nen den thanh trong suot bang lumakey. Hop nhieu TV, bui film. Tolerance/Softness dieu khien nguong key.",
+  screen:
+    "Screen: cong sang luc render, khong can alpha. Hop light leak, bokeh. Luu y: che do nay ep pass overlay ve CPU.",
+  luma:
+    "Luma: alpha lay tu chinh do sang cua nguon, mau day ve trang. Hop lop lap lanh — quang sang tan dan thay vi bi bet.",
+};
+
+const SPARKLE_PARAM_LABELS: Record<string, string> = {
+  density: "Mật độ hạt",
+  twinkle: "Nhấp nháy chậm",
+  size: "Kích thước hạt",
+  gain: "Độ sáng",
+  spike: "Độ dài tia",
+  sweepSpeed: "Tốc độ quét (px/s)",
+  sweepAngle: "Góc nghiêng (rad)",
+  sweepWidth: "Bề rộng vệt",
+  sweepGain: "Độ sáng vệt",
+  tintR: "Ám màu · Đỏ",
+  tintG: "Ám màu · Lục",
+  tintB: "Ám màu · Lam",
+  loopSeconds: "Độ dài loop (giây)",
+};
+
+function paramsToForm(preset: SparklePreset): Record<string, string> {
+  const form: Record<string, string> = {};
+  for (const key of preset.paramsUsed) form[key] = String(preset.params[key] ?? 0);
+  return form;
+}
 
 function formFromOverlay(overlay?: WaveformOverlay): WaveformForm {
   if (!overlay) return DEFAULT_FORM;
@@ -142,6 +217,8 @@ function formFromOverlay(overlay?: WaveformOverlay): WaveformForm {
     scaleWidth: String(overlay.scaleWidth ?? DEFAULT_FORM.scaleWidth),
     position: overlay.position ?? DEFAULT_FORM.position,
     margin: String(overlay.margin ?? DEFAULT_FORM.margin),
+    x: overlay.x == null ? "" : String(overlay.x),
+    y: overlay.y == null ? "" : String(overlay.y),
   };
 }
 
@@ -153,6 +230,9 @@ type CtaForm = {
   scaleWidth: string;
   position: NonNullable<CtaOverlay["position"]>;
   margin: string;
+  /** Free coordinates in frame px; "" while the overlay is still on a corner preset. */
+  x: string;
+  y: string;
 };
 
 const DEFAULT_CTA_FORM: CtaForm = {
@@ -163,6 +243,8 @@ const DEFAULT_CTA_FORM: CtaForm = {
   scaleWidth: "360",
   position: "top_left",
   margin: "24",
+  x: "",
+  y: "",
 };
 
 function ctaFormFromOverlay(overlay?: CtaOverlay): CtaForm {
@@ -175,88 +257,81 @@ function ctaFormFromOverlay(overlay?: CtaOverlay): CtaForm {
     scaleWidth: String(overlay.scaleWidth ?? DEFAULT_CTA_FORM.scaleWidth),
     position: overlay.position ?? DEFAULT_CTA_FORM.position,
     margin: String(overlay.margin ?? DEFAULT_CTA_FORM.margin),
+    x: overlay.x == null ? "" : String(overlay.x),
+    y: overlay.y == null ? "" : String(overlay.y),
   };
 }
 
 // ---------------------------------------------------------------------------
-// Visual position preview: mirrors backend _position_expr (margin px on a
-// 1920x1080 frame; overlay height is an estimate since ffmpeg scales it W:-2).
+// Placement boxes for the drag editor. The overlay's true size comes from the
+// processed alpha MOV; until that has been probed (older uploads) the height is
+// estimated from the Width being typed, which is also what keeps the box
+// resizing live while the user edits that field.
 // ---------------------------------------------------------------------------
-const PREVIEW_FRAME_W = 1920;
-const PREVIEW_FRAME_H = 1080;
+const WAVEFORM_HEIGHT_RATIO = 0.3;
+const CTA_HEIGHT_RATIO = 0.6;
 
-type OverlayCorner = NonNullable<WaveformOverlay["position"]>;
+type PlacementFields = { position: OverlayCorner; margin: string; x: string; y: string };
 
-interface OverlayPreviewBox {
-  label: string;
-  position: OverlayCorner;
-  margin: number;
-  scaleWidth: number;
-  heightRatio: number;
-  className: string;
-  active?: boolean;
+/** A form's coordinates, or null while it is still on a corner preset. */
+function formCoord(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? Math.round(parsed) : null;
 }
 
-function overlayPreviewBoxStyle(box: OverlayPreviewBox): CSSProperties {
-  const widthPct = Math.max(2, Math.min(90, (box.scaleWidth / PREVIEW_FRAME_W) * 100));
-  const heightPct = Math.max(2, Math.min(90, ((box.scaleWidth * box.heightRatio) / PREVIEW_FRAME_H) * 100));
-  const xPct = Math.min(90, (box.margin / PREVIEW_FRAME_W) * 100);
-  const yPct = Math.min(90, (box.margin / PREVIEW_FRAME_H) * 100);
-  const style: CSSProperties = { width: `${widthPct}%`, height: `${heightPct}%` };
-  if (box.position === "top_left" || box.position === "top_right") style.top = `${yPct}%`;
-  else style.bottom = `${yPct}%`;
-  if (box.position === "top_left" || box.position === "bottom_left") style.left = `${xPct}%`;
-  else style.right = `${xPct}%`;
-  return style;
+/**
+ * Type one axis of a free placement.
+ *
+ * Editing X alone has to pin Y too, otherwise a half-set placement would fall
+ * back to the corner on the backend — so the untouched axis takes the corner it
+ * was already sitting on, which is where the user sees the overlay right now.
+ * Nothing is clamped here: rounding mid-keystroke would turn "700" into "600"
+ * as the digits arrive. The backend clamps what it stores, and the value comes
+ * back corrected on save.
+ */
+function moveTo<T extends PlacementFields>(form: T, box: PlacementBox, axis: "x" | "y", value: string): T {
+  if (value.trim() === "") return { ...form, x: "", y: "" };
+  const other = axis === "x" ? "y" : "x";
+  if (formCoord(form[other]) !== null) return { ...form, [axis]: value };
+
+  const corner = cornerToPlacement(form.position, Number(form.margin) || 0, box.width, box.height);
+  return { ...form, [axis]: value, [other]: String(corner[other]) };
 }
 
-const OVERLAY_PREVIEW_CORNERS: { corner: OverlayCorner; className: string }[] = [
-  { corner: "top_left", className: "left-1 top-1" },
-  { corner: "top_right", className: "right-1 top-1" },
-  { corner: "bottom_left", className: "bottom-1 left-1" },
-  { corner: "bottom_right", className: "bottom-1 right-1" },
-];
+function placementLabel(overlay: WaveformOverlay | CtaOverlay, fallback: OverlayCorner): string {
+  if (typeof overlay.x === "number" && typeof overlay.y === "number") {
+    return `${overlay.x}, ${overlay.y}`;
+  }
+  return overlay.position ?? fallback;
+}
 
-function OverlayPositionPreview({
-  boxes,
-  onPickCorner,
-}: {
-  boxes: OverlayPreviewBox[];
-  onPickCorner: (corner: OverlayCorner) => void;
-}) {
-  const active = boxes.find((box) => box.active);
-  return (
-    <div className="grid gap-1">
-      <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-border/70 bg-zinc-800">
-        <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500">Khung video 16:9</div>
-        {boxes.map((box) => (
-          <div
-            key={box.label}
-            style={overlayPreviewBoxStyle(box)}
-            className={`absolute flex items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-medium text-white/90 ${box.className} ${
-              box.active ? "z-10" : "opacity-50"
-            }`}
-          >
-            <span className="truncate">{box.label}</span>
-          </div>
-        ))}
-        {OVERLAY_PREVIEW_CORNERS.map(({ corner, className }) => (
-          <button
-            key={corner}
-            type="button"
-            title={`Chuyển "${active?.label ?? "overlay"}" về góc này`}
-            onClick={() => onPickCorner(corner)}
-            className={`absolute z-20 size-5 rounded border border-dashed ${className} ${
-              active?.position === corner ? "border-primary bg-primary/50" : "border-white/40 bg-white/10 hover:bg-white/30"
-            }`}
-          />
-        ))}
-      </div>
-      <p className="text-xs text-muted-foreground">
-        Mô phỏng vị trí theo Position / Margin / Width đang nhập (khung 1920×1080). Bấm ô vuông ở góc để đổi vị trí.
-      </p>
-    </div>
-  );
+function placementBox(
+  label: string,
+  form: PlacementFields & { scaleWidth: string },
+  overlay: WaveformOverlay | CtaOverlay | undefined,
+  fallback: { width: number; heightRatio: number },
+  className: string,
+  active: boolean,
+): PlacementBox {
+  const width = Number(form.scaleWidth) || fallback.width;
+  const aspect =
+    overlay?.processedWidth && overlay?.processedHeight
+      ? overlay.processedHeight / overlay.processedWidth
+      : fallback.heightRatio;
+  return {
+    label,
+    x: formCoord(form.x),
+    y: formCoord(form.y),
+    position: form.position,
+    margin: Number(form.margin) || 0,
+    width,
+    height: Math.round(width * aspect),
+    previewPath: overlay?.processedRelativePath,
+    className,
+    active,
+  };
 }
 
 function formFromNoiseOverlay(overlay?: TVNoiseOverlay): TVNoiseForm {
@@ -267,9 +342,17 @@ function formFromNoiseOverlay(overlay?: TVNoiseOverlay): TVNoiseForm {
     opacity: String(overlay.opacity ?? DEFAULT_NOISE_FORM.opacity),
     tolerance: String(overlay.tolerance ?? DEFAULT_NOISE_FORM.tolerance),
     softness: String(overlay.softness ?? DEFAULT_NOISE_FORM.softness),
+    lumaGain: String(overlay.lumaGain ?? DEFAULT_NOISE_FORM.lumaGain),
     order: String(overlay.order ?? DEFAULT_NOISE_FORM.order),
   };
 }
+
+// Nhan cho anh decor chua duoc xep vao chu de nao.
+const DECOR_UNGROUPED = "Chưa phân nhóm";
+// Gia tri sentinel trong <select>: chon no se mo o nhap ten nhom moi.
+const DECOR_NEW_GROUP = "__new_group__";
+
+const decorGroupOf = (item: StoryDecorImage) => (item.group ?? "").trim();
 
 export function StoryVideoSettingsPage() {
   const [overlays, setOverlays] = useState<WaveformOverlay[]>([]);
@@ -281,6 +364,18 @@ export function StoryVideoSettingsPage() {
   const [isCtaUploading, setIsCtaUploading] = useState(false);
   const [isCtaSaving, setIsCtaSaving] = useState(false);
   const [ctaPreviewBust, setCtaPreviewBust] = useState(0);
+  const [decorImages, setDecorImages] = useState<StoryDecorImage[]>([]);
+  const [selectedDecorId, setSelectedDecorId] = useState("");
+  const [isDecorUploading, setIsDecorUploading] = useState(false);
+  const [isDecorSaving, setIsDecorSaving] = useState(false);
+  const [decorPreviewPath, setDecorPreviewPath] = useState<string | null>(null);
+  const [isDecorPreviewLoading, setIsDecorPreviewLoading] = useState(false);
+  // null = xem tat ca nhom; "" = nhom "chua phan nhom".
+  const [decorGroupFilter, setDecorGroupFilter] = useState<string | null>(null);
+  const [decorUploadGroup, setDecorUploadGroup] = useState("");
+  const [decorGroupEdit, setDecorGroupEdit] = useState<{ from: string; value: string } | null>(null);
+  const [decorGroupInputFor, setDecorGroupInputFor] = useState<string | null>(null);
+  const [decorGroupBusy, setDecorGroupBusy] = useState(false);
   const [tvNoiseOverlays, setTvNoiseOverlays] = useState<TVNoiseOverlay[]>([]);
   const [selectedNoiseId, setSelectedNoiseId] = useState("");
   const [noiseForm, setNoiseForm] = useState<TVNoiseForm>(DEFAULT_NOISE_FORM);
@@ -288,6 +383,26 @@ export function StoryVideoSettingsPage() {
   const [noiseJobId, setNoiseJobId] = useState<string | null>(null);
   const [noiseJobMessage, setNoiseJobMessage] = useState<string | null>(null);
   const [noiseDemoSrc, setNoiseDemoSrc] = useState<string | null>(null);
+  const [sparklePresets, setSparklePresets] = useState<SparklePreset[]>([]);
+  const [sparklePresetId, setSparklePresetId] = useState("");
+  const [sparkleParams, setSparkleParams] = useState<Record<string, string>>({});
+  // Ten rieng cho tung bien the: khong co no thi moi lop tao tu cung mot preset
+  // deu mang dung mot ten, khong the phan biet cac mau da luu.
+  const [sparkleName, setSparkleName] = useState("");
+  const [isSparkleCreating, setIsSparkleCreating] = useState(false);
+  const [previewSources, setPreviewSources] = useState<EffectPreviewSource[]>([]);
+  const [selectedPreviewId, setSelectedPreviewId] = useState("");
+  const [isPreviewUploading, setIsPreviewUploading] = useState(false);
+  const [isPreviewRendering, setIsPreviewRendering] = useState(false);
+  const [previewJobId, setPreviewJobId] = useState<string | null>(null);
+  const [previewMessage, setPreviewMessage] = useState<string | null>(null);
+  const [previewDecorId, setPreviewDecorId] = useState("");
+  const [previewOptions, setPreviewOptions] = useState({
+    includeStyle: true,
+    includeOverlays: true,
+    compare: true,
+    maxSeconds: "15",
+  });
   const [tvEffectStyles, setTvEffectStyles] = useState<TVEffectStyle[]>([]);
   const [selectedEffectId, setSelectedEffectId] = useState("none");
   const [previewingEffectId, setPreviewingEffectId] = useState<string | null>(null);
@@ -318,6 +433,72 @@ export function StoryVideoSettingsPage() {
     () => ctaOverlays.find((overlay) => overlay.id === selectedCtaId) ?? ctaOverlays.find((overlay) => overlay.isDefault) ?? ctaOverlays[0],
     [ctaOverlays, selectedCtaId],
   );
+  const selectedDecor = useMemo(
+    () => decorImages.find((item) => item.id === selectedDecorId) ?? decorImages[0],
+    [decorImages, selectedDecorId],
+  );
+
+  // Anh decor duoc gom theo chu de ("Den chua", "Lang que", "Dieu tra pha an"...)
+  // vi moi loai video chi dung dung mot bo khung. Nhom nam ngay tren record nen
+  // danh sach nhom luon khop voi anh dang hien thi.
+  const decorGroups = useMemo(() => {
+    const seen: string[] = [];
+    for (const item of decorImages) {
+      const group = decorGroupOf(item);
+      if (!seen.includes(group)) seen.push(group);
+    }
+    // "Chua phan nhom" luon xuong cuoi du no xuat hien som.
+    return seen.sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b, "vi")));
+  }, [decorImages]);
+
+  const decorByGroup = useMemo(
+    () =>
+      decorGroups.map((group) => ({
+        group,
+        items: decorImages.filter((item) => decorGroupOf(item) === group),
+      })),
+    [decorGroups, decorImages],
+  );
+
+  const visibleDecorGroups = useMemo(
+    () =>
+      decorGroupFilter === null
+        ? decorByGroup
+        : decorByGroup.filter((entry) => entry.group === decorGroupFilter),
+    [decorByGroup, decorGroupFilter],
+  );
+
+  // Both overlay sections show the same two boxes, differing only in which one
+  // is being dragged — so each section renders the pair with `active` swapped.
+  const waveformBox = (active: boolean) =>
+    placementBox(
+      "Sóng âm",
+      form,
+      selected,
+      { width: 420, heightRatio: WAVEFORM_HEIGHT_RATIO },
+      "border-sky-300 bg-sky-500/70",
+      active,
+    );
+  const ctaBox = (active: boolean) =>
+    placementBox(
+      ctaForm.enabled ? "CTA" : "CTA (tắt)",
+      ctaForm,
+      selectedCta,
+      { width: 360, heightRatio: CTA_HEIGHT_RATIO },
+      "border-orange-300 bg-orange-500/60",
+      active,
+    );
+
+  const selectedPreviewSource = useMemo(
+    () => previewSources.find((item) => item.id === selectedPreviewId) ?? previewSources[0],
+    [previewSources, selectedPreviewId],
+  );
+
+  const selectedSparklePreset = useMemo(
+    () => sparklePresets.find((preset) => preset.id === sparklePresetId),
+    [sparklePresets, sparklePresetId],
+  );
+
   const selectedNoise = useMemo(
     () => tvNoiseOverlays.find((overlay) => overlay.id === selectedNoiseId) ?? tvNoiseOverlays[0],
     [tvNoiseOverlays, selectedNoiseId],
@@ -353,6 +534,34 @@ export function StoryVideoSettingsPage() {
       .catch((err) => setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai TV noise overlay."));
   };
 
+  const loadPreviewSources = () => {
+    return getEffectPreviewSources()
+      .then((res) => {
+        setPreviewSources(res.sources);
+        setSelectedPreviewId((current) => current || (res.sources[0]?.id ?? ""));
+      })
+      .catch(() => {
+        /* Optional feature: never block the settings page on it. */
+      });
+  };
+
+  const loadSparklePresets = () => {
+    return getSparklePresets()
+      .then((res) => {
+        setSparklePresets(res.presets);
+        const first = res.presets[0];
+        if (first) {
+          setSparklePresetId((current) => current || first.id);
+          setSparkleParams((current) =>
+            Object.keys(current).length ? current : paramsToForm(first),
+          );
+        }
+      })
+      .catch(() => {
+        /* Sparkle is optional: a failure here must not block the settings page. */
+      });
+  };
+
   const loadTVEffectStyles = () => {
     return getTVEffectStyles()
       .then((res) => {
@@ -364,12 +573,269 @@ export function StoryVideoSettingsPage() {
       .catch((err) => setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai hieu ung TV."));
   };
 
+  const loadDecorImages = async () => {
+    const res = await getDecorImages();
+    setDecorImages(res.images);
+    setSelectedDecorId((current) =>
+      current && res.images.some((item) => item.id === current) ? current : res.images[0]?.id ?? "",
+    );
+    return res.images;
+  };
+
   useEffect(() => {
     setIsLoading(true);
-    Promise.all([loadOverlays(), loadCtaOverlays(), loadTVNoiseOverlays(), loadTVEffectStyles()]).finally(() =>
-      setIsLoading(false),
-    );
+    Promise.all([
+      loadOverlays(),
+      loadCtaOverlays(),
+      loadDecorImages(),
+      loadTVNoiseOverlays(),
+      loadTVEffectStyles(),
+      loadSparklePresets(),
+      loadPreviewSources(),
+    ]).finally(() => setIsLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (!previewJobId) return;
+    const interval = window.setInterval(() => {
+      getEffectPreviewJob(previewJobId)
+        .then((job) => {
+          setPreviewMessage(job.message);
+          if (job.status === "completed" || job.status === "failed") {
+            setPreviewJobId(null);
+            setIsPreviewRendering(false);
+            if (job.status === "failed") setErrorMessage(job.error ?? job.message);
+            void loadPreviewSources();
+          }
+        })
+        .catch(() => {
+          setPreviewJobId(null);
+          setIsPreviewRendering(false);
+        });
+    }, 2000);
+    return () => window.clearInterval(interval);
+  }, [previewJobId]);
+
+  useEffect(() => {
+    setDecorPreviewPath(null);
+  }, [selectedDecorId]);
+
+  const handleDecorUpload = async (file: File | null) => {
+    if (!file) return;
+    setIsDecorUploading(true);
+    setErrorMessage(null);
+    try {
+      const res = await uploadDecorImage(file, decorUploadGroup);
+      await loadDecorImages();
+      setSelectedDecorId(res.image.id);
+      // Neu dang loc theo mot nhom khac, anh vua upload se bi an di — keo bo loc
+      // sang nhom cua no de nguoi dung thay ngay ket qua.
+      setDecorGroupFilter((current) =>
+        current === null || current === (res.image.group ?? "") ? current : (res.image.group ?? ""),
+      );
+      if (res.image.autoDetected === false) {
+        setErrorMessage(
+          "Da upload nhung khong tim thay vung mau xanh. Hay keo khung thu cong tren canvas.",
+        );
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the upload anh decor.");
+    } finally {
+      setIsDecorUploading(false);
+    }
+  };
+
+  const handleDecorSave = async (updates: Partial<StoryDecorImage>) => {
+    if (!selectedDecor) return;
+    setIsDecorSaving(true);
+    setErrorMessage(null);
+    try {
+      const res = await updateDecorImage(selectedDecor.id, updates);
+      setDecorImages((current) =>
+        current.map((item) => (item.id === selectedDecor.id ? res.image : item)),
+      );
+      // Re-key or re-frame invalidates the composed still.
+      setDecorPreviewPath(null);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the luu anh decor.");
+    } finally {
+      setIsDecorSaving(false);
+    }
+  };
+
+  const handleDecorGroupAssign = async (imageId: string, group: string) => {
+    setDecorGroupInputFor(null);
+    setErrorMessage(null);
+    try {
+      const res = await updateDecorImage(imageId, { group: group.trim() });
+      setDecorImages((current) => current.map((item) => (item.id === imageId ? res.image : item)));
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the doi nhom anh decor.");
+    }
+  };
+
+  const handleDecorGroupRename = async (from: string, to: string) => {
+    const next = to.trim();
+    setDecorGroupEdit(null);
+    if (!next || next === from) return;
+    setErrorMessage(null);
+    setDecorGroupBusy(true);
+    try {
+      await renameDecorGroup(from, next);
+      // Bo loc va o nhom mac dinh cua upload deu tro toi ten cu, keo ca hai sang
+      // ten moi de man hinh khong bong dung rong.
+      if (decorGroupFilter === from) setDecorGroupFilter(next);
+      if (decorUploadGroup === from) setDecorUploadGroup(next);
+      await loadDecorImages();
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the doi ten nhom.");
+    } finally {
+      setDecorGroupBusy(false);
+    }
+  };
+
+  const handleDecorGroupEnable = async (group: string, enabled: boolean) => {
+    const targets = decorImages.filter(
+      (item) => decorGroupOf(item) === group && (item.enabled !== false) !== enabled,
+    );
+    if (!targets.length) return;
+    setErrorMessage(null);
+    setDecorGroupBusy(true);
+    try {
+      for (const target of targets) {
+        const res = await updateDecorImage(target.id, { enabled });
+        setDecorImages((current) => current.map((item) => (item.id === target.id ? res.image : item)));
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the doi trang thai ca nhom.");
+    } finally {
+      setDecorGroupBusy(false);
+    }
+  };
+
+  const handleDecorToggle = async (imageId: string, enabled: boolean) => {
+    setErrorMessage(null);
+    try {
+      const res = await updateDecorImage(imageId, { enabled });
+      setDecorImages((current) => current.map((item) => (item.id === imageId ? res.image : item)));
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the doi trang thai anh decor.");
+    }
+  };
+
+  const handleDecorDetect = async () => {
+    if (!selectedDecor) return null;
+    setErrorMessage(null);
+    try {
+      const res = await detectDecorFrame(selectedDecor.id);
+      return res.frame;
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong do duoc vung mau xanh.");
+      return null;
+    }
+  };
+
+  const handleDecorFramePreview = async () => {
+    if (!selectedDecor) return;
+    setIsDecorPreviewLoading(true);
+    setErrorMessage(null);
+    try {
+      const res = await renderDecorFramePreview(selectedDecor.id);
+      setDecorPreviewPath(`${res.previewPath}?t=${Date.now()}`);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong tao duoc preview khung.");
+    } finally {
+      setIsDecorPreviewLoading(false);
+    }
+  };
+
+  const handleDecorDelete = async (imageId: string) => {
+    setErrorMessage(null);
+    try {
+      await deleteDecorImage(imageId);
+      setSelectedDecorId("");
+      setDecorPreviewPath(null);
+      await loadDecorImages();
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the xoa anh decor.");
+    }
+  };
+
+  const handlePreviewUpload = async (files: FileList | null) => {
+    if (!files || !files.length) return;
+    setIsPreviewUploading(true);
+    setErrorMessage(null);
+    setPreviewMessage("Dang chuan hoa va ghep clip...");
+    try {
+      const res = await uploadEffectPreviewSource(Array.from(files));
+      await loadPreviewSources();
+      setSelectedPreviewId(res.source.id);
+      setPreviewMessage(`Da san sang: ${res.source.clipCount} clip / ${res.source.durationSeconds}s`);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai bo clip preview.");
+      setPreviewMessage(null);
+    } finally {
+      setIsPreviewUploading(false);
+    }
+  };
+
+  const handlePreviewRender = async () => {
+    if (!selectedPreviewSource) return;
+    setIsPreviewRendering(true);
+    setErrorMessage(null);
+    setPreviewMessage("Dang render preview...");
+    try {
+      const maxSeconds = Number(previewOptions.maxSeconds);
+      const res = await renderEffectPreview({
+        sourceId: selectedPreviewSource.id,
+        includeStyle: previewOptions.includeStyle,
+        includeOverlays: previewOptions.includeOverlays,
+        compare: previewOptions.compare,
+        maxSeconds: Number.isFinite(maxSeconds) && maxSeconds > 0 ? maxSeconds : undefined,
+        decorImageId: previewDecorId || undefined,
+      });
+      setPreviewJobId(res.sessionId);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the render preview.");
+      setIsPreviewRendering(false);
+    }
+  };
+
+  const handlePreviewDelete = async (sourceId: string) => {
+    setErrorMessage(null);
+    try {
+      await deleteEffectPreviewSource(sourceId);
+      setSelectedPreviewId("");
+      await loadPreviewSources();
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the xoa bo clip preview.");
+    }
+  };
+
+  const handleSparkleCreate = async () => {
+    const preset = sparklePresets.find((item) => item.id === sparklePresetId);
+    if (!preset) return;
+    setIsSparkleCreating(true);
+    setErrorMessage(null);
+    setNoiseJobMessage("Dang dung lop lap lanh (25-90 giay)...");
+    try {
+      const params: Record<string, number> = {};
+      for (const key of preset.paramsUsed) {
+        const value = Number(sparkleParams[key]);
+        params[key] = Number.isFinite(value) ? value : preset.params[key];
+      }
+      const res = await createSparkleOverlay({
+        presetId: preset.id,
+        params,
+        name: sparkleName.trim() || preset.name,
+      });
+      setNoiseJobId(res.sessionId);
+      await loadTVNoiseOverlays();
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the tao lop lap lanh.");
+      setIsSparkleCreating(false);
+    }
+  };
 
   const handleSelectEffect = async (styleId: string) => {
     setIsSelectingEffect(true);
@@ -443,10 +909,16 @@ export function StoryVideoSettingsPage() {
     setCtaForm(ctaFormFromOverlay(selectedCta));
   }, [selectedCta]);
 
+  // Chi nap lai form khi DOI lop dang chon. Bam vao chinh object `selectedNoise`
+  // thi moi lan poll 3s (luc dang dung lop lap lanh, danh sach tai lai lien tuc va
+  // tra ve object moi) se ghi de nhung gi nguoi dung vua go -> khong luu duoc.
+  const selectedNoiseRef = useRef(selectedNoise);
+  selectedNoiseRef.current = selectedNoise;
+  const selectedNoiseKey = selectedNoise?.id ?? "";
   useEffect(() => {
-    setNoiseForm(formFromNoiseOverlay(selectedNoise));
+    setNoiseForm(formFromNoiseOverlay(selectedNoiseRef.current));
     setNoiseDemoSrc(null);
-  }, [selectedNoise]);
+  }, [selectedNoiseKey]);
 
   useEffect(() => {
     const hasProcessing = tvNoiseOverlays.some((overlay) => overlay.status === "processing");
@@ -462,6 +934,10 @@ export function StoryVideoSettingsPage() {
               setNoiseJobId(null);
               setIsNoiseUploading(false);
               setIsNoiseImporting(false);
+              setIsSparkleCreating(false);
+              // Chon luon lop vua tao: no la lop dang dung khi render, va day la
+              // cho nguoi dung xem lai thong so / bam Demo 3s.
+              if (job.overlayId) setSelectedNoiseId(job.overlayId);
               void loadTVNoiseOverlays();
             }
           })
@@ -535,12 +1011,18 @@ export function StoryVideoSettingsPage() {
         opacity: Number(noiseForm.opacity),
         tolerance: Number(noiseForm.tolerance),
         softness: Number(noiseForm.softness),
+        lumaGain: Number(noiseForm.lumaGain),
         order: Number(noiseForm.order),
       };
       const res = await updateTVNoiseOverlay(selectedNoise.id, payload);
       setTvNoiseOverlays((current) => current.map((item) => (item.id === selectedNoise.id ? res.overlay : item)));
       if (res.overlay.status === "processing") {
         setNoiseJobMessage("Dang tao lai alpha MOV...");
+      }
+      // Bật một lớp sẽ tắt các lớp còn lại ở server (chỉ 1 hiệu ứng khi render),
+      // nên phải tải lại cả danh sách thay vì chỉ vá bản ghi vừa lưu.
+      if (payload.enabled) {
+        await loadTVNoiseOverlays();
       }
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the luu cau hinh TV noise.");
@@ -589,6 +1071,9 @@ export function StoryVideoSettingsPage() {
         scaleWidth: Number(form.scaleWidth),
         position: form.position,
         margin: Number(form.margin),
+        // null clears the free placement, handing the overlay back to the corner.
+        x: formCoord(form.x),
+        y: formCoord(form.y),
       };
       const res = await updateWaveformOverlay(selected.id, payload);
       setOverlays((current) => current.map((item) => (item.id === selected.id ? res.overlay : { ...item, isDefault: false })));
@@ -641,6 +1126,9 @@ export function StoryVideoSettingsPage() {
         scaleWidth: Number(ctaForm.scaleWidth),
         position: ctaForm.position,
         margin: Number(ctaForm.margin),
+        // null clears the free placement, handing the overlay back to the corner.
+        x: formCoord(ctaForm.x),
+        y: formCoord(ctaForm.y),
       };
       const res = await updateCtaOverlay(selectedCta.id, payload);
       setCtaOverlays((current) =>
@@ -888,8 +1376,11 @@ export function StoryVideoSettingsPage() {
           {noiseJobMessage ? <Badge variant="secondary" className="rounded-full">{noiseJobMessage}</Badge> : null}
         </div>
 
+        {/* min-w-0 tren cot trai: mac dinh grid item la min-width:auto, nen mot ten
+            file dai (khong xuong dong duoc) keo cot rong hon track 380px va de len
+            panel cau hinh ben phai. */}
         <div className="grid gap-5 lg:grid-cols-[minmax(280px,380px)_1fr]">
-          <div className="space-y-4">
+          <div className="min-w-0 space-y-4">
             <div className="grid gap-2">
               <Label>Upload TV noise</Label>
               <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
@@ -921,6 +1412,74 @@ export function StoryVideoSettingsPage() {
               </div>
             </div>
 
+            {sparklePresets.length ? (
+              <div className="grid gap-2 rounded-lg border border-border/70 bg-background/70 p-3">
+                <Label>Tạo lớp lấp lánh</Label>
+                <select
+                  value={sparklePresetId}
+                  onChange={(event) => {
+                    const next = sparklePresets.find((item) => item.id === event.target.value);
+                    setSparklePresetId(event.target.value);
+                    if (next) setSparkleParams(paramsToForm(next));
+                  }}
+                  className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {sparklePresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name}
+                    </option>
+                  ))}
+                </select>
+                {selectedSparklePreset ? (
+                  <>
+                    <p className="text-xs text-muted-foreground">{selectedSparklePreset.description}</p>
+                    <div className="grid gap-1">
+                      <Label className="text-xs font-normal text-muted-foreground">
+                        Tên lớp (để phân biệt các mẫu)
+                      </Label>
+                      <Input
+                        value={sparkleName}
+                        placeholder={selectedSparklePreset.name}
+                        onChange={(event) => setSparkleName(event.target.value)}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {selectedSparklePreset.paramsUsed.map((key) => (
+                        <div key={key} className="grid gap-1">
+                          <Label className="text-xs font-normal text-muted-foreground">
+                            {SPARKLE_PARAM_LABELS[key] ?? key}
+                          </Label>
+                          <Input
+                            type="number"
+                            step="any"
+                            value={sparkleParams[key] ?? ""}
+                            onChange={(event) =>
+                              setSparkleParams((current) => ({ ...current, [key]: event.target.value }))
+                            }
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : null}
+                <Button type="button" variant="secondary" onClick={() => void handleSparkleCreate()} disabled={isSparkleCreating}>
+                  {isSparkleCreating ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                  {isSparkleCreating ? "Dang dung lop lap lanh..." : "Tao lop lap lanh"}
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  Dung mot lan roi cache lai (25-90 giay). Lop tao ra nam trong danh sach ben duoi: bat/tat,
+                  chinh opacity va thu tu nhu moi overlay khac. Lớp vừa tạo sẽ tự thành lớp đang dùng.
+                </p>
+              </div>
+            ) : null}
+
+            {tvNoiseOverlays.length ? (
+              <p className="text-xs text-muted-foreground">
+                Mỗi lần render chỉ áp <span className="font-semibold text-foreground">một</span> lớp hiệu ứng. Bật một lớp
+                sẽ tự tắt các lớp còn lại — chúng vẫn nằm trong danh sách để bật lại sau.
+              </p>
+            ) : null}
+
             {tvNoiseOverlays.length ? (
               <div className="grid gap-2">
                 {tvNoiseOverlays.map((overlay) => (
@@ -928,11 +1487,11 @@ export function StoryVideoSettingsPage() {
                     key={overlay.id}
                     type="button"
                     onClick={() => setSelectedNoiseId(overlay.id)}
-                    className={`rounded-lg border p-3 text-left transition-colors ${
+                    className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${
                       selectedNoise?.id === overlay.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
                     }`}
                   >
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center justify-between gap-2">
                       <span className="truncate text-sm font-semibold text-foreground">{overlay.name}</span>
                       <Badge
                         variant={overlay.status === "failed" ? "destructive" : overlay.status === "ready" ? "secondary" : "outline"}
@@ -942,7 +1501,12 @@ export function StoryVideoSettingsPage() {
                       </Badge>
                     </div>
                     <div className="mt-1 text-xs text-muted-foreground">
-                      #{overlay.order} | opacity {Math.round((overlay.opacity ?? 0) * 100)}% | {overlay.enabled ? "enabled" : "disabled"}
+                      #{overlay.order} | opacity {Math.round((overlay.opacity ?? 0) * 100)}% |{" "}
+                      {overlay.enabled ? (
+                        <span className="font-semibold text-primary">đang dùng khi render</span>
+                      ) : (
+                        "tắt"
+                      )}
                     </div>
                   </button>
                 ))}
@@ -953,7 +1517,7 @@ export function StoryVideoSettingsPage() {
           </div>
 
           {selectedNoise ? (
-            <div className="grid gap-5">
+            <div className="grid min-w-0 gap-5">
               {noiseDemoSrc || selectedNoise.relativePath ? (
                 <video
                   src={noiseDemoSrc || `/media/${selectedNoise.relativePath}`}
@@ -966,44 +1530,147 @@ export function StoryVideoSettingsPage() {
                 <StatusAlert title="TV noise preprocess failed" message={selectedNoise.error} variant="destructive" />
               ) : null}
 
-              <div className="grid gap-4 md:grid-cols-6">
-                <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={noiseForm.enabled}
-                    onChange={(event) => setNoiseForm((current) => ({ ...current, enabled: event.target.checked }))}
-                  />
-                  Enabled
-                </label>
-                <div className="grid gap-2">
+              {/* Thong so cua lop lap lanh da tao: khong hien thi thi hai bien the
+                  cung preset trong y het nhau va khong the dung lai de tinh chinh. */}
+              {selectedNoise.kind === "sparkle" && selectedNoise.meta?.params ? (
+                <div className="grid gap-2 rounded-lg border border-border/70 bg-background/70 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <Label className="text-xs font-normal text-muted-foreground">
+                      Thông số đã lưu ·{" "}
+                      {sparklePresets.find((preset) => preset.id === selectedNoise.meta?.presetId)?.name ??
+                        selectedNoise.meta?.presetId ??
+                        "sparkle"}
+                    </Label>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        const presetId = selectedNoise.meta?.presetId ?? "";
+                        const preset = sparklePresets.find((item) => item.id === presetId);
+                        if (!preset) return;
+                        setSparklePresetId(presetId);
+                        setSparkleParams(
+                          Object.fromEntries(
+                            preset.paramsUsed.map((key) => [
+                              key,
+                              String(selectedNoise.meta?.params?.[key] ?? preset.params[key] ?? 0),
+                            ]),
+                          ),
+                        );
+                        setSparkleName(`${selectedNoise.name} (copy)`);
+                      }}
+                    >
+                      Nạp vào form tạo lớp
+                    </Button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-3">
+                    {Object.entries(selectedNoise.meta.params).map(([key, value]) => (
+                      <div key={key} className="flex min-w-0 justify-between gap-2">
+                        <span className="truncate">{SPARKLE_PARAM_LABELS[key] ?? key}</span>
+                        <span className="font-medium text-foreground">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                <div className="grid min-w-0 gap-2">
+                  <Label>Trang thai</Label>
+                  <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={noiseForm.enabled}
+                      onChange={(event) => setNoiseForm((current) => ({ ...current, enabled: event.target.checked }))}
+                    />
+                    Dùng lớp này khi render
+                  </label>
+                </div>
+
+                <div className="grid min-w-0 gap-2">
                   <Label>Blend</Label>
                   <select
                     value={noiseForm.blendMode}
-                    onChange={(event) => setNoiseForm((current) => ({ ...current, blendMode: event.target.value as TVNoiseForm["blendMode"] }))}
-                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-                    title="Alpha: key nền đen thành trong suốt (nhiễu TV). Screen: cộng sáng — hợp texture nền đen như bụi bay, light leak, bokeh."
+                    onChange={(event) =>
+                      setNoiseForm((current) => ({ ...current, blendMode: event.target.value as TVNoiseForm["blendMode"] }))
+                    }
+                    className="h-10 w-full min-w-0 truncate rounded-md border border-input bg-background px-3 text-sm"
                   >
-                    <option value="alpha">Alpha (key nền)</option>
-                    <option value="screen">Screen (cộng sáng)</option>
+                    <option value="alpha">Alpha &mdash; key nen den</option>
+                    <option value="screen">Screen &mdash; cong sang</option>
+                    <option value="luma">Luma &mdash; lop lap lanh</option>
                   </select>
                 </div>
-                <div className="grid gap-2">
+
+                <div className="grid min-w-0 gap-2">
                   <Label>Opacity</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={noiseForm.opacity} onChange={(event) => setNoiseForm((current) => ({ ...current, opacity: event.target.value }))} />
+                  <Input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={noiseForm.opacity}
+                    onChange={(event) => setNoiseForm((current) => ({ ...current, opacity: event.target.value }))}
+                  />
                 </div>
-                <div className="grid gap-2">
-                  <Label>Tolerance</Label>
-                  <Input type="number" min="0" max="1" step="0.01" disabled={noiseForm.blendMode === "screen"} value={noiseForm.tolerance} onChange={(event) => setNoiseForm((current) => ({ ...current, tolerance: event.target.value }))} />
-                </div>
-                <div className="grid gap-2">
-                  <Label>Softness</Label>
-                  <Input type="number" min="0" max="1" step="0.01" disabled={noiseForm.blendMode === "screen"} value={noiseForm.softness} onChange={(event) => setNoiseForm((current) => ({ ...current, softness: event.target.value }))} />
-                </div>
-                <div className="grid gap-2">
+
+                {/* Cac o duoi day chi co nghia voi dung mot blend mode, nen an han
+                    thay vi disable: form 7 cot truoc day bi vo o man hinh hep. */}
+                {noiseForm.blendMode === "luma" ? (
+                  <div className="grid min-w-0 gap-2">
+                    <Label>Luma gain</Label>
+                    <Input
+                      type="number"
+                      min="1"
+                      max="8"
+                      step="0.1"
+                      value={noiseForm.lumaGain}
+                      onChange={(event) => setNoiseForm((current) => ({ ...current, lumaGain: event.target.value }))}
+                    />
+                  </div>
+                ) : null}
+
+                {noiseForm.blendMode === "alpha" ? (
+                  <>
+                    <div className="grid min-w-0 gap-2">
+                      <Label>Tolerance</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={noiseForm.tolerance}
+                        onChange={(event) => setNoiseForm((current) => ({ ...current, tolerance: event.target.value }))}
+                      />
+                    </div>
+                    <div className="grid min-w-0 gap-2">
+                      <Label>Softness</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={noiseForm.softness}
+                        onChange={(event) => setNoiseForm((current) => ({ ...current, softness: event.target.value }))}
+                      />
+                    </div>
+                  </>
+                ) : null}
+
+                <div className="grid min-w-0 gap-2">
                   <Label>Order</Label>
-                  <Input type="number" min="0" step="1" value={noiseForm.order} onChange={(event) => setNoiseForm((current) => ({ ...current, order: event.target.value }))} />
+                  <Input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={noiseForm.order}
+                    onChange={(event) => setNoiseForm((current) => ({ ...current, order: event.target.value }))}
+                  />
                 </div>
               </div>
+
+              <p className="text-xs text-muted-foreground">{BLEND_MODE_HINTS[noiseForm.blendMode]}</p>
 
               <div className="flex flex-wrap gap-3">
                 <Button type="button" onClick={handleNoiseSave} disabled={isNoiseSaving}>
@@ -1023,6 +1690,172 @@ export function StoryVideoSettingsPage() {
           ) : null}
         </div>
       </PageSection>
+
+      <PageSection>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-1">
+            <h2 className="text-base font-semibold text-foreground">Preview hieu ung tren video that</h2>
+            <p className="text-sm text-muted-foreground">
+              Tai len vai clip ngan 3-5s giong trong thu vien, roi render de xem ca chong hieu ung
+              (style + cac lop overlay dang bat + song am + CTA) tren dung loai canh ban se dung.
+            </p>
+          </div>
+          {previewMessage ? <Badge variant="secondary" className="rounded-full">{previewMessage}</Badge> : null}
+        </div>
+
+        {/* min-w-0 tren cot trai: mac dinh grid item la min-width:auto, nen mot ten
+            file dai (khong xuong dong duoc) keo cot rong hon track 380px va de len
+            panel cau hinh ben phai. */}
+        <div className="grid gap-5 lg:grid-cols-[minmax(280px,380px)_1fr]">
+          <div className="min-w-0 space-y-4">
+            <div className="grid gap-2">
+              <Label>Tai len bo clip</Label>
+              <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-center text-sm text-muted-foreground">
+                {isPreviewUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
+                <span>{isPreviewUploading ? "Dang chuan hoa va ghep..." : "Chon nhieu clip cung luc (toi da 24)"}</span>
+                <Input
+                  type="file"
+                  multiple
+                  accept=".mp4,.mov,.mkv,.webm"
+                  className="hidden"
+                  disabled={isPreviewUploading}
+                  onChange={(event) => void handlePreviewUpload(event.currentTarget.files)}
+                />
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Clip duoc chuan hoa ve dung dinh dang thu vien roi ghep lai mot lan. Sau do doi thong so
+                bao nhieu lan cung duoc, chi phai render lai buoc hieu ung.
+              </p>
+            </div>
+
+            {previewSources.length ? (
+              <div className="grid gap-2">
+                {previewSources.map((source) => (
+                  <button
+                    key={source.id}
+                    type="button"
+                    onClick={() => setSelectedPreviewId(source.id)}
+                    className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${
+                      selectedPreviewSource?.id === source.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+                    }`}
+                  >
+                    <div className="truncate text-sm font-semibold text-foreground">{source.name}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {source.clipCount} clip | {source.durationSeconds}s
+                      {source.previewPath ? " | da co preview" : " | chua render"}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <EmptyCard title="Chua co bo clip nao" description="Tai len vai clip ngan de xem thu hieu ung." />
+            )}
+          </div>
+
+          {selectedPreviewSource ? (
+            <div className="grid gap-5">
+              {selectedPreviewSource.previewPath ? (
+                <video
+                  key={selectedPreviewSource.previewPath}
+                  src={`/media/${selectedPreviewSource.previewPath}`}
+                  controls
+                  className="aspect-video w-full rounded-lg bg-black object-contain"
+                />
+              ) : (
+                <div className="flex aspect-video w-full items-center justify-center rounded-lg border border-dashed border-border bg-background/70 text-sm text-muted-foreground">
+                  Chua render preview cho bo clip nay.
+                </div>
+              )}
+
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={previewOptions.includeStyle}
+                    onChange={(event) => setPreviewOptions((current) => ({ ...current, includeStyle: event.target.checked }))}
+                  />
+                  Ap style mau
+                </label>
+                <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={previewOptions.includeOverlays}
+                    onChange={(event) => setPreviewOptions((current) => ({ ...current, includeOverlays: event.target.checked }))}
+                  />
+                  Ap cac lop overlay
+                </label>
+                <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={previewOptions.compare}
+                    onChange={(event) => setPreviewOptions((current) => ({ ...current, compare: event.target.checked }))}
+                  />
+                  So sanh canh nhau
+                </label>
+                <div className="grid min-w-0 gap-2">
+                  <Label>Anh decor</Label>
+                  <select
+                    value={previewDecorId}
+                    onChange={(event) => setPreviewDecorId(event.target.value)}
+                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                  >
+                    <option value="">Khong dung anh decor</option>
+                    {decorImages.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.group ? `[${item.group}] ${item.name}` : item.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="grid min-w-0 gap-2">
+                  <Label>Gioi han (giay)</Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    max="90"
+                    step="1"
+                    value={previewOptions.maxSeconds}
+                    onChange={(event) => setPreviewOptions((current) => ({ ...current, maxSeconds: event.target.value }))}
+                  />
+                </div>
+              </div>
+
+              {selectedPreviewSource.appliedDecorName ? (
+                <p className="text-xs text-muted-foreground">
+                  Preview nay dang dung anh decor: <strong>{selectedPreviewSource.appliedDecorName}</strong>
+                </p>
+              ) : null}
+
+              {selectedPreviewSource.appliedLayers?.length ? (
+                <div className="flex flex-wrap gap-2">
+                  {selectedPreviewSource.appliedLayers.map((layer, index) => (
+                    <Badge key={layer.id ?? index} variant="outline" className="rounded-full">
+                      {layer.name} · {layer.blendMode}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="flex flex-wrap gap-3">
+                <Button type="button" onClick={() => void handlePreviewRender()} disabled={isPreviewRendering}>
+                  {isPreviewRendering ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
+                  {isPreviewRendering ? "Dang render..." : "Render preview"}
+                </Button>
+                <Button type="button" variant="destructive" onClick={() => void handlePreviewDelete(selectedPreviewSource.id)}>
+                  <Trash2 className="mr-2 size-4" />
+                  Xoa bo clip
+                </Button>
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                Preview dung dung chuoi filter ma buoc render that dung, nen ket qua khop nhau. Chay tren CPU
+                va o 1080p, nen cho khoang 3-4 giay xu ly cho moi giay video.
+              </p>
+            </div>
+          ) : null}
+        </div>
+      </PageSection>
+
 
       <PageSection>
         <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
@@ -1063,7 +1896,7 @@ export function StoryVideoSettingsPage() {
                       ) : null}
                     </div>
                     <div className="mt-1 text-xs text-muted-foreground">
-                      {overlay.durationSeconds}s | {overlay.scaleWidth ?? 420}px | {overlay.position ?? "bottom_right"}
+                      {overlay.durationSeconds}s | {overlay.scaleWidth ?? 420}px | {placementLabel(overlay, "bottom_right")}
                     </div>
                   </button>
                 ))}
@@ -1079,27 +1912,9 @@ export function StoryVideoSettingsPage() {
                 <video src={`/media/${selected.relativePath}`} controls className="aspect-video w-full rounded-lg bg-black object-contain" />
               ) : null}
 
-              <OverlayPositionPreview
-                boxes={[
-                  {
-                    label: "Sóng âm",
-                    position: form.position,
-                    margin: Number(form.margin) || 0,
-                    scaleWidth: Number(form.scaleWidth) || 420,
-                    heightRatio: 0.3,
-                    className: "border-sky-300 bg-sky-500/70",
-                    active: true,
-                  },
-                  {
-                    label: ctaForm.enabled ? "CTA" : "CTA (tắt)",
-                    position: ctaForm.position,
-                    margin: Number(ctaForm.margin) || 0,
-                    scaleWidth: Number(ctaForm.scaleWidth) || 360,
-                    heightRatio: 0.6,
-                    className: "border-orange-300 bg-orange-500/60",
-                  },
-                ]}
-                onPickCorner={(corner) => setForm((current) => ({ ...current, position: corner }))}
+              <StoryOverlayPlacementEditor
+                boxes={[waveformBox(true), ctaBox(false)]}
+                onMove={({ x, y }) => setForm((current) => ({ ...current, x: String(x), y: String(y) }))}
               />
 
               <div className="grid gap-4 md:grid-cols-3">
@@ -1120,10 +1935,32 @@ export function StoryVideoSettingsPage() {
                   <Input type="number" min="64" step="2" value={form.scaleWidth} onChange={(event) => setForm((current) => ({ ...current, scaleWidth: event.target.value }))} />
                 </div>
                 <div className="grid gap-2">
-                  <Label>Position</Label>
+                  <Label>X (px)</Label>
+                  <Input
+                    type="number"
+                    step="2"
+                    placeholder="theo góc"
+                    value={form.x}
+                    onChange={(event) => setForm((current) => moveTo(current, waveformBox(true), "x", event.target.value))}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Y (px)</Label>
+                  <Input
+                    type="number"
+                    step="2"
+                    placeholder="theo góc"
+                    value={form.y}
+                    onChange={(event) => setForm((current) => moveTo(current, waveformBox(true), "y", event.target.value))}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Position (góc)</Label>
                   <select
                     value={form.position}
-                    onChange={(event) => setForm((current) => ({ ...current, position: event.target.value as WaveformForm["position"] }))}
+                    onChange={(event) =>
+                      setForm((current) => ({ ...current, position: event.target.value as WaveformForm["position"], x: "", y: "" }))
+                    }
                     className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                   >
                     <option value="bottom_right">Bottom right</option>
@@ -1134,9 +1971,14 @@ export function StoryVideoSettingsPage() {
                 </div>
                 <div className="grid gap-2">
                   <Label>Margin</Label>
-                  <Input type="number" min="0" step="1" value={form.margin} onChange={(event) => setForm((current) => ({ ...current, margin: event.target.value }))} />
+                  <Input type="number" min="0" step="1" value={form.margin} onChange={(event) => setForm((current) => ({ ...current, margin: event.target.value, x: "", y: "" }))} />
                 </div>
               </div>
+
+              <p className="text-xs text-muted-foreground">
+                Kéo overlay trong khung ở trên để đặt vào bất kỳ đâu — X/Y là toạ độ góc trên-trái của
+                sóng âm trong khung 1920×1080. Đổi Position hoặc Margin sẽ xoá toạ độ, quay về canh theo góc.
+              </p>
 
               <div className="flex flex-wrap gap-3">
                 <Button type="button" onClick={handleSave} disabled={isSaving}>
@@ -1203,7 +2045,7 @@ export function StoryVideoSettingsPage() {
                       </div>
                     </div>
                     <div className="mt-1 text-xs text-muted-foreground">
-                      {overlay.durationSeconds}s | {overlay.scaleWidth ?? 360}px | {overlay.position ?? "top_left"}
+                      {overlay.durationSeconds}s | {overlay.scaleWidth ?? 360}px | {placementLabel(overlay, "top_left")}
                     </div>
                   </button>
                 ))}
@@ -1248,27 +2090,9 @@ export function StoryVideoSettingsPage() {
                 Bật CTA overlay cho mọi video Story Video
               </label>
 
-              <OverlayPositionPreview
-                boxes={[
-                  {
-                    label: ctaForm.enabled ? "CTA" : "CTA (tắt)",
-                    position: ctaForm.position,
-                    margin: Number(ctaForm.margin) || 0,
-                    scaleWidth: Number(ctaForm.scaleWidth) || 360,
-                    heightRatio: 0.6,
-                    className: "border-orange-300 bg-orange-500/60",
-                    active: true,
-                  },
-                  {
-                    label: "Sóng âm",
-                    position: form.position,
-                    margin: Number(form.margin) || 0,
-                    scaleWidth: Number(form.scaleWidth) || 420,
-                    heightRatio: 0.3,
-                    className: "border-sky-300 bg-sky-500/70",
-                  },
-                ]}
-                onPickCorner={(corner) => setCtaForm((current) => ({ ...current, position: corner }))}
+              <StoryOverlayPlacementEditor
+                boxes={[ctaBox(true), waveformBox(false)]}
+                onMove={({ x, y }) => setCtaForm((current) => ({ ...current, x: String(x), y: String(y) }))}
               />
 
               <div className="grid gap-4 md:grid-cols-3">
@@ -1289,10 +2113,32 @@ export function StoryVideoSettingsPage() {
                   <Input type="number" min="64" step="2" value={ctaForm.scaleWidth} onChange={(event) => setCtaForm((current) => ({ ...current, scaleWidth: event.target.value }))} />
                 </div>
                 <div className="grid gap-2">
-                  <Label>Position</Label>
+                  <Label>X (px)</Label>
+                  <Input
+                    type="number"
+                    step="2"
+                    placeholder="theo góc"
+                    value={ctaForm.x}
+                    onChange={(event) => setCtaForm((current) => moveTo(current, ctaBox(true), "x", event.target.value))}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Y (px)</Label>
+                  <Input
+                    type="number"
+                    step="2"
+                    placeholder="theo góc"
+                    value={ctaForm.y}
+                    onChange={(event) => setCtaForm((current) => moveTo(current, ctaBox(true), "y", event.target.value))}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Position (góc)</Label>
                   <select
                     value={ctaForm.position}
-                    onChange={(event) => setCtaForm((current) => ({ ...current, position: event.target.value as CtaForm["position"] }))}
+                    onChange={(event) =>
+                      setCtaForm((current) => ({ ...current, position: event.target.value as CtaForm["position"], x: "", y: "" }))
+                    }
                     className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                   >
                     <option value="top_left">Top left</option>
@@ -1303,9 +2149,14 @@ export function StoryVideoSettingsPage() {
                 </div>
                 <div className="grid gap-2">
                   <Label>Margin</Label>
-                  <Input type="number" min="0" step="1" value={ctaForm.margin} onChange={(event) => setCtaForm((current) => ({ ...current, margin: event.target.value }))} />
+                  <Input type="number" min="0" step="1" value={ctaForm.margin} onChange={(event) => setCtaForm((current) => ({ ...current, margin: event.target.value, x: "", y: "" }))} />
                 </div>
               </div>
+
+              <p className="text-xs text-muted-foreground">
+                Kéo overlay trong khung ở trên để đặt vào bất kỳ đâu — X/Y là toạ độ góc trên-trái của
+                CTA trong khung 1920×1080. Đổi Position hoặc Margin sẽ xoá toạ độ, quay về canh theo góc.
+              </p>
 
               <div className="flex flex-wrap gap-3">
                 <Button type="button" onClick={handleCtaSave} disabled={isCtaSaving}>
@@ -1324,6 +2175,300 @@ export function StoryVideoSettingsPage() {
 
       <PageSection>
         <StoryLibraryNormalizePanel onNormalized={() => setLibraryRefreshKey((current) => current + 1)} />
+      </PageSection>
+
+      <PageSection>
+        <div className="mb-4 space-y-1">
+          <h2 className="text-base font-semibold text-foreground">Ảnh decor (khung TV)</h2>
+          <p className="text-sm text-muted-foreground">
+            Ảnh chụp phủ kín khung hình, video nền chỉ chạy bên trong vùng màu xanh của ảnh.
+            Phần không phải nền xanh luôn đè lên trên video. Hiệu ứng TV và TV noise được áp vào
+            video <em>trước</em> khi thu nhỏ vào khung, còn sóng âm / CTA / phụ đề nằm trên ảnh decor.
+            Chọn ảnh nào tham gia xoay vòng ở trang render.
+          </p>
+        </div>
+        <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
+          <div className="space-y-4">
+            <div className="grid gap-2">
+              <Label htmlFor="decor-upload-group">Nhóm chủ đề</Label>
+              <Input
+                id="decor-upload-group"
+                list="decor-group-options"
+                value={decorUploadGroup}
+                onChange={(event) => setDecorUploadGroup(event.currentTarget.value)}
+                placeholder="VD: Đền chùa, Làng quê, Điều tra phá án"
+              />
+              <datalist id="decor-group-options">
+                {decorGroups.filter(Boolean).map((group) => (
+                  <option key={group} value={group} />
+                ))}
+              </datalist>
+              <p className="text-xs text-muted-foreground">
+                Ảnh upload dưới đây sẽ vào nhóm này. Gõ tên mới để tạo nhóm, để trống nếu chưa
+                muốn phân loại — đổi nhóm sau lúc nào cũng được.
+              </p>
+
+              <Label className="mt-2">Upload ảnh decor (có vùng nền xanh)</Label>
+              <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
+                {isDecorUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
+                <span>{isDecorUploading ? "Đang tách nền xanh..." : "Chọn ảnh PNG / JPG / WEBP"}</span>
+                <Input
+                  type="file"
+                  accept=".png,.jpg,.jpeg,.webp,.bmp"
+                  className="hidden"
+                  disabled={isDecorUploading}
+                  onChange={(event) => {
+                    void handleDecorUpload(event.currentTarget.files?.[0] ?? null);
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Ảnh sẽ được kéo về đúng 1920x1080, nên dùng ảnh 16:9. Vùng xanh được dò tự động
+                ngay khi upload.
+              </p>
+            </div>
+
+            {decorImages.length ? (
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setDecorGroupFilter(null)}
+                  className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                    decorGroupFilter === null
+                      ? "border-primary bg-primary/15 text-foreground"
+                      : "border-border/70 text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Tất cả ({decorImages.length})
+                </button>
+                {decorByGroup.map(({ group, items }) => (
+                  <button
+                    key={group || "__none__"}
+                    type="button"
+                    onClick={() => {
+                      setDecorGroupFilter(group);
+                      // Nhom dang xem cung la nhom mac dinh cho anh upload tiep theo.
+                      setDecorUploadGroup(group);
+                      if (!selectedDecor || decorGroupOf(selectedDecor) !== group) {
+                        setSelectedDecorId(items[0]?.id ?? "");
+                      }
+                    }}
+                    className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                      decorGroupFilter === group
+                        ? "border-primary bg-primary/15 text-foreground"
+                        : "border-border/70 text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {group || DECOR_UNGROUPED} ({items.length})
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
+            {decorImages.length ? (
+              <div className="grid gap-4">
+                {visibleDecorGroups.map(({ group, items }) => {
+                  const enabledCount = items.filter((item) => item.enabled !== false).length;
+                  const isRenaming = decorGroupEdit?.from === group;
+                  return (
+                    <div key={group || "__none__"} className="grid gap-2">
+                      <div className="flex items-center gap-1.5 border-b border-border/60 pb-1">
+                        {isRenaming ? (
+                          <>
+                            <Input
+                              autoFocus
+                              value={decorGroupEdit.value}
+                              onChange={(event) =>
+                                setDecorGroupEdit({ from: group, value: event.currentTarget.value })
+                              }
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  void handleDecorGroupRename(group, event.currentTarget.value);
+                                } else if (event.key === "Escape") {
+                                  setDecorGroupEdit(null);
+                                }
+                              }}
+                              className="h-7 text-sm"
+                            />
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="size-7 shrink-0"
+                              disabled={decorGroupBusy}
+                              onClick={() => void handleDecorGroupRename(group, decorGroupEdit.value)}
+                            >
+                              <Check className="size-3.5" />
+                            </Button>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="size-7 shrink-0"
+                              onClick={() => setDecorGroupEdit(null)}
+                            >
+                              <X className="size-3.5" />
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+                              {group || DECOR_UNGROUPED}
+                            </span>
+                            <span className="shrink-0 text-xs text-muted-foreground">
+                              {enabledCount}/{items.length} bật
+                            </span>
+                            {group ? (
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant="ghost"
+                                className="size-7 shrink-0"
+                                title="Đổi tên nhóm"
+                                onClick={() => setDecorGroupEdit({ from: group, value: group })}
+                              >
+                                <Pencil className="size-3.5" />
+                              </Button>
+                            ) : null}
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 shrink-0 px-2 text-xs"
+                              disabled={decorGroupBusy || enabledCount === items.length}
+                              onClick={() => void handleDecorGroupEnable(group, true)}
+                            >
+                              Bật cả nhóm
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 shrink-0 px-2 text-xs"
+                              disabled={decorGroupBusy || enabledCount === 0}
+                              onClick={() => void handleDecorGroupEnable(group, false)}
+                            >
+                              Tắt
+                            </Button>
+                          </>
+                        )}
+                      </div>
+
+                      <div className="grid gap-2">
+                        {items.map((item) => (
+                          <div
+                            key={item.id}
+                            className={`min-w-0 rounded-lg border p-2 transition-colors ${
+                              selectedDecor?.id === item.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => setSelectedDecorId(item.id)}
+                              className="flex w-full min-w-0 items-center gap-3 text-left"
+                            >
+                              <img
+                                src={`/media/${item.processedRelativePath ?? item.relativePath}?t=${encodeURIComponent(item.updatedAt ?? "")}`}
+                                alt={item.name}
+                                className="h-12 w-20 shrink-0 rounded border border-border/50 object-cover"
+                              />
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-sm font-semibold text-foreground">{item.name}</span>
+                                <span className="block text-xs text-muted-foreground">
+                                  Khung {item.frame.w}x{item.frame.h} @ {item.frame.x},{item.frame.y}
+                                </span>
+                              </span>
+                              {item.enabled === false ? (
+                                <Badge variant="secondary" className="rounded-full">Tắt</Badge>
+                              ) : null}
+                            </button>
+                            <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                              <input
+                                type="checkbox"
+                                checked={item.enabled !== false}
+                                onChange={(event) => void handleDecorToggle(item.id, event.currentTarget.checked)}
+                                className="size-3.5"
+                              />
+                              Cho phép dùng khi render
+                            </label>
+                            {decorGroupInputFor === item.id ? (
+                              <Input
+                                autoFocus
+                                placeholder="Tên nhóm mới"
+                                className="mt-2 h-7 text-xs"
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    void handleDecorGroupAssign(item.id, event.currentTarget.value);
+                                  } else if (event.key === "Escape") {
+                                    setDecorGroupInputFor(null);
+                                  }
+                                }}
+                                onBlur={(event) => {
+                                  const value = event.currentTarget.value.trim();
+                                  if (value) void handleDecorGroupAssign(item.id, value);
+                                  else setDecorGroupInputFor(null);
+                                }}
+                              />
+                            ) : (
+                              <select
+                                value={decorGroupOf(item)}
+                                onChange={(event) => {
+                                  const value = event.currentTarget.value;
+                                  if (value === DECOR_NEW_GROUP) setDecorGroupInputFor(item.id);
+                                  else void handleDecorGroupAssign(item.id, value);
+                                }}
+                                className="mt-2 h-7 w-full rounded-md border border-input bg-background px-2 text-xs text-muted-foreground"
+                              >
+                                <option value="">{DECOR_UNGROUPED}</option>
+                                {decorGroups.filter(Boolean).map((name) => (
+                                  <option key={name} value={name}>
+                                    {name}
+                                  </option>
+                                ))}
+                                <option value={DECOR_NEW_GROUP}>+ Nhóm mới...</option>
+                              </select>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <EmptyCard
+                title="Chưa có ảnh decor"
+                description="Upload ảnh có vùng nền xanh (ví dụ phòng khách với TV màn hình xanh) để bắt đầu."
+              />
+            )}
+          </div>
+
+          {selectedDecor ? (
+            <div className="grid gap-4">
+              <StoryDecorFrameEditor
+                key={selectedDecor.id}
+                image={selectedDecor}
+                previewPath={decorPreviewPath}
+                isPreviewLoading={isDecorPreviewLoading}
+                isSaving={isDecorSaving}
+                onRequestPreview={() => void handleDecorFramePreview()}
+                onDetectFrame={handleDecorDetect}
+                onSave={handleDecorSave}
+              />
+              <div className="flex flex-wrap gap-2 border-t border-border/60 pt-4">
+                <Button
+                  type="button"
+                  variant="destructive"
+                  onClick={() => void handleDecorDelete(selectedDecor.id)}
+                >
+                  <Trash2 className="mr-2 size-4" />
+                  Xoá ảnh decor
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </div>
       </PageSection>
 
       <PageSection>

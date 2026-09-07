@@ -21,6 +21,12 @@ from werkzeug.utils import secure_filename
 from src.config import Config
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.logger import logger
+from src.utils.overlay_placement import (
+    apply_placement_updates,
+    corner_expr,
+    placement_expr,
+    probe_overlay_size,
+)
 
 _seed_lock = threading.Lock()
 
@@ -59,20 +65,15 @@ def _absolute(filename: str) -> str:
 
 
 def _position_expr(position: str, margin: int) -> tuple[str, str]:
-    safe_margin = max(0, int(margin))
-    if position == "top_left":
-        return str(safe_margin), str(safe_margin)
-    if position == "top_right":
-        return f"W-w-{safe_margin}", str(safe_margin)
-    if position == "bottom_left":
-        return str(safe_margin), f"H-h-{safe_margin}"
-    return f"W-w-{safe_margin}", f"H-h-{safe_margin}"
+    return corner_expr(position, margin)
 
 
 def overlay_position_expr(record: dict) -> tuple[str, str]:
-    return _position_expr(
-        str(record.get("position") or Config.STORY_CTA_OVERLAY_POSITION),
-        int(record.get("margin") or Config.STORY_CTA_OVERLAY_MARGIN),
+    """Where this CTA sits: free x/y when set, else the legacy corner."""
+    return placement_expr(
+        record,
+        default_position=Config.STORY_CTA_OVERLAY_POSITION,
+        default_margin=Config.STORY_CTA_OVERLAY_MARGIN,
     )
 
 
@@ -101,6 +102,32 @@ def get_active_cta_overlay() -> dict | None:
         return None
     default = next((item for item in valid if item.get("isDefault")), None)
     return default or valid[0]
+
+
+def get_cta_overlay(overlay_id: str) -> dict | None:
+    """Ban ghi CTA theo id, chi tra ve khi file alpha da xu ly con ton tai.
+
+    Khong loc theo co ``enabled``: chon tay mot CTA o trang batch la da co y bat
+    no cho lan render do. ``enabled`` chi chi phoi :func:`get_active_cta_overlay`.
+    """
+    wanted = str(overlay_id or "").strip()
+    if not wanted:
+        return None
+    overlays = load_cta_index().get("overlays", [])
+    record = next((item for item in overlays if item.get("id") == wanted), None)
+    return record if record and processed_abs_path(record) else None
+
+
+def build_cta_rotation(overlay_ids: list[str], count: int) -> list[str]:
+    """Chia cac CTA da chon cho ``count`` video (bo bai xao).
+
+    Cac id khong tra cuu duoc (da xoa, chua xu ly xong) bi loai truoc khi chia,
+    dung nhu :func:`src.utils.story_decor_images.build_decor_rotation`.
+    """
+    from src.utils.asset_rotation import deal_rotation
+
+    usable = [overlay_id for overlay_id in overlay_ids if get_cta_overlay(overlay_id)]
+    return deal_rotation(usable, count)
 
 
 def preprocess_cta_overlay(source_path: str, record: dict) -> str:
@@ -136,6 +163,14 @@ def preprocess_cta_overlay(source_path: str, record: dict) -> str:
         raise RuntimeError("FFmpeg failed to preprocess CTA overlay.")
     if not os.path.isfile(output_path):
         raise RuntimeError("Processed CTA overlay was not created.")
+
+    # `scale={width}:-2` means the height is only known now. Record it so the
+    # placement editor can draw the overlay at its true size and free
+    # coordinates can be clamped against it.
+    size = probe_overlay_size(output_path)
+    if size:
+        record["processedWidth"], record["processedHeight"] = size
+
     return processed_filename
 
 
@@ -269,10 +304,6 @@ def update_cta_overlay(overlay_id: str, updates: dict) -> dict | None:
             record[key] = updates[key]
             regenerate = True
 
-    for key in ("position", "margin"):
-        if key in updates and updates[key] is not None:
-            record[key] = updates[key]
-
     if "enabled" in updates and updates["enabled"] is not None:
         record["enabled"] = bool(updates["enabled"])
 
@@ -293,6 +324,10 @@ def update_cta_overlay(overlay_id: str, updates: dict) -> dict | None:
                 os.remove(_absolute(str(old_processed)))
             except OSError:
                 pass
+
+    # After any re-encode: a new scaleWidth changes the overlay's size, and the
+    # coordinates are clamped against that size.
+    apply_placement_updates(record, updates)
 
     record["updatedAt"] = datetime.now().isoformat()
     save_cta_index(index)

@@ -2,7 +2,11 @@
 
 import src.utils.story_cta_overlay as cta
 from src.config import Config
-from src.utils.story_overlay_packs import build_pack_signature, build_precompose_command
+from src.utils.story_overlay_packs import (
+    build_pack_signature,
+    build_precompose_command,
+    pack_hash,
+)
 
 
 def test_cta_position_expr_all_corners():
@@ -16,6 +20,12 @@ def test_overlay_position_expr_falls_back_to_config(monkeypatch):
     monkeypatch.setattr(Config, "STORY_CTA_OVERLAY_POSITION", "top_left")
     monkeypatch.setattr(Config, "STORY_CTA_OVERLAY_MARGIN", 24)
     assert cta.overlay_position_expr({}) == ("24", "24")
+
+
+def test_overlay_position_expr_prefers_free_coordinates(monkeypatch):
+    monkeypatch.setattr(Config, "TARGET_RESOLUTION", "1920x1080")
+    record = {"x": 640, "y": 400, "position": "top_left", "margin": 24}
+    assert cta.overlay_position_expr(record) == ("640", "400")
 
 
 def test_pack_signature_includes_cta(tmp_path, monkeypatch):
@@ -34,6 +44,27 @@ def test_pack_signature_includes_cta(tmp_path, monkeypatch):
     assert entry["kind"] == "cta"
     assert entry["x"] == "24"
     assert entry["y"] == "24"
+
+
+def test_pack_signature_changes_when_cta_moves(tmp_path, monkeypatch):
+    """Moving an overlay must invalidate the cached pack it was baked into."""
+    monkeypatch.setattr(Config, "TARGET_RESOLUTION", "1920x1080")
+    monkeypatch.setattr(Config, "TARGET_FPS", 30)
+    monkeypatch.setattr(Config, "STORY_OVERLAY_PACK_DURATION_SECONDS", 80)
+
+    cta_path = tmp_path / "cta_alpha.mov"
+    cta_path.write_bytes(b"cta")
+    base = {"id": "cta-1", "durationSeconds": 10.0, "position": "top_left", "margin": 24}
+
+    corner = pack_hash(build_pack_signature([], None, None, base, str(cta_path)))
+    moved = pack_hash(
+        build_pack_signature([], None, None, {**base, "x": 640, "y": 400}, str(cta_path))
+    )
+    moved_again = pack_hash(
+        build_pack_signature([], None, None, {**base, "x": 640, "y": 420}, str(cta_path))
+    )
+
+    assert corner != moved != moved_again
 
 
 def test_pack_signature_orders_tv_waveform_cta(tmp_path, monkeypatch):
