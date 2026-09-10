@@ -17,6 +17,7 @@ from src.utils.clip_canonical import (
 from src.utils.clip_spec_validation import probe_clip_spec
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.logger import logger
+from src.utils.pexels_key_pool import PexelsQuotaExhausted, get_pexels_key_pool
 from src.utils.story_library import (
     _clips_dir,
     _index_lock,
@@ -32,26 +33,102 @@ _TARGET_PROVIDER_VIDEO_HEIGHT = 1080
 _RATE_LIMIT_MAX_RETRIES = 4
 _RATE_LIMIT_BASE_DELAY = 2.0  # giây
 
+# Lỗi mạng thoáng qua (DNS chớp, reset kết nối, timeout) có ngân sách retry
+# RIÊNG với quota: một cú getaddrinfo hỏng không được phép đốt hết lượt đổi key,
+# và ngược lại. Đây không phải phòng xa — job harvest hv-3095f331 chết sau 2h37p
+# và 1947 video đã tải chỉ vì một lần "Failed to resolve api.pexels.com"
+# (2026-09-08), do đường search không hề retry lỗi mạng trong khi đường tải file
+# thì có. 5 lần thử = 2+4+8+16+32 ≈ 62 giây, thừa sức qua một cú chớp DNS.
+_NETWORK_MAX_RETRIES = 5
+
+
+def _is_pexels_api_url(url) -> bool:
+    try:
+        return (urlparse(str(url)).hostname or "").lower() == "api.pexels.com"
+    except ValueError:
+        return False
+
 
 def _get_with_rate_limit_retry(url, *, headers=None, params=None, timeout=30):
-    """GET có retry/backoff cho HTTP 429. Trả về Response hoặc raise ở lần cuối."""
-    for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
-        resp = requests.get(url, headers=headers, params=params, timeout=timeout)
-        if resp.status_code != 429 or attempt == _RATE_LIMIT_MAX_RETRIES:
+    """GET có retry/backoff cho HTTP 429. Trả về Response hoặc raise ở lần cuối.
+
+    Với api.pexels.com, quota tính theo key và reset theo GIỜ nên ngủ chờ là vô
+    ích — thay vào đó request lấy key từ pool (src/utils/pexels_key_pool.py):
+    key nào dính 429 bị cho nghỉ tới lúc reset và lượt thử ngay sau đó dùng key
+    khác, không tốn một giây nào. Chỉ khi CẢ pool đang nghỉ mới ngủ, và ngủ tối
+    đa PEXELS_POOL_MAX_WAIT_SECONDS rồi raise PexelsQuotaExhausted.
+
+    Header Authorization cho Pexels do pool tự gắn, caller không cần truyền.
+    """
+    pool = get_pexels_key_pool() if _is_pexels_api_url(url) else None
+    max_rate_limit_retries = pool.max_attempts() if pool else _RATE_LIMIT_MAX_RETRIES
+
+    rate_limit_attempt = 0
+    network_attempt = 0
+
+    while True:
+        request_headers = headers
+
+        if pool is not None:
+            lease = pool.acquire()
+            if lease is None:
+                wait = pool.wait_seconds()
+                if rate_limit_attempt >= max_rate_limit_retries or wait > Config.PEXELS_POOL_MAX_WAIT_SECONDS:
+                    raise PexelsQuotaExhausted(
+                        f"Het quota Pexels tren ca {pool.size()} key — key som nhat "
+                        f"tinh lai sau {wait / 60:.0f} phut. Them key vao .env "
+                        f"(PEXELS_API_KEY_2, _3, ...) hoac doi roi chay lai."
+                    )
+                rate_limit_attempt += 1
+                logger.warning(
+                    f"[Pexels] Ca {pool.size()} key dang cooldown — cho {wait:.0f}s"
+                )
+                time.sleep(wait)
+                continue
+            request_headers = {**(headers or {}), "Authorization": lease.key}
+
+        try:
+            resp = requests.get(url, headers=request_headers, params=params, timeout=timeout)
+        except requests.RequestException as exc:
+            # Hỏng đường truyền, không phải hỏng quota — đổi key vô ích, cứ chờ
+            # rồi gọi lại. Ngân sách riêng nên một cú chớp mạng không làm mất
+            # lượt đổi key khi request sau đó dính 429.
+            if network_attempt >= _NETWORK_MAX_RETRIES:
+                raise
+            delay = _RATE_LIMIT_BASE_DELAY * (2 ** network_attempt)
+            network_attempt += 1
+            logger.warning(
+                f"Loi mang khi goi {url}: {exc} — thu lai "
+                f"{network_attempt}/{_NETWORK_MAX_RETRIES} sau {delay:.1f}s"
+            )
+            time.sleep(delay)
+            continue
+
+        if pool is not None:
+            pool.report(lease, resp.status_code, resp.headers)
+
+        if resp.status_code != 429 or rate_limit_attempt >= max_rate_limit_retries:
             resp.raise_for_status()
             return resp
+
+        rate_limit_attempt += 1
+
+        if pool is not None:
+            # Key vừa dùng đã bị pool cho nghỉ; vòng sau nhận key khác còn quota
+            # nên thử lại ngay, không backoff.
+            continue
+
         retry_after = resp.headers.get("Retry-After")
+        backoff = _RATE_LIMIT_BASE_DELAY * (2 ** (rate_limit_attempt - 1))
         try:
-            delay = float(retry_after) if retry_after else _RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+            delay = float(retry_after) if retry_after else backoff
         except (TypeError, ValueError):
-            delay = _RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+            delay = backoff
         logger.warning(
-            f"Rate limited (429) on {url} — retry {attempt + 1}/{_RATE_LIMIT_MAX_RETRIES} sau {delay:.1f}s"
+            f"Rate limited (429) on {url} — retry "
+            f"{rate_limit_attempt}/{max_rate_limit_retries} sau {delay:.1f}s"
         )
         time.sleep(delay)
-    # Không thể tới đây, nhưng để an toàn kiểu trả về:
-    resp.raise_for_status()
-    return resp
 
 
 def _ensure_dirs(library_id=None):
@@ -125,13 +202,14 @@ def _resolve_pixabay_download_url(video_id: str) -> str | None:
 
 
 def _resolve_pexels_download_url(video_id: str) -> str | None:
-    api_key = Config.PEXELS_API_KEY
-    if not api_key:
+    if not get_pexels_key_pool().size():
         logger.error("PEXELS_API_KEY not configured")
         return None
     api_url = f"https://api.pexels.com/videos/videos/{video_id}"
     try:
-        resp = _get_with_rate_limit_retry(api_url, headers={"Authorization": api_key}, timeout=30)
+        # Authorization do pool gắn theo từng lượt thử — mỗi lần retry là một key
+        # khác, nên không hardcode header ở đây.
+        resp = _get_with_rate_limit_retry(api_url, timeout=30)
         data = resp.json()
         video_files = data.get("video_files", [])
         if not video_files:
@@ -342,8 +420,7 @@ def search_pexels_videos(
     orientation: str | None = None,
     size: str | None = None,
 ) -> dict:
-    api_key = Config.PEXELS_API_KEY
-    if not api_key:
+    if not get_pexels_key_pool().size():
         raise ValueError("PEXELS_API_KEY is not configured")
 
     params = {"query": query, "page": page, "per_page": per_page}
@@ -352,9 +429,10 @@ def search_pexels_videos(
     if size:
         params["size"] = size
 
+    # Không truyền Authorization: pool chọn key cho từng lượt thử, nên một trang
+    # bị 429 sẽ được thử lại ngay bằng key khác thay vì hỏng cả lượt quét.
     resp = _get_with_rate_limit_retry(
         "https://api.pexels.com/videos/search",
-        headers={"Authorization": api_key},
         params=params,
         timeout=30,
     )
@@ -417,6 +495,7 @@ def iter_all_provider_videos(
     should_stop=None,
     on_page=None,
     on_truncated=None,
+    on_quota_exhausted=None,
 ):
     """Yield every video a keyword has, page by page, deduped by provider id.
 
@@ -431,14 +510,22 @@ def iter_all_provider_videos(
     filters to what comes out of here -- see prefetch_item_rejection_reason.
 
     Stops on: an empty page, ``page * per_page >= total``, ``should_stop()``, the
-    provider's page backstop, or an HTTP 4xx. That last one matters: Pixabay
-    answers 400 (not an empty page) once you ask past the last page of a query
-    whose totalHits was capped, so a 4xx here means "out of results", not failure.
+    provider's page backstop, an HTTP 4xx, or every Pexels key running out of
+    quota. The 4xx case matters: Pixabay answers 400 (not an empty page) once you
+    ask past the last page of a query whose totalHits was capped, so a 4xx here
+    means "out of results", not failure. 429 is deliberately excluded from that
+    rule -- a rate limit is the one 4xx that means "ask again later", and folding
+    it into "out of results" is exactly how a sweep cut short by quota used to
+    report itself as complete.
+
     ``on_page(page, total, seen_so_far)`` is called after each page for progress.
     ``on_truncated(pages, total)`` fires if the page backstop -- not the provider --
     is what ended the sweep, so a partial result is never mistaken for a complete
     one. Pexels routinely reports 8000 results for an ordinary keyword, which is
     exactly PEXELS_MAX_PAGES * 80, so this is reachable in practice.
+    ``on_quota_exhausted(reason, pages, total)`` fires when the key pool is spent:
+    the sweep ends with what it has rather than failing the whole job, but the
+    caller must mark the result partial the same way it does for a truncation.
     """
     max_pages = PIXABAY_MAX_PAGES if provider == "pixabay" else PEXELS_MAX_PAGES
     seen: set[str] = set()
@@ -458,8 +545,19 @@ def iter_all_provider_videos(
                 min_width=min_width,
                 min_height=min_height,
             )
+        except PexelsQuotaExhausted as exc:
+            logger.warning(
+                f"[Prefetch] {provider} sweep for {query!r} stopped at page {page}: {exc}"
+            )
+            if on_quota_exhausted:
+                on_quota_exhausted(str(exc), page, last_total)
+            return
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
+            if status == 429:
+                # "Cham lai", khong phai "het ket qua" -- de no roi len caller thay
+                # vi bao im lang la da quet xong.
+                raise
             if 400 <= status < 500:
                 logger.info(
                     f"[Prefetch] {provider} page {page} returned {status} - treating as end of results"

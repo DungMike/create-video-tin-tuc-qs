@@ -358,6 +358,39 @@ def _migrate_legacy_default_layout():
         shutil.move(legacy_index, dest_index)
 
 
+def _migrate_library_name_format(data: dict) -> bool:
+    """Keo cac ten thu vien cu ve mau "xx-yy <ten>". Tra ve True neu co thay doi.
+
+    Chay moi lan doc registry va chi ghi khi that su doi, nen vua don duoc du lieu
+    tao truoc khi co quy uoc, vua khong lam gi them o cac lan sau (idempotent).
+    """
+    libraries = data.get("libraries", [])
+    changed = False
+    for lib in libraries:
+        current = str(lib.get("name") or "")
+        try:
+            normalized = normalize_library_name(current)
+        except LibraryError:
+            # Khong tim thay cap so trong ten (vi du "Default"): giu nguyen va de
+            # nguoi dung tu dat lai. Doan bua o day se sinh ra ten sai lech.
+            continue
+        if normalized == current:
+            continue
+        if any(
+            other is not lib and str(other.get("name") or "").strip().lower() == normalized.lower()
+            for other in libraries
+        ):
+            logger.warning(
+                f"Skipped Story library rename {current!r} -> {normalized!r}: name already taken."
+            )
+            continue
+        lib["name"] = normalized
+        lib["updatedAt"] = _utc_now_iso()
+        changed = True
+        logger.info(f"Story library renamed to the standard format: {current!r} -> {normalized!r}")
+    return changed
+
+
 def ensure_libraries_registry() -> dict:
     """Ensure libraries.json exists, seeding a Default entry only on first init.
 
@@ -366,11 +399,15 @@ def ensure_libraries_registry() -> dict:
     ``default/`` and a Default entry is seeded. Once the file exists it is trusted
     as-is — an intentionally emptied registry (user deleted every library) is left
     empty rather than resurrecting a Default. Idempotent.
+
+    Cung nhan tien keo cac ten thu vien cu ve mau "xx-yy <ten>"
+    (xem ``_migrate_library_name_format``).
     """
     with _registry_lock:
         registry_existed = os.path.isfile(_registry_path())
         _migrate_legacy_default_layout()
         data = _read_registry_raw()
+        dirty = not registry_existed
         if not registry_existed:
             libraries = list(data.get("libraries", []))
             if not any(
@@ -386,15 +423,23 @@ def ensure_libraries_registry() -> dict:
                 )
                 libraries = [_default_library_record()] + libraries
                 data["libraries"] = libraries
+        if _migrate_library_name_format(data):
+            dirty = True
+        if dirty:
             _save_registry(data)
         return data
 
 
 def load_libraries() -> list[dict]:
-    """Return all libraries, Default first."""
+    """Return all libraries sorted by name (a-z, 1-9).
+
+    Ten thu vien theo mau "xx-yy <ten>" nen thu tu nay xep chung theo dai kenh —
+    de tim hon nhieu so voi thu tu tao truoc/tao sau. Khong con ghim thu vien mac
+    dinh len dau: no da co nhan "(mac dinh)" trong danh sach.
+    """
     data = ensure_libraries_registry()
     libraries = list(data.get("libraries", []))
-    libraries.sort(key=lambda lib: (not lib.get("isDefault"), str(lib.get("createdAt") or "")))
+    libraries.sort(key=lambda lib: library_sort_key(lib.get("name")))
     return libraries
 
 
@@ -438,6 +483,76 @@ class LibraryError(Exception):
         self.message = message
 
 
+# --------------------------------------------------------------------------- #
+# Ten thu vien: mau "xx-yy <ten>"
+# --------------------------------------------------------------------------- #
+# Moi thu vien phu trach mot dai kenh, nen ten luon mo dau bang cap so cua dai do
+# ("21-25 kenh viet"). Nho mau chung nay danh sach xep duoc theo so va nguoi dung
+# doc luot la biet thu vien nao phuc vu kenh nao.
+NAME_FORMAT_HINT = (
+    "Tên thư viện phải theo mẫu \"xx-yy tên thư viện\", ví dụ: 21-25 kenh viet."
+)
+
+# Cap so o dau ten. Chap nhan moi kieu ngan cach nguoi dung hay go (space, gach
+# ngang dai/ngan, gach duoi, gach cheo) roi chuan hoa ve dung dau "-".
+_NAME_RANGE_PREFIX_RE = re.compile(
+    r"^(\d{1,4})(?:\s*[-‐-―_/]\s*|\s+)(\d{1,4})(?!\d)\s*[-‐-―_.:]?\s*(.*)$",
+    re.DOTALL,
+)
+# Cap so bi ke sau mot vai chu ("kenh 31 35 Thai Tam linh"): keo no ve dau ten.
+_NAME_RANGE_ANYWHERE_RE = re.compile(r"(?<!\d)(\d{1,4})\s*[-‐-―_/ ]\s*(\d{1,4})(?!\d)")
+
+# Rac thua o hai dau phan mo ta sau khi da tach cap so ra.
+_NAME_TRIM_CHARS = " -‐‑‒–—―_.:"
+
+
+def normalize_library_name(name: str) -> str:
+    """Chuan hoa ten thu vien ve dung mau ``xx-yy <ten>``.
+
+    Nhan cac bien the nguoi dung hay go ("21 25 kenh viet", "21_25 kenh viet",
+    "kenh 31 35 Thai Tam linh") va tra ve dang chuan "21-25 kenh viet". Nem
+    ``LibraryError`` khi khong tim thay cap so hoac phan mo ta trong rong, thay vi
+    doan bua — de ten sai khong am tham lot vao registry.
+    """
+    raw = re.sub(r"\s+", " ", str(name or "")).strip()
+    if not raw:
+        raise LibraryError("missing_name", "Tên thư viện không được để trống.")
+
+    match = _NAME_RANGE_PREFIX_RE.match(raw)
+    if match:
+        start, end, rest = match.group(1), match.group(2), match.group(3)
+    else:
+        found = _NAME_RANGE_ANYWHERE_RE.search(raw)
+        if not found:
+            raise LibraryError("invalid_library_name", NAME_FORMAT_HINT)
+        start, end = found.group(1), found.group(2)
+        rest = f"{raw[:found.start()]} {raw[found.end():]}"
+
+    rest = re.sub(r"\s+", " ", rest).strip(_NAME_TRIM_CHARS)
+    if not rest:
+        raise LibraryError("invalid_library_name", NAME_FORMAT_HINT)
+    return f"{start}-{end} {rest}"
+
+
+def library_sort_key(name) -> tuple:
+    """Khoa sap xep tu nhien: so theo gia tri, chu theo a-z, bo dau va khong phan biet hoa thuong.
+
+    Tach chuoi thanh cac khuc so / khong-so nen "9-10 x" dung truoc "21-25 x"
+    (so sanh chuoi thuan tuy se dao nguoc hai cai nay).
+    """
+    text = unicodedata.normalize("NFKD", str(name or ""))
+    text = text.encode("ascii", "ignore").decode("ascii").lower().strip()
+    key: list[tuple[int, int, str]] = []
+    for chunk in re.split(r"(\d+)", text):
+        if not chunk:
+            continue
+        if chunk.isdigit():
+            key.append((0, int(chunk), ""))
+        else:
+            key.append((1, 0, chunk))
+    return tuple(key)
+
+
 def _name_taken(name: str, libraries: list[dict], *, exclude_id: str | None = None) -> bool:
     target = name.strip().lower()
     for lib in libraries:
@@ -449,9 +564,7 @@ def _name_taken(name: str, libraries: list[dict], *, exclude_id: str | None = No
 
 
 def create_library(name: str) -> dict:
-    clean_name = str(name or "").strip()
-    if not clean_name:
-        raise LibraryError("missing_name", "Tên thư viện không được để trống.")
+    clean_name = normalize_library_name(name)
 
     with _registry_lock:
         data = ensure_libraries_registry()
@@ -482,9 +595,7 @@ def create_library(name: str) -> dict:
 
 
 def rename_library(library_id, name: str) -> dict:
-    clean_name = str(name or "").strip()
-    if not clean_name:
-        raise LibraryError("missing_name", "Tên thư viện không được để trống.")
+    clean_name = normalize_library_name(name)
 
     with _registry_lock:
         data = ensure_libraries_registry()
@@ -530,8 +641,8 @@ def delete_library(library_id, *, delete_clips: bool = True) -> dict:
 
         remaining = [lib for lib in libraries if lib.get("id") != lid]
 
-        # If the deleted library was the default, promote the first remaining library
-        # (earliest createdAt, matching load_libraries' order) to be the new default.
+        # If the deleted library was the default, promote the oldest remaining
+        # library (earliest createdAt) to be the new default.
         new_default_id = ""
         if was_default and remaining:
             promoted = min(remaining, key=lambda lib: str(lib.get("createdAt") or ""))

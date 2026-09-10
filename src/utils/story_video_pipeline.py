@@ -8,7 +8,9 @@ import os
 import random
 import re
 import shutil
+import tempfile
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -34,21 +36,76 @@ def _utc_now() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
+# Số lần đọc lại khi gặp file JSON đang bị ghi đè dở. Ba lần cách nhau 50ms là
+# thừa cho một lần ghi vài chục KB.
+_LOAD_JSON_RETRIES = 3
+_LOAD_JSON_RETRY_DELAY = 0.05
+
+# os.replace trên Windows ném WinError 5 nếu file đích đang được ai đó mở đọc:
+# Python mở file không kèm FILE_SHARE_DELETE nên một reader đang đọc sẽ chặn việc
+# thay thế. Reader chỉ giữ file vài micro giây nên thử lại ngắn là ăn; 10 lần x
+# 50ms = 0.5s, thừa sức cho UI poll mỗi giây.
+_REPLACE_RETRIES = 10
+_REPLACE_RETRY_DELAY = 0.05
+
+
 def _save_json(path: str, data: dict):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as file_obj:
-        json.dump(data, file_obj, ensure_ascii=False, indent=2)
+    """Ghi atomic: ra file tạm cùng thư mục rồi ``os.replace``.
+
+    Trước đây mở thẳng bằng ``"w"`` — lệnh đó cắt file về 0 byte NGAY LẬP TỨC rồi
+    mới ghi dần nội dung vào. Mọi reader lọt vào cửa sổ đó nhận JSONDecodeError,
+    ``_load_json`` trả None, và caller hiểu thành "job không tồn tại": job biến
+    mất khỏi danh sách, ``GET /harvest/<id>`` trả 404, cancel im lặng không ăn.
+    Không phải phòng xa — đo thực tế trên chính hai hàm này: **290/3000 lần đọc
+    hỏng (9.7%)** khi có một writer chạy song song, mà harvest thì ghi progress
+    sau MỖI video còn UI thì poll mỗi giây.
+
+    ``os.replace`` là atomic khi nguồn và đích cùng volume — nên file tạm phải
+    nằm cùng thư mục với đích, không phải trong temp dir của hệ thống.
+    """
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file_obj:
+            json.dump(data, file_obj, ensure_ascii=False, indent=2)
+        for attempt in range(_REPLACE_RETRIES):
+            try:
+                os.replace(tmp_path, path)
+                return
+            except PermissionError:
+                if attempt == _REPLACE_RETRIES - 1:
+                    raise
+                time.sleep(_REPLACE_RETRY_DELAY)
+    except BaseException:
+        # Ghi dở thì dọn file tạm, đừng để rác tích lại trong thư mục job.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _load_json(path: str) -> dict | None:
-    if not os.path.isfile(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as file_obj:
-            data = json.load(file_obj)
-        return data if isinstance(data, dict) else None
-    except (json.JSONDecodeError, OSError):
-        return None
+    """Đọc JSON, thử lại vài lần nếu vớ phải file đang được ghi đè.
+
+    ``_save_json`` ở trên đã ghi atomic nên không còn tự tạo ra cảnh này, nhưng
+    cùng một file có thể do process khác ghi (server chạy bản code cũ, hoặc một
+    job chạy ngoài web app), nên vẫn thử lại thay vì coi một lần đọc hỏng là
+    "không tồn tại" — nhầm lẫn đó chính là thứ làm job biến mất khỏi UI.
+    """
+    for attempt in range(_LOAD_JSON_RETRIES):
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as file_obj:
+                data = json.load(file_obj)
+            return data if isinstance(data, dict) else None
+        except (json.JSONDecodeError, OSError):
+            if attempt == _LOAD_JSON_RETRIES - 1:
+                return None
+            time.sleep(_LOAD_JSON_RETRY_DELAY)
+    return None
 
 
 def _story_dir(story_id: str) -> str:

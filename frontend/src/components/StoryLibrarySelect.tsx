@@ -23,6 +23,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, createStoryLibrary, deleteStoryLibrary, renameStoryLibrary } from "@/lib/api";
+import {
+  LIBRARY_NAME_HINT,
+  LIBRARY_NAME_PLACEHOLDER,
+  normalizeLibraryName,
+} from "@/lib/storyLibraryName";
 import type { StoryLibrary } from "@/types/api";
 
 export interface StoryLibrarySelectProps {
@@ -44,6 +49,22 @@ export interface StoryLibrarySelectProps {
   onSelectedIdsChange?: (libraryIds: string[]) => void;
 }
 
+/**
+ * Cho biet ten se duoc luu duoi dang nao. Im lang khi o nhap con trong hoac khi
+ * nguoi dung da go dung mau — chi len tieng khi co gi do se thay doi (hoac sai).
+ */
+function NamePreview({ raw, normalized }: { raw: string; normalized: string | null }) {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (!normalized) return <p className="text-xs text-destructive">{LIBRARY_NAME_HINT}</p>;
+  if (normalized === trimmed) return null;
+  return (
+    <p className="text-xs text-muted-foreground">
+      Sẽ lưu thành: <span className="font-medium text-foreground">{normalized}</span>
+    </p>
+  );
+}
+
 export function StoryLibrarySelect({
   libraries,
   value,
@@ -61,6 +82,10 @@ export function StoryLibrarySelect({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Ten se duoc luu sau khi chuan hoa ("21 25 kenh viet" -> "21-25 kenh viet").
+  // null = chua suy ra duoc cap so, nut Luu bi khoa lai.
+  const normalizedName = normalizeLibraryName(name);
+
   const active = libraries.find((lib) => lib.id === value);
   const multi = selectedIds !== undefined && onSelectedIdsChange !== undefined;
   const picked = selectedIds ?? [];
@@ -77,9 +102,9 @@ export function StoryLibrarySelect({
   };
 
   const handleCreate = async () => {
-    const trimmed = name.trim();
+    const trimmed = normalizedName;
     if (!trimmed) {
-      setError("Tên thư viện không được để trống.");
+      setError(LIBRARY_NAME_HINT);
       return;
     }
     setBusy(true);
@@ -106,9 +131,9 @@ export function StoryLibrarySelect({
   };
 
   const handleRename = async () => {
-    const trimmed = name.trim();
+    const trimmed = normalizedName;
     if (!trimmed) {
-      setError("Tên thư viện không được để trống.");
+      setError(LIBRARY_NAME_HINT);
       return;
     }
     setBusy(true);
@@ -284,7 +309,7 @@ export function StoryLibrarySelect({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Tạo thư viện mới</DialogTitle>
-            <DialogDescription>Đặt tên cho thư viện video theo chủ đề (ví dụ: Thành phố, Đồng quê).</DialogDescription>
+            <DialogDescription>{LIBRARY_NAME_HINT}</DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
             <Label htmlFor="new-library-name" className="text-xs">
@@ -299,15 +324,16 @@ export function StoryLibrarySelect({
               onKeyDown={(event) => {
                 if (event.key === "Enter") void handleCreate();
               }}
-              placeholder="Thành phố"
+              placeholder={LIBRARY_NAME_PLACEHOLDER}
             />
+            <NamePreview raw={name} normalized={normalizedName} />
             {error ? <p className="text-sm text-destructive">{error}</p> : null}
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" disabled={busy} onClick={() => setCreateOpen(false)}>
               Hủy
             </Button>
-            <Button type="button" disabled={busy} onClick={() => void handleCreate()}>
+            <Button type="button" disabled={busy || !normalizedName} onClick={() => void handleCreate()}>
               {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
               Tạo
             </Button>
@@ -325,7 +351,9 @@ export function StoryLibrarySelect({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Đổi tên thư viện</DialogTitle>
-            <DialogDescription>Chỉ đổi nhãn hiển thị, không ảnh hưởng tới clip bên trong.</DialogDescription>
+            <DialogDescription>
+              Chỉ đổi nhãn hiển thị, không ảnh hưởng tới clip bên trong. {LIBRARY_NAME_HINT}
+            </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
             <Label htmlFor="rename-library-name" className="text-xs">
@@ -340,14 +368,16 @@ export function StoryLibrarySelect({
               onKeyDown={(event) => {
                 if (event.key === "Enter") void handleRename();
               }}
+              placeholder={LIBRARY_NAME_PLACEHOLDER}
             />
+            <NamePreview raw={name} normalized={normalizedName} />
             {error ? <p className="text-sm text-destructive">{error}</p> : null}
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" disabled={busy} onClick={() => setRenameOpen(false)}>
               Hủy
             </Button>
-            <Button type="button" disabled={busy} onClick={() => void handleRename()}>
+            <Button type="button" disabled={busy || !normalizedName} onClick={() => void handleRename()}>
               {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
               Lưu
             </Button>

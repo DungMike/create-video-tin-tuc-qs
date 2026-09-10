@@ -928,6 +928,22 @@ def cancel_story_harvest(job_id: str):
     return jsonify(progress)
 
 
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>/resume", methods=["POST"])
+def resume_story_harvest(job_id: str):
+    """Chay tiep job bi dut (thuong la do restart web app giet daemon thread)."""
+    from src.utils.story_bulk_harvest import resume_harvest_job
+
+    try:
+        progress = resume_harvest_job(job_id)
+    except ValueError as exc:
+        return _error(str(exc), code="harvest_resume_failed")
+    if not progress:
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+
+    logger.info(f"[Harvest] Resumed job={job_id}")
+    return jsonify(progress), 202
+
+
 @story_video_bp.route("/api/story-video/library/harvest/<job_id>/items/delete", methods=["POST"])
 def delete_story_harvest_items(job_id: str):
     from src.utils.story_bulk_harvest import (

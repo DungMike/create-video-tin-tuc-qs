@@ -360,6 +360,13 @@ def run_prefetch(session_id: str):
             f"Da dung o {pages} trang (provider bao co {total} ket qua) — chua quet het."
         )
 
+    def on_quota_exhausted(reason: str, pages: int, total: int):
+        # Het quota API cung la mot luot quet do dang -- bao giong truncation chu
+        # khong de job im lang ket thuc nhu da quet xong.
+        truncated.append(
+            f"Da dung o {pages} trang (provider bao co {total} ket qua) — {reason}"
+        )
+
     def download_one(index: int, key: str, item: dict):
         # Only a real cancel abandons queued work. A size brake stops the sweep from
         # asking for more, but whatever it already queued still finishes -- otherwise
@@ -428,6 +435,7 @@ def run_prefetch(session_id: str):
                 should_stop=should_stop,
                 on_page=on_page,
                 on_truncated=on_truncated,
+                on_quota_exhausted=on_quota_exhausted,
             ):
                 if key in already_imported:
                     skipped_imported += 1

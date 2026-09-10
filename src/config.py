@@ -3,6 +3,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _numbered_env_keys(name: str, max_slots: int = 32) -> list[str]:
+    """Doc NAME, NAME_2, NAME_3, ... NAME_<max_slots> thanh mot list key.
+
+    Slot rong bi bo qua nen danh so thua (chi dien _2 va _5) van chay dung, va
+    key trung nhau chi duoc tinh mot lan -- pool xoay vong coi hai key giong het
+    nhau la mot quota, dem chung hai lan chi lam no tuong minh con quota.
+    """
+    values: list[str] = []
+    seen: set[str] = set()
+    for slot in range(1, max_slots + 1):
+        env_name = name if slot == 1 else f"{name}_{slot}"
+        value = (os.getenv(env_name) or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            values.append(value)
+    return values
+
+
 class Config:
     # Storage root. Every other storage path below derives from this, so pointing
     # STORAGE_DIR at another drive moves the whole storage tree in one step (the
@@ -211,6 +230,20 @@ class Config:
     # --- Story Video ---
     PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY", "")
     PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
+    # Pexels tinh quota THEO KEY: 200 request/gio, 20.000/thang. Mot luot quet
+    # het mot tu khoa (iter_all_provider_videos) ton toi 100 request, nen voi mot
+    # key duy nhat chi hai tu khoa la het quota va moi request sau do tra 429 --
+    # dung lam ket qua tai hang loat bi cat cut. Khai bao them key trong .env
+    # duoi dang PEXELS_API_KEY_2, _3, ... (toi _32); pool o
+    # src/utils/pexels_key_pool.py xoay vong qua chung, key nao dinh 429 thi cho
+    # nghi den luc reset va request ke tiep nhay ngay sang key con quota.
+    PEXELS_API_KEYS = _numbered_env_keys("PEXELS_API_KEY")
+    # Thoi gian cho mot key nghi khi provider khong gui kem X-Ratelimit-Reset /
+    # Retry-After. Quota Pexels reset theo gio nen mac dinh la mot gio.
+    PEXELS_KEY_COOLDOWN_SECONDS = int(os.getenv("PEXELS_KEY_COOLDOWN_SECONDS", "3600"))
+    # Khi CA pool dang nghi: chi ngu toi da bay nhieu giay roi bao loi len caller.
+    # Cho ca tieng dong ho trong mot job tai hang loat la treo, khong phai retry.
+    PEXELS_POOL_MAX_WAIT_SECONDS = float(os.getenv("PEXELS_POOL_MAX_WAIT_SECONDS", "60"))
     # Length of one library clip / one render segment. Downloads are cut into clips
     # of exactly this length, and the render trims each clip to it (concat outpoint),
     # so a library built at 3s and a render at 3s stay in lockstep. A library can

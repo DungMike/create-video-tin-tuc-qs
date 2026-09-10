@@ -21,6 +21,7 @@ import {
   pauseStoryLibraryBakeJob,
   resumeStoryLibraryBakeJob,
 } from "@/lib/api";
+import { LIBRARY_NAME_HINT, normalizeLibraryName } from "@/lib/storyLibraryName";
 import type {
   StoryLibrary,
   StoryLibraryBakeJob,
@@ -121,9 +122,10 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
 
   const handleStart = async () => {
     if (!source) return;
-    const trimmed = name.trim();
+    // Ten thu vien dich cung phai theo mau "xx-yy <ten>" nhu moi thu vien khac.
+    const trimmed = normalizeLibraryName(name);
     if (!trimmed) {
-      setError("Tên thư viện đích không được để trống.");
+      setError(LIBRARY_NAME_HINT);
       return;
     }
     if (!styleId) {
@@ -281,8 +283,9 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
                   value={name}
                   disabled={busy}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Tên thư viện đã style"
+                  placeholder="21-25 kenh viet · Retro Film Ấm"
                 />
+                <p className="text-xs text-muted-foreground">{LIBRARY_NAME_HINT}</p>
               </div>
               <p className="text-xs text-muted-foreground">
                 {source?.clipCount ?? 0} clip 5s sẽ được nung hiệu ứng và giữ nguyên số lượng. Sóng âm và CTA

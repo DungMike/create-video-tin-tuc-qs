@@ -30,6 +30,7 @@ from datetime import datetime
 from src.config import Config
 from src.utils.file_manager import remove_file_with_retries, storage_relative_path
 from src.utils.logger import logger
+from src.utils.pexels_key_pool import PexelsQuotaExhausted
 from src.utils.story_video_pipeline import _load_json, _save_json
 from src.utils.video_source_downloader import (
     _download_file,
@@ -55,6 +56,11 @@ _MAX_PAGES_PER_QUERY = 200
 # Ghi manifest theo checkpoint thay vi sau moi video - manifest duoc ghi de
 # nguyen file, checkpoint giu so lan ghi o muc hop ly ma van chiu duoc crash.
 _MANIFEST_CHECKPOINT_EVERY = 10
+
+# Worker ghi progress sau MOI trang search va MOI video tai xong, nen mot job
+# con song khong the im lang lau hon nguong nay. Vuot nguong nghia la thread da
+# chet (restart web app chang han) du progress.json van con chu "running".
+_HARVEST_STALE_SECONDS = 600
 
 _job_locks_guard = threading.Lock()
 _job_locks: dict[str, threading.RLock] = {}
@@ -161,6 +167,28 @@ def request_harvest_cancel(job_id: str) -> dict | None:
     return progress
 
 
+def _seconds_since(timestamp: str | None) -> float | None:
+    if not timestamp:
+        return None
+    try:
+        parsed = datetime.strptime(str(timestamp).rstrip("Z"), "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
+    return (datetime.utcnow() - parsed).total_seconds()
+
+
+def is_harvest_stale(progress: dict) -> bool:
+    """Status con "running" nhung khong con ai ghi progress -> worker da chet.
+
+    Worker la daemon thread: restart web app la no bien mat khong kip doi status
+    sang "failed". Khong co dau hieu nay thi job zombie nhin y het job dang chay.
+    """
+    if progress.get("status") not in {"running", "cancelling"}:
+        return False
+    age = _seconds_since(progress.get("updatedAt"))
+    return age is not None and age > _HARVEST_STALE_SECONDS
+
+
 def list_harvest_jobs() -> list[dict]:
     """Moi job kem so video dang cho chon loc, moi nhat truoc."""
     root = _jobs_root()
@@ -175,6 +203,7 @@ def list_harvest_jobs() -> list[dict]:
         items = load_harvest_manifest(job_id).get("items", [])
         progress["keptItems"] = sum(1 for item in items if item.get("status") == "kept")
         progress["totalItems"] = len(items)
+        progress["stale"] = is_harvest_stale(progress)
         jobs.append(progress)
 
     jobs.sort(key=lambda job: job.get("startedAt", ""), reverse=True)
@@ -265,7 +294,58 @@ def start_harvest_job(
     return progress
 
 
-def _run_harvest(job_id: str, min_free_gb: float):
+def resume_harvest_job(
+    job_id: str,
+    *,
+    min_free_gb: float = 10.0,
+    background: bool = True,
+) -> dict | None:
+    """Chay tiep mot job dut giua chung, bat dau tu dung tu khoa dang lam do.
+
+    Nhat lai chinh job cu (cung staging dir + manifest) chu khong mo job moi:
+    video da tai van dung duoc, `seen_keys` van chan trung, va nguoi dung chi
+    phai chon loc / commit mot job thay vi hai.
+    """
+    progress = load_harvest_progress(job_id)
+    if not progress:
+        return None
+
+    if progress.get("status") in {"running", "cancelling"} and not is_harvest_stale(progress):
+        raise ValueError("Job dang chay, khong can chay tiep.")
+
+    keywords = progress.get("keywords") or []
+    start_index = int(progress.get("keywordIndex") or 0)
+    if start_index >= len(keywords):
+        raise ValueError("Job da chay het tu khoa, khong con gi de chay tiep.")
+
+    # Marker huy con sot lai tu lan chay truoc se giet worker moi ngay o video
+    # dau tien.
+    try:
+        os.remove(_cancel_path(job_id))
+    except OSError:
+        pass
+
+    progress["status"] = "running"
+    progress["error"] = None
+    progress.pop("quotaStopped", None)
+    progress["message"] = (
+        f"Chay tiep tu tu khoa {start_index + 1}/{len(keywords)}: '{keywords[start_index]}'..."
+    )
+    _save_progress(job_id, progress)
+    logger.info(f"[Harvest] {job_id} resumed at keyword {start_index + 1}/{len(keywords)}")
+
+    if background:
+        threading.Thread(
+            target=_run_harvest,
+            args=(job_id, float(min_free_gb), start_index),
+            daemon=True,
+        ).start()
+    else:
+        _run_harvest(job_id, float(min_free_gb), start_index)
+    return progress
+
+
+def _run_harvest(job_id: str, min_free_gb: float, start_index: int = 0):
     progress = load_harvest_progress(job_id) or {}
     manifest = load_harvest_manifest(job_id)
     items = manifest["items"]
@@ -273,6 +353,10 @@ def _run_harvest(job_id: str, min_free_gb: float):
     dest_dir = staging_dir(job_id)
     min_free_bytes = int(max(0.0, min_free_gb) * 1024 ** 3)
     pending_writes = 0
+    # Provider da het quota API. Quota Pexels reset theo gio nen no khong hoi lai
+    # trong pham vi mot job: bo qua provider do o cac tu khoa con lai thay vi
+    # dot mot request 429 cho moi trang cua moi tu khoa.
+    quota_stopped: dict[str, str] = {}
 
     def flush(force: bool = False):
         nonlocal pending_writes
@@ -282,11 +366,16 @@ def _run_harvest(job_id: str, min_free_gb: float):
         _save_progress(job_id, progress)
 
     try:
-        for keyword_index, keyword in enumerate(progress["keywords"]):
+        keywords = progress["keywords"]
+        # Chay tiep thi bo qua cac tu khoa da xong: search moi trang deu ton
+        # quota, ma video cua nhung tu khoa do da nam trong manifest roi.
+        for keyword_index, keyword in enumerate(keywords[start_index:], start=start_index):
             progress["keywordIndex"] = keyword_index
             progress["currentKeyword"] = keyword
 
             for provider in progress["providers"]:
+                if provider in quota_stopped:
+                    continue
                 progress["currentProvider"] = provider
                 taken = 0
                 page = 1
@@ -298,13 +387,23 @@ def _run_harvest(job_id: str, min_free_gb: float):
                     progress["message"] = f"Dang search '{keyword}' tren {provider} (trang {page})..."
                     flush()
 
-                    response = search_provider_videos(
-                        provider,
-                        keyword,
-                        page,
-                        per_page=None,
-                        orientation="landscape" if progress.get("landscapeOnly") else None,
-                    )
+                    try:
+                        response = search_provider_videos(
+                            provider,
+                            keyword,
+                            page,
+                            per_page=None,
+                            orientation="landscape" if progress.get("landscapeOnly") else None,
+                        )
+                    except PexelsQuotaExhausted as exc:
+                        # Giong phanh o dia: dung co kiem soat, giu nguyen nhung gi
+                        # da tai, va noi ro ly do -- khong danh dau job la "failed"
+                        # vi nhung video da tai van dung duoc o buoc chon loc.
+                        quota_stopped[provider] = str(exc)
+                        logger.warning(
+                            f"[Harvest] {job_id} bo qua {provider}: {exc}"
+                        )
+                        break
                     progress["searchRequests"] += 1
 
                     results = response.get("items") or []
@@ -401,6 +500,12 @@ def _run_harvest(job_id: str, min_free_gb: float):
             f"Hoan tat! Da tai {progress['downloaded']} video "
             f"({progress['searchRequests']} request search). Chuyen sang buoc chon loc."
         )
+        if quota_stopped:
+            # Ket qua khong day du: phai noi ra, khong de "Hoan tat!" che mat.
+            progress["quotaStopped"] = quota_stopped
+            progress["message"] += " CANH BAO: " + " ".join(
+                f"[{provider}] {reason}" for provider, reason in quota_stopped.items()
+            )
         flush(force=True)
 
     except _HarvestCancelled:
