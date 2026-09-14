@@ -1369,10 +1369,18 @@ export interface StoryDecorFrame {
   h: number;
 }
 
+/** How the transparent screen area of a decor image is produced. */
+export type StoryDecorMaskMode = "chroma" | "manual";
+
 /**
- * A full-frame photo whose chroma-green area the story video plays inside.
- * `processedRelativePath` is the RGBA PNG (green already keyed out) that the
- * render overlays; `relativePath` is the untouched upload.
+ * A full-frame photo with a transparent screen area the story video plays
+ * inside. `processedRelativePath` is the RGBA PNG the render overlays;
+ * `relativePath` is the untouched upload.
+ *
+ * The hole comes either from keying a green screen already in the photo
+ * (`maskMode: "chroma"`) or from punching the `frame` rectangle straight into
+ * the alpha (`maskMode: "manual"`), which is what makes a photo with no green
+ * screen usable at all.
  */
 export interface StoryDecorImage {
   id: string;
@@ -1387,6 +1395,10 @@ export interface StoryDecorImage {
   similarity?: number;
   blend?: number;
   frame: StoryDecorFrame;
+  /** Missing on records created before manual mode existed; treat as "chroma". */
+  maskMode?: StoryDecorMaskMode;
+  /** Rounded corners of the self-drawn area, px in 1920x1080. 0 = square. */
+  cornerRadius?: number;
   /** Grows the video past the frame edges so a green fringe can never show. */
   overscan?: number;
   /** False when the green region had to be placed by hand. */

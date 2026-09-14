@@ -260,6 +260,7 @@ import type {
   StoryBatchProgress,
   StoryDecorFrame,
   StoryDecorImage,
+  StoryDecorMaskMode,
   StoryHarvestDeleteRequest,
   StoryHarvestDeleteResponse,
   StoryHarvestItemsResponse,
@@ -1168,10 +1169,17 @@ export async function getDecorImages() {
   );
 }
 
-export async function uploadDecorImage(file: File, group?: string) {
+export async function uploadDecorImage(
+  file: File,
+  group?: string,
+  mode?: StoryDecorMaskMode,
+) {
   const form = new FormData();
   form.append("file", file);
   if (group) form.append("group", group);
+  // "manual" skips green detection so the user draws the screen area even on a
+  // photo that happens to contain some green.
+  if (mode) form.append("mode", mode);
   return requestJson<{ image: StoryDecorImage }>("/api/story-video/decor-images", {
     method: "POST",
     body: form,

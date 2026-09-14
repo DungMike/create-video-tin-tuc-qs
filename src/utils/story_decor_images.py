@@ -1,11 +1,25 @@
 """Story decor images: a full-frame photo the story video plays *inside* of.
 
 A decor image is a still picture — a living room with a TV, a phone on a desk,
-a cinema screen — whose "screen" area is painted chroma green. The green is
-keyed to transparency once at upload time, producing an RGBA PNG at the output
-resolution; the render then scales the story video into the screen rectangle and
-lays that PNG on top, so everything in the photo that isn't green covers the
-video.
+a cinema screen — with a "screen" area the video plays inside. That area is made
+transparent once at upload time, producing an RGBA PNG at the output resolution;
+the render then scales the story video into the screen rectangle and lays that
+PNG on top, so everything opaque in the photo covers the video.
+
+There are two ways to get that transparent area (``maskMode``):
+
+``chroma``
+    The photo already has the screen painted chroma green; ``colorkey`` keys it
+    out. This is the original path and stays the default.
+``manual``
+    No green anywhere in the photo — the user drags a 16:9 rectangle over the
+    screen in the editor and :func:`build_manual_mask_png` punches exactly that
+    rectangle into the alpha. Chosen automatically when detection finds no
+    green, because keying such a photo yields a fully opaque PNG that would
+    hide the video entirely.
+
+Both modes write the same ``<id>_keyed.png``, so nothing downstream has to know
+which one produced it.
 
 Layer order in the render (see ``story_video_pipeline._apply_story_overlays``)::
 
@@ -490,9 +504,89 @@ def preprocess_decor_image(source_path: str, record: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Manual mask: draw the screen area instead of keying one out
+# --------------------------------------------------------------------------- #
+def decor_mask_mode(record: dict) -> str:
+    """How this image's transparent screen area is produced.
+
+    ``chroma`` keys a green screen that is already painted in the photo;
+    ``manual`` punches the ``frame`` rectangle straight into the alpha channel,
+    so a photo that never had a green screen still works.
+    """
+    return "manual" if str(record.get("maskMode") or "chroma") == "manual" else "chroma"
+
+
+def corner_radius_of(record: dict, frame: dict | None = None) -> int:
+    """Rounded-corner radius in output pixels, clamped to what the rect allows."""
+    frame = frame or _clamp_frame(record)
+    try:
+        radius = int(record.get("cornerRadius") or 0)
+    except (TypeError, ValueError):
+        radius = 0
+    return max(0, min(radius, min(frame["w"], frame["h"]) // 2))
+
+
+def build_manual_mask_png(source_path: str, record: dict) -> str:
+    """Punch the frame rectangle into the photo's alpha; no green screen needed.
+
+    ``colorkey`` can only clear pixels close to the key colour, so a photo with
+    no green screen comes out fully opaque and hides the video completely. Here
+    the rectangle *is* the alpha: exact, deterministic, and with no tolerance
+    that could eat into the picture the way a widened ``similarity`` does.
+
+    Writes the same ``<id>_keyed.png`` the chroma path writes, so everything
+    downstream is unchanged -- the render, the frame preview, deletion, and the
+    thumbnail's ``updatedAt`` cache-bust all keep working untouched.
+    """
+    from PIL import Image, ImageDraw, ImageOps
+
+    image_id = str(record["id"])
+    processed_filename = f"{image_id}_keyed.png"
+    output_path = _absolute(processed_filename)
+    width, height = target_size()
+    frame = _clamp_frame(record)
+    radius = corner_radius_of(record, frame)
+
+    with Image.open(source_path) as img:
+        # The browser rotates by EXIF when it displays the photo, so the
+        # rectangle the user dragged is in rotated coordinates. Match that here
+        # or the hole lands somewhere else entirely on a phone photo.
+        base = ImageOps.exif_transpose(img).convert("RGBA").resize(
+            (width, height), Image.LANCZOS
+        )
+
+    # 255 keeps the photo, 0 lets the video through.
+    mask = Image.new("L", (width, height), 255)
+    draw = ImageDraw.Draw(mask)
+    box = (
+        frame["x"],
+        frame["y"],
+        frame["x"] + frame["w"] - 1,
+        frame["y"] + frame["h"] - 1,
+    )
+    if radius > 0:
+        draw.rounded_rectangle(box, radius=radius, fill=0)
+    else:
+        draw.rectangle(box, fill=0)
+    base.putalpha(mask)
+
+    os.makedirs(Config.STORY_DECOR_DIR, exist_ok=True)
+    base.save(output_path, "PNG")
+    logger.info(f"[DecorImage] Manual mask {frame} radius={radius} -> {output_path}")
+    return processed_filename
+
+
+def regenerate_decor_mask(source_path: str, record: dict) -> str:
+    """Rebuild the RGBA PNG through whichever mask mode the record asks for."""
+    if decor_mask_mode(record) == "manual":
+        return build_manual_mask_png(source_path, record)
+    return preprocess_decor_image(source_path, record)
+
+
+# --------------------------------------------------------------------------- #
 # CRUD
 # --------------------------------------------------------------------------- #
-def create_decor_image(file_storage, group: str = "") -> dict:
+def create_decor_image(file_storage, group: str = "", mode: str = "") -> dict:
     if not file_storage or not file_storage.filename:
         raise ValueError("Chua chon file anh decor.")
 
@@ -508,11 +602,18 @@ def create_decor_image(file_storage, group: str = "") -> dict:
     file_storage.save(filepath)
 
     width, height = target_size()
-    detected = detect_green_frame(filepath)
+    # An explicit "manual" skips detection entirely: the user wants to draw the
+    # screen area themselves even on a photo that does have some green in it.
+    forced_manual = str(mode or "").strip().lower() == "manual"
+    detected = None if forced_manual else detect_green_frame(filepath)
     if detected:
         frame, key_color = detected
+        mask_mode = "chroma"
     else:
-        # No green found: start with a centred 16:9 rectangle the user can drag.
+        # No green to key: start with a centred 16:9 rectangle the user drags
+        # onto the screen in the photo, and punch that rectangle directly.
+        # Keying this photo would only ever produce a fully opaque PNG that
+        # hides the video, so manual is the only mode that can work here.
         frame = {
             "x": width // 8,
             "y": height // 8,
@@ -520,6 +621,7 @@ def create_decor_image(file_storage, group: str = "") -> dict:
             "h": (width * 3 // 4) * 9 // 16,
         }
         key_color = Config.STORY_DECOR_KEY_COLOR
+        mask_mode = "manual"
 
     record = {
         "id": image_id,
@@ -531,6 +633,8 @@ def create_decor_image(file_storage, group: str = "") -> dict:
         "similarity": Config.STORY_DECOR_SIMILARITY,
         "blend": Config.STORY_DECOR_BLEND,
         "frame": frame,
+        "maskMode": mask_mode,
+        "cornerRadius": 0,
         "overscan": Config.STORY_DECOR_OVERSCAN,
         "autoDetected": bool(detected),
         "enabled": True,
@@ -538,7 +642,7 @@ def create_decor_image(file_storage, group: str = "") -> dict:
         "updatedAt": datetime.now().isoformat(),
     }
 
-    record["processedFilename"] = preprocess_decor_image(filepath, record)
+    record["processedFilename"] = regenerate_decor_mask(filepath, record)
     record["processedRelativePath"] = _relative(record["processedFilename"])
 
     index = load_decor_index()
@@ -567,8 +671,31 @@ def update_decor_image(image_id: str, updates: dict) -> dict | None:
             record[key] = updates[key]
             regenerate = True
 
+    if "maskMode" in updates and updates["maskMode"] is not None:
+        next_mode = "manual" if str(updates["maskMode"]) == "manual" else "chroma"
+        if next_mode != decor_mask_mode(record):
+            record["maskMode"] = next_mode
+            regenerate = True
+
+    # In manual mode the rectangle *is* the mask, so moving or reshaping it has
+    # to redraw the PNG. In chroma mode the rectangle only says where the video
+    # gets fitted and the PNG does not depend on it, so nothing is regenerated.
+    manual = decor_mask_mode(record) == "manual"
+
     if isinstance(updates.get("frame"), dict):
-        record["frame"] = _clamp_frame({"frame": updates["frame"]})
+        next_frame = _clamp_frame({"frame": updates["frame"]})
+        if manual and next_frame != record.get("frame"):
+            regenerate = True
+        record["frame"] = next_frame
+
+    if "cornerRadius" in updates and updates["cornerRadius"] is not None:
+        try:
+            next_radius = max(0, int(updates["cornerRadius"]))
+        except (TypeError, ValueError):
+            next_radius = 0
+        if manual and next_radius != int(record.get("cornerRadius") or 0):
+            regenerate = True
+        record["cornerRadius"] = next_radius
 
     for key in ("name", "overscan"):
         if key in updates and updates[key] is not None:
@@ -588,7 +715,7 @@ def update_decor_image(image_id: str, updates: dict) -> dict | None:
     if regenerate:
         source_path = _absolute(str(record["filename"]))
         old_processed = record.get("processedFilename")
-        record["processedFilename"] = preprocess_decor_image(source_path, record)
+        record["processedFilename"] = regenerate_decor_mask(source_path, record)
         record["processedRelativePath"] = _relative(record["processedFilename"])
         if old_processed and old_processed != record["processedFilename"]:
             try:

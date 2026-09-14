@@ -2963,7 +2963,11 @@ def upload_decor_image():
         return _error("Chua chon file anh decor.", code="no_file")
 
     try:
-        record = create_decor_image(upload_file, group=request.form.get("group") or "")
+        record = create_decor_image(
+            upload_file,
+            group=request.form.get("group") or "",
+            mode=request.form.get("mode") or "",
+        )
     except ValueError as exc:
         return _error(str(exc), code="invalid_decor_image")
     except Exception as exc:
@@ -2980,13 +2984,19 @@ def patch_decor_image(image_id: str):
 
     payload = request.get_json(silent=True) or {}
     updates = {}
-    for key in ("name", "keyColor", "enabled", "frame", "group"):
+    for key in ("name", "keyColor", "enabled", "frame", "group", "maskMode"):
         if key in payload:
             updates[key] = payload[key]
     for key in ("similarity", "blend", "overscan"):
         if key in payload and payload[key] is not None:
             try:
                 updates[key] = float(payload[key])
+            except (TypeError, ValueError):
+                return _error(f"Gia tri {key} khong hop le.", code="invalid_value")
+    for key in ("cornerRadius",):
+        if key in payload and payload[key] is not None:
+            try:
+                updates[key] = int(payload[key])
             except (TypeError, ValueError):
                 return _error(f"Gia tri {key} khong hop le.", code="invalid_value")
 

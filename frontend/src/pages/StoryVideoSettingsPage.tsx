@@ -370,6 +370,8 @@ export function StoryVideoSettingsPage() {
   const [isDecorSaving, setIsDecorSaving] = useState(false);
   const [decorPreviewPath, setDecorPreviewPath] = useState<string | null>(null);
   const [isDecorPreviewLoading, setIsDecorPreviewLoading] = useState(false);
+  // Huong dan (khong phai loi) hien ngay trong khu vuc anh decor.
+  const [decorNotice, setDecorNotice] = useState<string | null>(null);
   // null = xem tat ca nhom; "" = nhom "chua phan nhom".
   const [decorGroupFilter, setDecorGroupFilter] = useState<string | null>(null);
   const [decorUploadGroup, setDecorUploadGroup] = useState("");
@@ -624,6 +626,7 @@ export function StoryVideoSettingsPage() {
     if (!file) return;
     setIsDecorUploading(true);
     setErrorMessage(null);
+    setDecorNotice(null);
     try {
       const res = await uploadDecorImage(file, decorUploadGroup);
       await loadDecorImages();
@@ -634,8 +637,11 @@ export function StoryVideoSettingsPage() {
         current === null || current === (res.image.group ?? "") ? current : (res.image.group ?? ""),
       );
       if (res.image.autoDetected === false) {
-        setErrorMessage(
-          "Da upload nhung khong tim thay vung mau xanh. Hay keo khung thu cong tren canvas.",
+        // Khong con la loi: anh khong co nen xanh van dung duoc, backend da bat
+        // san che do tu ve va dat mot khung 16:9 giua anh cho nguoi dung keo.
+        setDecorNotice(
+          "Ảnh chưa có nền xanh — đã bật chế độ “Tự tạo vùng nền xanh”. " +
+            "Hãy kéo khung 16:9 trùm khít mặt màn hình trong ảnh rồi bấm “Lưu khung”.",
         );
       }
     } catch (err) {
@@ -656,6 +662,7 @@ export function StoryVideoSettingsPage() {
       );
       // Re-key or re-frame invalidates the composed still.
       setDecorPreviewPath(null);
+      setDecorNotice(null);
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the luu anh decor.");
     } finally {
@@ -2182,11 +2189,18 @@ export function StoryVideoSettingsPage() {
           <h2 className="text-base font-semibold text-foreground">Ảnh decor (khung TV)</h2>
           <p className="text-sm text-muted-foreground">
             Ảnh chụp phủ kín khung hình, video nền chỉ chạy bên trong vùng màu xanh của ảnh.
-            Phần không phải nền xanh luôn đè lên trên video. Hiệu ứng TV và TV noise được áp vào
-            video <em>trước</em> khi thu nhỏ vào khung, còn sóng âm / CTA / phụ đề nằm trên ảnh decor.
-            Chọn ảnh nào tham gia xoay vòng ở trang render.
+            Ảnh chưa có nền xanh cũng dùng được: chuyển sang chế độ “Tự tạo vùng nền xanh” rồi
+            kéo một khung 16:9 lên đúng mặt màn hình. Phần không phải vùng xanh luôn đè lên trên
+            video. Hiệu ứng TV và TV noise được áp vào video <em>trước</em> khi thu nhỏ vào khung,
+            còn sóng âm / CTA / phụ đề nằm trên ảnh decor. Chọn ảnh nào tham gia xoay vòng ở
+            trang render.
           </p>
         </div>
+        {decorNotice ? (
+          <div className="mb-4">
+            <StatusAlert title="Ảnh decor" message={decorNotice} />
+          </div>
+        ) : null}
         <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
           <div className="space-y-4">
             <div className="grid gap-2">
@@ -2208,7 +2222,7 @@ export function StoryVideoSettingsPage() {
                 muốn phân loại — đổi nhóm sau lúc nào cũng được.
               </p>
 
-              <Label className="mt-2">Upload ảnh decor (có vùng nền xanh)</Label>
+              <Label className="mt-2">Upload ảnh decor (có sẵn nền xanh, hoặc tự vẽ vùng)</Label>
               <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
                 {isDecorUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
                 <span>{isDecorUploading ? "Đang tách nền xanh..." : "Chọn ảnh PNG / JPG / WEBP"}</span>
@@ -2224,8 +2238,9 @@ export function StoryVideoSettingsPage() {
                 />
               </label>
               <p className="text-xs text-muted-foreground">
-                Ảnh sẽ được kéo về đúng 1920x1080, nên dùng ảnh 16:9. Vùng xanh được dò tự động
-                ngay khi upload.
+                Ảnh sẽ được kéo về đúng 1920x1080, nên dùng ảnh 16:9. Nếu ảnh có sẵn nền xanh,
+                vùng xanh được dò tự động ngay khi upload. Nếu không, chế độ “Tự tạo vùng nền
+                xanh” tự bật để bạn kéo khung 16:9 lên đúng mặt màn hình.
               </p>
             </div>
 
@@ -2355,7 +2370,7 @@ export function StoryVideoSettingsPage() {
                         )}
                       </div>
 
-                      <div className="grid gap-2">
+                      <div className="grid gap-2 max-h-96 overflow-y-auto">
                         {items.map((item) => (
                           <div
                             key={item.id}
@@ -2377,6 +2392,11 @@ export function StoryVideoSettingsPage() {
                                 <span className="block truncate text-sm font-semibold text-foreground">{item.name}</span>
                                 <span className="block text-xs text-muted-foreground">
                                   Khung {item.frame.w}x{item.frame.h} @ {item.frame.x},{item.frame.y}
+                                  {item.maskMode === "manual" ? (
+                                    <span className="ml-1.5 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                                      Tự vẽ
+                                    </span>
+                                  ) : null}
                                 </span>
                               </span>
                               {item.enabled === false ? (
