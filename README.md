@@ -1,205 +1,230 @@
-# Auto Video Review Studio
+# Story Video Studio
 
-Hệ thống tự động hóa sản xuất video từ Audio, Hình ảnh, và Video clip nguồn. 
-Hệ thống sử dụng **React + Vite** cho Frontend (Web UI) và **Flask + FFmpeg** (Python) cho Backend xử lý media chuyên sâu.
+Hệ thống tự động ghép **1 file audio (hoặc link Google Docs) + thư viện clip 5 giây** thành video
+hoàn chỉnh chuẩn YouTube/TikTok, kèm hiệu ứng TV (CRT), khung TV (decor), sóng âm, CTA và phụ đề.
 
-Mục tiêu của dự án là biến 1 file audio/bản ghi âm hoặc tài liệu text kết hợp với các hình ảnh/video thô thành một video hoàn chỉnh (chuẩn YouTube/Tiktok) với các hiệu ứng chuyển động, overlay PiP (Picture-in-Picture), watermark, và âm thanh nền một cách hoàn toàn tự động hoặc bán tự động qua giao diện Review.
-
----
-
-## 1. Tổng quan Kiến trúc (Architecture)
-
-Hệ thống được thiết kế theo mô hình **Client-Server SPA (Single Page Application)**:
-
-- **Frontend (`frontend/`)**: 
-  - Framework: React 18, Vite, TypeScript.
-  - Styling: Tailwind CSS, `shadcn/ui`.
-  - Routing: React Router DOM (client-side routing).
-- **Backend (`src/`)**:
-  - Web Server: Flask (Python 3.10+). Cung cấp RESTful JSON API và serve file tĩnh (media) cũng như file build của frontend.
-  - Media Engine: FFmpeg (gọi qua Python `subprocess`), hỗ trợ tăng tốc phần cứng (NVENC) nếu có GPU NVIDIA.
-- **Storage (`storage/`)**:
-  - Kho lưu trữ file thô, file tạm, cache, thư viện hiệu ứng, thư viện decor, và các video thành phẩm. Đóng vai trò như một Database nội dung (File-based DB).
+**React + Vite** cho Frontend, **Flask + FFmpeg** (Python) cho Backend xử lý media.
 
 ---
 
-## 2. Luồng hoạt động của hệ thống (System Workflow)
+## 1. Phạm vi hệ thống
 
-Video đi qua 4 giai đoạn chính để từ nguyên liệu thô thành sản phẩm hoàn chỉnh:
+Toàn bộ hệ thống chỉ còn **hai trang**:
 
-### Giai đoạn 1: Nguồn dữ liệu (Ingestion / Upload)
-- Qua trang `UploadPage`, người dùng tải lên File Audio chính (hoặc chọn từ Thư viện Audio sinh ra từ trang Docs-to-Audio).
-- Người dùng nhập các keywords để hệ thống tự crawl ảnh (qua Google) và video youtube, hoặc tự upload ảnh/video local.
-- Hệ thống tạo 1 `job_id` duy nhất (VD: `8f3d1a2b`), tạo thư mục làm việc và lưu trạng thái vào `manifest.json`.
+| Trang | Vai trò |
+|---|---|
+| `/story-video` | Tạo video: chọn audio/script, thư viện clip, intro, khung TV, sóng âm/CTA, phụ đề. Chạy 1 video lẻ hoặc batch. |
+| `/story-video/settings` | Cấu hình tài nguyên: thư viện clip (harvest/prefetch/normalize/bake), khung TV, hiệu ứng TV, overlay sóng âm & CTA. |
 
-### Giai đoạn 2: Xử lý tiền kỳ (Processing)
-- `AudioSplitter`: Phân tích file audio, tính thời lượng.
-- `ImageProcessor`: Trích xuất ảnh, chuẩn hóa kích thước, chống phân mảnh (convert sang định dạng an toàn cho FFmpeg).
-- Tự động sinh **Motion Clips** cho ảnh chưa có cảnh (Áp dụng Pan & Zoom / Ken Burns từ **Effects Library**).
+Mọi URL khác đều redirect về `/story-video`.
 
-### Giai đoạn 3: Duyệt và cấu hình (Review)
-- Frontend (trang `ReviewPage`) trình bày danh sách các đoạn clip/ảnh theo timeline.
-- Người dùng có thể kéo thả, sắp xếp vị trí tài nguyên ảnh/video trên thanh timeline để khớp nối với Voice.
-- **Tính năng mới**: Người dùng chọn **Decor Video** (Video góc khung hình / PiP overlay) từ dropdown.
-
-### Giai đoạn 4: Composer & Rendering
-- Bấm nút Render trên UI gọi tới `POST /api/jobs/<job_id>/render` kèm cấu hình (tags, decorVideoId,...).
-- `TimelineBuilder` sắp xếp clip thành mảng tuần tự.
-- **Các Mode Render**:
-  - **`image_audio_only` mode**: Nếu chỉ có ảnh và audio, hệ thống dùng thuật toán render Nhanh (Fast Mode). Lặp lại lượng ảnh (loop) cho đến khi phủ hết chiều dài Audio.
-  - **Mixed mode**: Dùng xfade chuyển cảnh giữa ảnh-ảnh hoặc video-video phức tạp. Chunk rendering hoạt động để tránh lệnh FFmpeg quá tải.
-- Áp dụng các filter cuối cùng: **Watermark text** (Nguồn tổng hợp) + **PiP Decor Overlay**.
-- Đóng gói MP4 tại `storage/output/`.
+API: tất cả nằm dưới `/api/story-video/*` (blueprint `story_video_bp`), cộng thêm
+`GET /api/voices` (danh sách giọng đọc TTS) và `GET /media/<path>` (serve file preview).
 
 ---
 
-## 3. Các Module Core Backend (`src/`)
+## 2. Luồng hoạt động
 
-### 3.1. API Gateway (`web_app.py` / `main.py`)
-- Định nghĩa toàn bộ Endpoints REST (Job creation, Upload, Decor Library CRUD, Effects API).
-- Quản lý quá trình serve file tĩnh (streaming video preview cho UI).
-- Nhận lệnh render, chạy background thread và trả tiến độ (Progress API).
+### Giai đoạn 1: Chuẩn bị thư viện clip (trang settings)
 
-### 3.2. Tiền xử lý (`processors/`)
-- `audio_processor.py`: Lấy info audio (thời lượng, bitrate).
-- `image_processor.py`: Resize ảnh thông minh, cache motion (giảm thời gian render lại những ảnh không tuỳ chỉnh hiệu ứng).
-- `youtube_downloader.py` (yt-dlp wrapper): Tải clip theo link từ YouTube.
+Thư viện là tập hợp clip 5 giây đã chuẩn hoá, dùng làm nguyên liệu cho mọi video.
 
-### 3.3. Trình tạo Video (`composer/`)
-- `timeline.py`: Tính toán duration. Map từng frame ảnh/video khớp với thời gian chạy. 
-- `renderer.py`: Trái tim FFmpeg của dự án.
-  - Xử lý chia video làm nhiều *chunks* nhỏ, render song song hoặc tuần tự rồi `concat` lại (để vượt qua giới hạn memory/command length của OS).
-  - Tích hợp hàm sinh Filter Complex (`_build_overlay_filter`) cho Picture-in-Picture và Text Drawing.
-  - Hỗ trợ GPU H.264/HEVC (`hevc_nvenc`, `h264_nvenc`).
+- **Harvest** (`story_bulk_harvest.py`): tải hàng loạt video theo từ khoá từ Pexels/Pixabay, cắt thành clip.
+- **Prefetch** (`story_video_prefetch.py`): nhánh thay thế — tải hết kết quả tìm kiếm về trước,
+  người dùng duyệt/loại trên file local rồi mới cắt.
+- **Normalize** (`story_library_normalize.py`): đưa clip về đúng một định dạng canon
+  (resolution / fps / pix_fmt / color) để render không phải re-encode lẻ tẻ.
+- **Bake** (`story_library_bake.py`): nướng sẵn hiệu ứng TV vào từng clip. Thư viện đã bake thì
+  bước hiệu ứng lúc render được bỏ qua.
 
-### 3.4. Utilities (`utils/`)
-- `decor_videos.py`: Định nghĩa CRUD cho thư viện video trang trí (`decor_videos/index.json`).
-- `config.py`: Parser cấu hình từ `.env`.
-- `ffmpeg_helper.py`: Wrapper xử lý các flags chung của FFmpeg.
+### Giai đoạn 2: Render (trang chính)
 
----
+1. Nhận audio (upload / folder local / Google Drive) hoặc link Google Docs → TTS ra audio.
+2. `story_video_pipeline.py`: bốc ngẫu nhiên clip từ thư viện cho đủ độ dài audio.
+3. Áp hiệu ứng TV, khung TV (decor), overlay sóng âm + CTA, burn phụ đề.
+4. Mux audio, xuất MP4 vào `storage/output/`.
 
-## 4. Các Tính Năng Mở Rộng Đặc Trọng Tâm
-
-* **Xử lý Hàng Loạt (Batch Pipeline - Auto Production)**: Luồng hoàn thiện hoàn toàn tự động từ 1 input (hàng loạt Google Docs URLs + Ảnh chung + Voice). Hệ thống tự đọc văn bản -> tạo Audio -> trộn ảnh liên tục tự động (chống lặp ảnh) -> áp dụng PiP random (nếu k set tĩnh) -> render ra MP4 cuối cùng hoàn toàn kín.
-* **Hệ thống Dọn Dẹp Tự Động (Auto Cleanup Worker)**: Tối ưu bộ nhớ bằng cách xóa đi 100% các intermediate file (Audios tạm, Raw images/videos, chunks) sau khi một quá trình render Job/Batch hoàn tất thành công. Chỉ giữ lại manifest và Video final.
-* **Trình sinh Audio từ Văn bản (Docs-to-Audio)**: Lấy text từ Google Docs, gọi API (VD: Minimax) sinh file MP3 chất lượng cao ghép vào workflow tự động.
-* **Thư viện Decor Video (PiP Overlays)**: Người dùng upload video (MC, Logo động) tại `/decor-library`. Video này tự động thu nhỏ 25% (scale config), đặt ở góc màn, lặp vô hạn (stream_loop -1) và bị tắt tiếng (-an) để không đè lên Voice chính.
-* **Watermark Text Cứng**: Chữ "Nguồn: Tổng hợp" (chỉnh trong cấu hình) được đóng đinh vào góc cấp độ pixel, có viền đen để phản quang rõ trên mọi nền sáng tối.
-* **Hệ thống Library Effects**: Các template Pan-Zoom được sinh sẵn bằng lệnh FFmpeg logic để hệ thống có thể bốc ngẫu nhiên tạo độ "sống động" cho ảnh tĩnh tự động.
+Batch (`story_video_batch.py`) xếp hàng nhiều video, chạy song song có giới hạn
+(`STORY_BATCH_MAX_WORKERS`), có progress polling, cancel và retry-failed.
 
 ---
 
-## 5. Cấu trúc thư mục (Directory Tree)
+## 3. Cấu trúc Backend (`src/`)
 
 ```text
-CRAWL VIDEO - AUDIO - QS/
-├── .env                  # FIle cấu hình lõi
-├── frontend/             # Root React Project
-│   ├── src/
-│   │   ├── components/   # React Components (UI, Layout)
-│   │   ├── lib/          # API services client, Utils (fetchers, cn)
-│   │   ├── pages/        # Router Views (Upload, Review, DecorLibrary, BatchPipeline, v.v)
-│   │   ├── types/        # Giao tiếp kiểu chữ TypeScript (Interfaces)
-│   ├── vite.config.ts    # Config Vite (proxy api sang port 5000)
-├── logs/                 # Chứa app.log theo dõi quá trình chạy
-├── src/                  # Root Backend Python
-│   ├── composer/         # Rendering Logic (FFmpeg)
-│   ├── crawlers/         # System crawl web resources
-│   ├── processors/       # Media processors
-│   ├── utils/            # Helper logic (decor_videos.py, config.py) 
-│   ├── tools/            # Công cụ CLI (gen effects library)
-│   └── web_app.py        # Flask App Entry
-├── storage/              # CƠ SỞ DỮ LIỆU FILE
-│   ├── audio/            
-│   ├── clips/            # File đã được cut/crop trước render
-│   ├── decor_videos/     # File MP4 & index.json cho PiP Overlay
-│   ├── jobs/             # Chứa Manifest mỗi phiên làm việc
-│   ├── output/           # Dành cho Video đã render xong
-│   └── temp/             # Filter texts, caches xử lý ảnh
+src/
+├── config.py                    # Parser cấu hình từ .env
+├── web_app.py                   # Flask bootstrap + /api/voices + /media + SPA catch-all
+├── routes/
+│   └── story_video_routes.py    # Toàn bộ API /api/story-video/*
+├── processors/
+│   ├── audio_utils.py           # Đọc thông tin audio (duration, validate)
+│   └── crt_effect_processor.py  # Sinh filter hiệu ứng TV/CRT
+└── utils/
+    ├── story_video_pipeline.py     # Runner 1 video
+    ├── story_video_batch.py        # Runner batch
+    ├── story_library*.py           # Thư viện clip: CRUD, bake, normalize
+    ├── story_bulk_harvest.py       # Tải hàng loạt theo từ khoá
+    ├── story_video_prefetch.py     # Nhánh tải-hết-rồi-duyệt
+    ├── story_decor_images.py       # Khung TV (chroma key vùng màn hình)
+    ├── waveform_overlays.py        # Overlay sóng âm
+    ├── story_cta_overlay.py        # Overlay CTA (like/subscribe)
+    ├── story_subtitles.py          # Sinh & burn phụ đề
+    ├── video_source_downloader.py  # Tải nguồn từ Pexels/Pixabay/YouTube
+    ├── ffmpeg_helper.py            # Wrapper FFmpeg dùng chung
+    └── render_priority.py          # Optimize mode: tạm dừng app cạnh tranh, ưu tiên CPU
 ```
+
+## 4. Cấu trúc Frontend (`frontend/src/`)
+
+```text
+frontend/src/
+├── router.tsx                   # 2 route + catch-all redirect
+├── pages/
+│   ├── StoryVideoPage.tsx           # Trang tạo video
+│   └── StoryVideoSettingsPage.tsx   # Trang cấu hình
+├── components/
+│   ├── StoryLibrary*.tsx            # Quản lý thư viện, bake, prefetch, normalize
+│   ├── StoryBulkHarvestPanel.tsx
+│   ├── StoryDecorFrameEditor.tsx    # Editor khung TV (chroma key)
+│   ├── StoryOverlayPlacementEditor.tsx
+│   └── ui/                          # shadcn/ui
+├── lib/api.ts                   # Client gọi API
+└── types/api.ts                 # Interface TypeScript khớp payload backend
+```
+
+## 5. Storage (`storage/`)
+
+File-based DB. Các thư mục còn dùng:
+
+```text
+storage/
+├── story_library/          # Thư viện clip 5s + index.json + libraries.json
+├── story_raw_videos/       # Nguồn thô đã tải, trước khi cắt
+├── story_video/            # Progress/manifest mỗi phiên render
+├── story_decor_images/     # Khung TV
+├── story_overlay_packs/    # Overlay đã ghép sẵn
+├── story_cta_overlays/     # Video CTA
+├── story_tv_noise_overlays/
+├── story_effect_previews/  # Clip mẫu xem trước hiệu ứng
+├── story_subtitle_previews/
+├── story_fonts/            # Font phụ đề đã upload
+├── waveform_overlays/
+├── crt_effect/
+├── voices/                 # Bản ghi giọng đọc TTS
+├── audio/                  # Audio sinh từ Google Docs
+├── output/                 # Video thành phẩm
+└── temp/
+```
+
+> `storage/jobs/`, `clips/`, `channels/`, `decor_videos/`, `effects_library/` là dữ liệu của các
+> luồng đã gỡ bỏ — không còn code nào đọc tới, có thể xoá tay khi chắc chắn không cần.
 
 ---
 
-## 6. Giải thích `.env` (Cấu hình)
-
-File `.env` cực kỳ quan trọng để điều chỉnh hành vi Render. Các thông số đặc biệt:
+## 6. Cấu hình `.env`
 
 ```env
-# ----- CHỤP/RENDER -----
-RENDER_CHUNK_SEGMENT_LIMIT=40        # Quá bao nhiêu scene (cảnh) thì sẽ bị cắt thành phần nhỏ để render rời rồi ghép lại (tránh crash RAM).
-IMAGE_ONLY_FAST_CHUNK_CONCAT=true    # Bật tăng tốc ghép file khi chỉ dùng Audio và Ảnh tĩnh.
-FFMPEG_COMMAND_TIMEOUT_SECONDS=0     # 0 là không giới hạn.
+# ----- Đường dẫn -----
+STORAGE_DIR=./storage                      # Đổi để chuyển cả kho storage sang ổ khác
+STORY_RAW_DIR=./storage/story_raw_videos   # Tách riêng được (nguồn thô rất nặng)
+OUTPUT_DIR=./storage/output
 
-# ----- OVERLAY (DECOR + WATERMARK) -----
-DECOR_VIDEOS_DIR=./storage/decor_videos
-OVERLAY_VIDEO_POSITION=top_right     # Góc chứa Decor (top_left, bottom_right, v.v.)
-OVERLAY_VIDEO_SCALE=0.25             # Decor to bằng 25% chiều rộng Video
-OVERLAY_VIDEO_MARGIN=10              # Khoảng cách so với mép viền (pixel)
+# ----- Render -----
+TARGET_RESOLUTION=1920x1080
+TARGET_FPS=30
+USE_GPU_NVENC=true               # Cần GPU NVIDIA + FFmpeg build có nvenc
+FFMPEG_PRESET=p2
+VIDEO_BITRATE=8M
+STORY_BATCH_MAX_WORKERS=2        # Số video render song song trong 1 batch
+STORY_BAKE_MAX_WORKERS=2         # Số clip bake song song
 
-SOURCE_TEXT=Nguồn: Tổng hợp          # Watermark Text
-SOURCE_TEXT_FONT_SIZE=22             # Size chữ. (Lưu ý tăng size thì có tính tăng cả SOURCE_TEXT_MARGIN)
-SOURCE_TEXT_FONT=C:/Windows/Fonts/arial.ttf # Bắt buộc có trên máy tính Windows Windows
-SOURCE_TEXT_POSITION=bottom_left
-SOURCE_TEXT_MARGIN=20
+# ----- Overlay pass -----
+OVERLAY_USE_GPU_PIPELINE=true    # overlay_cuda; tự fallback về CPU nếu build không hỗ trợ
+OVERLAY_PARALLEL_SEGMENTS=3      # Chia pass phụ đề thành N đoạn song song (libass đơn luồng)
+
+# ----- Nguồn video -----
+PEXELS_API_KEY=...               # Key đầu tiên dùng tên trần; thêm PEXELS_API_KEY_2, _3... để mở rộng pool
+PIXABAY_API_KEY=...
+
+# ----- Web -----
+WEB_PORT=5000
+FRONTEND_PORT=5176
 ```
+
+Toàn bộ key nằm trong [src/config.py](src/config.py). `.env` chỉ đọc lúc server khởi động —
+sửa xong phải restart.
 
 ---
 
-## 7. Yêu cầu Cài đặt & Dev Mode
+## 7. Cài đặt & Chạy
 
-### Phụ thuộc (Dependencies)
-- **Hệ điều hành**: Thiết kế tối ưu trên Windows (PowerShell / Command Prompt).
-- **Phần mềm lõi**: 
-  - `python 3.10+`
-  - `node 22+`
-  - `ffmpeg` + `ffprobe` (Bắt buộc phải add biến môi trường `PATH`).
+### Yêu cầu
 
-### Cài đặt môi trường
-1. Active Virtual Environment Backend:
-   ```powershell
-   python -m venv venv
-   .\venv\Scripts\Activate.ps1
-   pip install -r requirements.txt
-   ```
-2. Cài đặt npm dependencies:
-   ```powershell
-   npm install
-   npm --prefix frontend install
-   ```
+- Windows (thiết kế tối ưu cho PowerShell), `python 3.10+`, `node 22+`
+- `ffmpeg` + `ffprobe` trong `PATH`
 
-### Chạy Dự án lúc Dev (Development Mode)
+### Cài đặt
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+npm install
+npm --prefix frontend install
+```
+
+### Dev
+
 ```powershell
 npm run dev
 ```
-Lệnh này đồng thời khởi động Flask (`http://localhost:5000`) và Frontend Vite (`http://localhost:5173`). Bạn truy cập qua cổng `5173`. Giao tiếp API được cấu hình proxy tự động ở Vite sang `:5000`.
 
-### Build & Chạy Production
-Khi chạy ở Producton, Vite được Build ra web tĩnh, Flask sẽ gom lại chạy chung trên port 5000.
+Chạy đồng thời Flask (`WEB_PORT`, mặc định 5000) và Vite (`FRONTEND_PORT`). Truy cập qua cổng
+frontend; Vite proxy sẵn `/api` và `/media` sang backend.
+
+### Production
+
 ```powershell
-# B1: Build frontend
-cd frontend
 npm run build
-cd ..
-
-# B2: Khởi động Waitress Server
 .\venv\Scripts\Activate.ps1
 .\venv\Scripts\waitress-serve.exe --listen=0.0.0.0:5000 wsgi:app
 ```
-Truy cập: `http://localhost:5000`
+
+Flask serve luôn `frontend/dist`. Truy cập `http://localhost:5000`.
+
+### Kiểm thử
+
+```powershell
+.\venv\Scripts\python -m pytest tests/ -q    # backend
+npm run typecheck                            # frontend
+```
 
 ---
 
-## 8. Sửa Lỗi Thường Gặp (Troubleshooting)
+## 8. Sửa lỗi thường gặp
 
-1. **Lỗi `Invalid argument` khi Render FFmpeg (liên quan font/đường dẫn)**
-   - Hệ thống tự động copy file Font vào thư mục temp để chạy render nhằm cởi bỏ các vấn đề "escaping dấu hai chấm" trên Windows.
-   - Nếu bị lỗi, hãy check lại đường dẫn biến `SOURCE_TEXT_FONT` trong file `.env` xem có đúng font ttf không tồn tại không. (VD: C:/Windows/Fonts/arial.ttf).
-2. **Crash RAM lúc Render video dài > 30p**
-   - Hãy điều chỉnh giảm thông số biến môi trường: `IMAGE_MOTION_WORKERS=1` và `RENDER_CHUNK_SEGMENT_LIMIT=20`.
-3. **Ảnh không sinh được Motion Clip**
-   - Thường do ảnh WebP hoặc PNG chứa kênh Alpha (Trong suốt). Hệ thống sẽ tự normalize convert về `JPEG RGB` tại giai đoạn tiền xử lý. Nếu vẫn kẹt, hãy đọc `logs/app.log`.
-4. **Thay đổi cỡ chữ (Font size) ở đâu?**
-   - Vào tận `.env`, chỉnh chỉ số `SOURCE_TEXT_FONT_SIZE` rồi **Re-run (Khởi động lại Server)**. Các thông số `.env` chỉ apply ngay lúc server start.
-5. **Đổi vị trí Decor Video (PiP góc)**
-   - Biến `OVERLAY_VIDEO_POSITION` nhận các giá trị: `top_left`, `top_right`, `bottom_left`, `bottom_right`. Chỉnh trong `.env` và restart server. Tương tự cho vị trí Text (`SOURCE_TEXT_POSITION`).
+1. **Render lỗi font / `Invalid argument`**
+   Font phụ đề được copy vào thư mục temp trước khi render để né vấn đề escaping dấu hai chấm
+   trên Windows. Nếu vẫn lỗi, kiểm tra font đã upload trong `storage/story_fonts/`.
+
+2. **Render chậm / nghẽn CPU**
+   Bật *optimize mode* ở trang chính: batch sẽ tạm dừng các app cạnh tranh
+   (`RENDER_SUSPEND_PROCESS_NAMES`) và nâng ưu tiên tiến trình ffmpeg.
+   Giảm `STORY_BATCH_MAX_WORKERS` nếu máy ít nhân.
+
+3. **Không chọn được khung TV (decor)**
+   Thư viện đã bake toàn phần (`fullyBaked`) có sẵn sóng âm/CTA trong clip, backend từ chối kết
+   hợp với decor. Dùng thư viện chưa bake, hoặc bỏ decor.
+
+4. **Clip bị loại lúc render**
+   Clip không khớp định dạng canon (`CLIP_EXPECTED_*`) sẽ bị loại. Chạy **Normalize** ở trang
+   settings để chuẩn hoá lại thư viện.
+
+5. **Hết quota Pexels**
+   Quota tính theo từng key (200 req/giờ, 20.000/tháng). Thêm `PEXELS_API_KEY_2`,
+   `PEXELS_API_KEY_3`... — pool tự xoay vòng và cho key hết quota nghỉ.
+
+6. **Xem log**
+   `logs/app.log`.

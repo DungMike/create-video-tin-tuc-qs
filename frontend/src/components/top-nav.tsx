@@ -8,15 +8,10 @@ export function TopNav() {
   return (
     <nav className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-border/70 bg-card/90 px-4 py-3 shadow-lg backdrop-blur md:px-6">
       <div className="flex flex-wrap items-center gap-2">
-       
         <Button asChild variant={currentPath === "/story-video" ? "secondary" : "ghost"}>
           <Link to="/story-video">Story Video</Link>
-        </Button>
-        <Button asChild variant={currentPath === "/youtube-download" ? "secondary" : "ghost"}>
-          <Link to="/youtube-download">YouTube Download</Link>
         </Button>
       </div>
     </nav>
   );
 }
-
