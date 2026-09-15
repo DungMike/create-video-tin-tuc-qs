@@ -17,7 +17,7 @@ import type { StoryIntro } from "@/types/api";
 
 export interface StoryIntroSelectProps {
   intros: StoryIntro[];
-  /** "" = chưa chọn (buộc chọn), "none" = không có intro, còn lại = intro id. */
+  /** "none" = không có intro (mặc định), còn lại = intro id. */
   value: string;
   onChange: (value: string) => void;
   /** Gọi sau khi upload/xóa để parent refetch danh sách intro. */
@@ -88,7 +88,6 @@ export function StoryIntroSelect({ intros, value, onChange, onIntrosChanged, dis
         onChange={(event) => onChange(event.target.value)}
         className="h-10 flex-1 rounded-md border border-input bg-background px-3 text-sm"
       >
-        <option value="">— Chọn intro —</option>
         <option value="none">Không có intro</option>
         {intros.map((intro) => (
           <option key={intro.id} value={intro.id}>

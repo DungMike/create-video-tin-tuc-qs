@@ -657,6 +657,19 @@ export interface CreateStoryVideoRequest {
   subtitleMaxCharsPerLine?: number;
   subtitleMaxLines?: number;
   subtitleFontScale?: number;
+  /**
+   * Màu tự chọn cho phụ đề, dạng "#RRGGBB". Bỏ trống = dùng màu của preset, nên
+   * form chưa đụng tới vẫn render y hệt như trước. Backend tự đổi sang dạng ASS
+   * &HAABBGGRR và bỏ qua giá trị sai định dạng.
+   */
+  subtitleTextColor?: string;
+  subtitleOutlineColor?: string;
+  subtitleOutlineWidth?: number;
+  /** Bật nền chữ. Bỏ trống = theo preset (một số preset vốn đã có hộp nền). */
+  subtitleBackgroundEnabled?: boolean;
+  subtitleBackColor?: string;
+  /** 0 = trong suốt hoàn toàn, 1 = đặc. */
+  subtitleBackOpacity?: number;
 }
 
 export interface StoryVideoProgress {
@@ -718,6 +731,13 @@ export interface CreateStoryBatchRequest {
     subtitleMaxCharsPerLine?: number;
     subtitleMaxLines?: number;
     subtitleFontScale?: number;
+    /** Xem ghi chú ở CreateStoryVideoRequest — cùng ngữ nghĩa. */
+    subtitleTextColor?: string;
+    subtitleOutlineColor?: string;
+    subtitleOutlineWidth?: number;
+    subtitleBackgroundEnabled?: boolean;
+    subtitleBackColor?: string;
+    subtitleBackOpacity?: number;
   };
 }
 

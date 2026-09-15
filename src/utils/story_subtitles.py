@@ -1,11 +1,13 @@
 """Subtitle core helpers for the story-video pipeline (SRT parse, resegment, ASS build, font scan)."""
 
+import functools
 import hashlib
 import json
 import os
 import re
 import shutil
 import struct
+import unicodedata
 
 from src.config import Config
 from src.utils.ffmpeg_helper import FFmpegHelper
@@ -437,14 +439,52 @@ def _escape_ass_text(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
+# Thai writes its vowels and tone marks as combining characters sitting on a base
+# consonant, and writes four vowels *before* the consonant they belong to. Slicing
+# such a line every two codepoints tears those apart — "รั้ง" came out as "รั" +
+# "้ง", the second piece starting with a bare tone mark.
+_THAI_LEADING_VOWELS = "เแโใไ"
+_COMBINING_CATEGORIES = ("Mn", "Mc", "Me")
+
+
+def _grapheme_clusters(text: str) -> list[str]:
+    """Split into clusters that must never be rendered apart from each other.
+
+    A combining mark joins the base before it; a Thai leading vowel joins the base
+    after it. Scripts without marks (Latin, CJK) come back one character per
+    cluster, exactly as before.
+    """
+    clusters: list[str] = []
+    pending = ""  # a leading vowel waiting for the consonant it is written before
+    for char in text:
+        if unicodedata.category(char) in _COMBINING_CATEGORIES and (pending or clusters):
+            if pending:
+                pending += char
+            else:
+                clusters[-1] += char
+        elif pending:
+            clusters.append(pending + char)
+            pending = ""
+        elif char in _THAI_LEADING_VOWELS:
+            pending = char
+        else:
+            clusters.append(char)
+    if pending:
+        clusters.append(pending)
+    return clusters
+
+
 def _karaoke_units(line: str) -> list[str]:
     line = line.strip()
     if not line:
         return []
     if " " in line:
         return [word for word in line.split(" ") if word]
-    units = [line[i:i + 2] for i in range(0, len(line), 2)]
-    if len(units) >= 2 and len(units[-1]) == 1:
+    # No spaces: Thai, and CJK. Step two clusters at a time so the animation reads
+    # at a sane rate, but never cut inside a cluster.
+    clusters = _grapheme_clusters(line)
+    units = ["".join(clusters[i:i + 2]) for i in range(0, len(clusters), 2)]
+    if len(units) >= 2 and len(_grapheme_clusters(units[-1])) == 1:
         last = units.pop()
         units[-1] += last
     return units
@@ -501,19 +541,42 @@ def _word_time_blocks(lines: list[str], duration: float):
     return line_units, iter(allocation)
 
 
-def _render_word_pop_text(lines: list[str], duration: float, style: dict) -> str:
-    """Reveal each word at its allocated time with a quick scale bounce.
+# Word-animation timing. Every window now spans several frames at 30 fps
+# (33ms/frame): the old 10ms alpha window was shorter than a single frame, and the
+# 140ms scale ramp only got four steps — both read as a hard flicker, not a pop.
+_POP_FADE_IN_MS = 110
+_POP_FADE_OUT_MS = 150
+_POP_START_SCALE = 80
+_POP_PEAK_SCALE = 112
+_POP_RISE_MS = 150
+_POP_SETTLE_MS = 360
+# The 3rd argument of \t is the easing exponent: <1 eases out, >1 eases in. An
+# ease-out rise paired with an ease-in settle brings the velocity to zero on both
+# sides of the peak, so the turnaround has no visible corner. The old transforms
+# passed no exponent at all — linear in, linear out, hard corner between them.
+_POP_RISE_ACCEL = "0.5"
+_POP_SETTLE_ACCEL = "1.3"
 
-    All words are laid out from t=0 (stable line layout) but held transparent
-    until their start; \\r isolates each word's transforms from the next.
-    \\fad only ever adds transparency, so it cannot un-hide pending words.
+
+def _render_word_pop_text(lines: list[str], duration: float, style: dict) -> str:
+    """Fallback word reveal, used when the font cannot be measured.
+
+    Deliberately free of \\fscx/\\fscy. Scaling a word *inside* a line makes libass
+    re-measure that line and re-centre it every frame, so every other word slides
+    sideways while one word bounces — that reflow was the jitter. Here a word only
+    fades in, with a border pulse for accent (an outline is drawn outside the glyph,
+    so it never changes the advance width). `_word_pop_events` keeps the real bounce
+    on the measured path, where every word owns an absolute position.
     """
     allocated = _word_time_blocks(lines, duration)
     if allocated is None:
         return "{\\fad(150,150)}" + "\\N".join(_escape_ass_text(line) for line in lines)
     line_units, allocation = allocated
     block_tags = str(style.get("block_tags") or "")
-    rise_ms, settle_ms = 140, 140
+    # An opaque box (border_style 3) takes its size from the border width, so a
+    # \bord pulse there would make the box breathe instead of the text pop.
+    base_bord = int(style.get("outline") or 0)
+    pulse = style.get("border_style") != 3 and base_bord > 0
     elapsed_cs = 0
     rendered_lines: list[str] = []
     for line, units in line_units:
@@ -523,14 +586,16 @@ def _render_word_pop_text(lines: list[str], duration: float, style: dict) -> str
             cs = next(allocation)
             t0 = elapsed_cs * 10
             elapsed_cs += cs
-            rise_end = t0 + rise_ms
-            settle_end = rise_end + settle_ms
             tags = (
                 f"\\r{block_tags}\\alpha&HFF&"
-                f"\\t({t0},{t0 + 10},\\alpha&H00&)"
-                f"\\t({t0},{rise_end},\\fscx135\\fscy135)"
-                f"\\t({rise_end},{settle_end},\\fscx100\\fscy100)"
+                f"\\t({t0},{t0 + _POP_FADE_IN_MS},\\alpha&H00&)"
             )
+            if pulse:
+                tags += (
+                    f"\\bord{base_bord}"
+                    f"\\t({t0},{t0 + _POP_RISE_MS},{_POP_RISE_ACCEL},\\bord{base_bord + 2})"
+                    f"\\t({t0 + _POP_RISE_MS},{t0 + _POP_SETTLE_MS},{_POP_SETTLE_ACCEL},\\bord{base_bord})"
+                )
             segment = "{" + tags + "}" + _escape_ass_text(unit)
             if spaced and idx < len(units) - 1:
                 segment += " "
@@ -540,30 +605,27 @@ def _render_word_pop_text(lines: list[str], duration: float, style: dict) -> str
 
 
 def _render_karaoke_zoom_text(lines: list[str], duration: float, style: dict) -> str:
-    """Karaoke \\kf fill plus a scale bounce on the word currently being read."""
+    """Fallback karaoke accent, used when the font cannot be measured.
+
+    The zoom is dropped here for the same reason as in `_render_word_pop_text`:
+    inline \\fscx reflows the line. The old shrink window was worse still — it
+    collapsed to zero length whenever a word was shorter than twice the rise (very
+    common for short Vietnamese words), so the word snapped 122%→100% inside a
+    single frame. What remains is the plain \\kf fill, smooth by construction;
+    `_karaoke_zoom_events` keeps the zoom on the measured path.
+    """
     allocated = _word_time_blocks(lines, duration)
     if allocated is None:
         return "{\\fad(150,150)}" + "\\N".join(_escape_ass_text(line) for line in lines)
     line_units, allocation = allocated
     block_tags = str(style.get("block_tags") or "")
-    elapsed_cs = 0
     rendered_lines: list[str] = []
     for line, units in line_units:
         spaced = " " in line.strip()
         parts: list[str] = []
         for idx, unit in enumerate(units):
             cs = next(allocation)
-            t0 = elapsed_cs * 10
-            elapsed_cs += cs
-            dur_ms = max(1, cs * 10)
-            rise = min(160, max(60, dur_ms // 2))
-            t_end = t0 + dur_ms
-            tags = (
-                f"\\r{block_tags}\\kf{cs}"
-                f"\\t({t0},{t0 + rise},\\fscx122\\fscy122)"
-                f"\\t({max(t0 + rise, t_end - rise)},{t_end},\\fscx100\\fscy100)"
-            )
-            segment = "{" + tags + "}" + _escape_ass_text(unit)
+            segment = "{" + f"\\r{block_tags}\\kf{cs}" + "}" + _escape_ass_text(unit)
             if spaced and idx < len(units) - 1:
                 segment += " "
             parts.append(segment)
@@ -599,9 +661,13 @@ def _render_color_cycle_text(lines: list[str], duration: float, style: dict) -> 
     return "{" + "".join(parts) + "\\fad(150,150)}" + escaped
 
 
-def _render_dialogue_text(text: str, preset_id: str, duration: float) -> str:
+def _render_dialogue_text(text: str, style: dict, duration: float) -> str:
+    """Single-event rendering: one Dialogue line carrying the whole cue.
+
+    Takes the already-merged style (preset + user overrides) rather than a preset
+    id, so a colour the user picked reaches the inline tags too.
+    """
     lines = text.split("\n")
-    style = get_preset_style(preset_id)
     anim = style["anim"]
     if anim == "karaoke":
         return _render_karaoke_text(lines, duration)
@@ -648,6 +714,481 @@ def _sanitize_font_family(font_family) -> str:
     return cleaned or Config.STORY_SUBTITLE_DEFAULT_FONT
 
 
+_HEX_COLOUR_RE = re.compile(r"^#?([0-9a-fA-F]{6})$")
+_ASS_COLOUR_RE = re.compile(r"^&H([0-9a-fA-F]{2})([0-9a-fA-F]{6})&?$")
+
+
+def _hex_to_ass_colour(value, alpha: int = 0) -> str | None:
+    """`#RRGGBB` -> ASS `&HAABBGGRR` (bytes reversed; alpha 00 = opaque).
+
+    Returns None for anything that is not exactly six hex digits. That check is
+    load-bearing rather than cosmetic: the result is interpolated straight into the
+    comma-separated `Style:` line, so an unvalidated string could shift the style
+    fields along or inject whole ASS lines — the same reason `_sanitize_font_family`
+    exists.
+    """
+    if not isinstance(value, str):
+        return None
+    match = _HEX_COLOUR_RE.match(value.strip())
+    if not match:
+        return None
+    digits = match.group(1).upper()
+    return f"&H{max(0, min(255, int(alpha))):02X}{digits[4:6]}{digits[2:4]}{digits[0:2]}"
+
+
+def _split_ass_colour(colour) -> tuple[str, str]:
+    """`&HAABBGGRR` -> (inline `\\1c` value, inline `\\1a` value)."""
+    match = _ASS_COLOUR_RE.match(str(colour).strip())
+    if not match:
+        return "&H000000&", "&H00&"
+    return f"&H{match.group(2).upper()}&", f"&H{match.group(1).upper()}&"
+
+
+def _opacity_to_alpha_tag(opacity) -> str | None:
+    """0..1 opacity -> inline ASS alpha (`&H00&` opaque ... `&HFF&` invisible)."""
+    try:
+        parsed = float(opacity)
+    except (TypeError, ValueError):
+        return None
+    parsed = max(0.0, min(1.0, parsed))
+    return f"&H{int(round((1.0 - parsed) * 255)):02X}&"
+
+
+# ---------------------------------------------------------------------------
+# Text measurement — the basis of jitter-free word animation
+# ---------------------------------------------------------------------------
+# libass lays a Dialogue line out from the glyph metrics current at that frame,
+# and \t re-evaluates those every frame. So an animated \fscx changes one word's
+# advance width, which changes the line width, which (Alignment 2 = centred)
+# moves every other word on the line. That is the jitter. The fix is to stop
+# letting libass lay the line out: measure the words here and give each one its
+# own \pos, after which a word can scale without any other word noticing.
+#
+# Pillow and libass both measure through FreeType, so the widths agree closely —
+# but exact agreement is not required. Every word on a line is placed from the
+# same measurements, so a systematic error only shifts word spacing a little. It
+# cannot produce movement, because nothing is re-measured at render time.
+
+# Vertical advance between stacked lines, as a multiple of the font size.
+_LINE_SPACING = 1.18
+# Background box padding, as a multiple of the font size.
+_BOX_PAD_X = 0.34
+_BOX_PAD_Y = 0.16
+# Text outline kept once the box became a drawn shape instead of BorderStyle 3.
+_BOX_TEXT_OUTLINE = 2
+# BorderStyle 3 padding used when nothing can be measured and the built-in opaque
+# box has to stand in for the drawn one.
+_BOX_FALLBACK_PADDING = 8
+
+_FONT_FILE_CACHE: dict[str, str | None] = {}
+
+
+@functools.lru_cache(maxsize=256)
+def _face_style(font_path: str) -> str:
+    """Subfamily of a font file ("regular", "bold", ...), or "" when unreadable."""
+    try:
+        from PIL import ImageFont
+
+        return str(ImageFont.truetype(font_path, 16).font.style or "").strip().lower()
+    except (ImportError, OSError, ValueError, AttributeError):
+        return ""
+
+
+def _resolve_font_file(family: str) -> str | None:
+    """Path to a font file for `family`, or None when it cannot be resolved."""
+    key = str(family or "").strip().lower()
+    if not key:
+        return None
+    if key in _FONT_FILE_CACHE:
+        return _FONT_FILE_CACHE[key]
+    resolved: str | None = None
+    try:
+        for record in scan_fonts():
+            if str(record.get("family", "")).strip().lower() != key:
+                continue
+            files = [str(path) for path in (record.get("files") or [])]
+            # A .ttc holds several faces and index 0 need not be the one this
+            # family names, so prefer a single-face file when one exists.
+            files.sort(key=lambda path: path.lower().endswith(".ttc"))
+            files = [path for path in files if os.path.isfile(path)]
+            # A family often indexes several weights under one name (Leelawadee UI
+            # lists both LeelawUI.ttf and LeelaUIb.ttf). libass draws the regular
+            # face unless the style asks for bold, and the bold face is wider, so
+            # measuring the wrong one spaces every word too far apart.
+            resolved = next(
+                (path for path in files if _face_style(path) == "regular"),
+                files[0] if files else None,
+            )
+            break
+    except OSError:
+        resolved = None
+    _FONT_FILE_CACHE[key] = resolved
+    return resolved
+
+
+# Probe size for the metric ratio below; large enough that Pillow's integer pixel
+# metrics quantise to a negligible error.
+_METRIC_PROBE_SIZE = 512
+
+
+@functools.lru_cache(maxsize=64)
+def _ass_size_scale(font_path: str) -> float:
+    """Ratio between an ASS Fontsize and the em size Pillow wants for it.
+
+    ASS sizes a font by its *height* — ascender to descender — while Pillow's `size`
+    is the em square. The two differ per font: 12% for Arial, 33% for Leelawadee UI.
+    Ignoring it stretched every line by that much. Latin hid the error inside its
+    word spaces; Thai, which has no spaces for the slack to disappear into, showed it
+    as characters drifting far apart.
+    """
+    from PIL import ImageFont
+
+    probe = ImageFont.truetype(font_path, _METRIC_PROBE_SIZE)
+    ascent, descent = probe.getmetrics()
+    height = ascent + descent
+    return _METRIC_PROBE_SIZE / height if height > 0 else 1.0
+
+
+@functools.lru_cache(maxsize=64)
+def _load_measure_font(font_path: str, size: int):
+    """Pillow font whose advances match what libass renders at ASS Fontsize `size`."""
+    try:
+        from PIL import ImageFont
+    except ImportError:
+        logger.warning("[StorySubtitles] Pillow unavailable; falling back to inline subtitle layout.")
+        return None
+    try:
+        return ImageFont.truetype(font_path, size * _ass_size_scale(font_path))
+    except (OSError, ValueError) as exc:
+        logger.warning(f"[StorySubtitles] Cannot measure font {font_path}: {exc}")
+        return None
+
+
+@functools.lru_cache(maxsize=4096)
+def _measure_width(font_path: str, size: int, text: str) -> float:
+    """Advance width of `text`, or -1.0 when it cannot be measured."""
+    font = _load_measure_font(font_path, size)
+    if font is None:
+        return -1.0
+    try:
+        return float(font.getlength(text))
+    except (OSError, ValueError):
+        return -1.0
+
+
+def _can_measure(font_family: str, font_size: int) -> str | None:
+    """Font file path when this family/size can be measured, else None."""
+    font_path = _resolve_font_file(font_family)
+    if not font_path:
+        return None
+    return font_path if _measure_width(font_path, font_size, " ") >= 0 else None
+
+
+def _layout_lines(
+    line_units: list[tuple[str, list[str]]],
+    font_path: str,
+    font_size: int,
+    play_res: tuple[int, int],
+    margin_v: int,
+    margin_lr: int,
+    alignment: int,
+) -> list[dict] | None:
+    """Absolute placement for every word of one cue.
+
+    Returns one dict per line — ``{"left", "y", "width", "height", "words":
+    [(unit, centre_x), ...]}`` — or None when a word cannot be measured, in which
+    case the caller falls back to inline (single-event) rendering.
+    """
+    play_x, play_y = play_res
+    line_height = font_size * _LINE_SPACING
+    laid: list[dict] = []
+    for line, units in line_units:
+        if not units:
+            continue
+        # Positions come from prefixes of the whole line rather than from measuring
+        # each unit on its own. Measuring in isolation breaks scripts with combining
+        # marks: a Thai cluster handed to the shaper alone gets a dotted-circle base,
+        # whose width then pushed every following character further right.
+        separator = " " if " " in line.strip() else ""
+        text = separator.join(units)
+        spans: list[tuple[int, int]] = []
+        cursor = 0
+        for unit in units:
+            spans.append((cursor, cursor + len(unit)))
+            cursor += len(unit) + len(separator)
+
+        def prefix(index: int) -> float:
+            return _measure_width(font_path, font_size, text[:index])
+
+        total = prefix(len(text))
+        if total < 0:
+            return None
+        if alignment in (1, 4, 7):
+            left = float(margin_lr)
+        elif alignment in (3, 6, 9):
+            left = play_x - margin_lr - total
+        else:
+            left = (play_x - total) / 2.0
+        words: list[tuple[str, float]] = []
+        for unit, (begin, finish) in zip(units, spans):
+            start_x, end_x = prefix(begin), prefix(finish)
+            if start_x < 0 or end_x < 0:
+                return None
+            words.append((unit, left + (start_x + end_x) / 2.0))
+        laid.append({"left": left, "width": total, "height": line_height, "words": words})
+    if not laid:
+        return None
+    block_height = line_height * len(laid)
+    if alignment in (7, 8, 9):
+        top = float(margin_v)
+    elif alignment in (4, 5, 6):
+        top = (play_y - block_height) / 2.0
+    else:
+        top = play_y - margin_v - block_height
+    for index, entry in enumerate(laid):
+        entry["y"] = top + line_height * (index + 0.5)
+    return laid
+
+
+def _dialogue(start: float, end: float, text: str, layer: int = 0) -> str:
+    return (
+        f"Dialogue: {layer},{_format_ass_time(start)},{_format_ass_time(end)},"
+        f"Default,,0,0,0,,{text}"
+    )
+
+
+def _background_events(layout, start, end, colour, alpha_tag, font_size) -> list[str]:
+    """One opaque rectangle per line, drawn under the text on layer 0.
+
+    A \\p1 shape rather than ASS's own opaque box (BorderStyle 3), for two reasons:
+    the built-in box reuses the OutlineColour field, so box and text outline can
+    never be different colours, and its size follows the glyphs — so it breathes
+    whenever a word scales. A shape sized once from the measured line does neither.
+    """
+    pad_x = font_size * _BOX_PAD_X
+    pad_y = font_size * _BOX_PAD_Y
+    events: list[str] = []
+    for line in layout:
+        width = line["width"] + pad_x * 2
+        height = line["height"] + pad_y * 2
+        left = line["left"] - pad_x
+        top = line["y"] - line["height"] / 2.0 - pad_y
+        # \an7 puts the drawing origin exactly at \pos, so the shape needs no offset.
+        tags = (
+            f"\\an7\\pos({left:.1f},{top:.1f})\\bord0\\shad0"
+            f"\\1c{colour}\\1a{alpha_tag}\\p1"
+        )
+        shape = f"m 0 0 l {width:.0f} 0 l {width:.0f} {height:.0f} l 0 {height:.0f}"
+        events.append(_dialogue(start, end, "{" + tags + "}" + shape))
+    return events
+
+
+def _word_pop_events(layout, start, end, duration, style, layer) -> list[str]:
+    """"Chữ nhảy": one Dialogue per word, each pinned to an absolute position.
+
+    Every word carries its own \\pos, so scaling one cannot move any other — the
+    reflow that made the line shudder is gone by construction. Each event also
+    starts at its own word's time, which retires the old trick of laying the whole
+    line out transparent and un-hiding words with a 10ms \\alpha transform.
+    """
+    weights = [len(unit) for line in layout for unit, _ in line["words"]]
+    if not weights:
+        return []
+    allocation = iter(_allocate_centiseconds(max(1, int(round(duration * 100))), weights))
+    block_tags = str(style.get("block_tags") or "")
+    events: list[str] = []
+    elapsed_cs = 0
+    for line in layout:
+        for unit, centre_x in line["words"]:
+            cs = next(allocation)
+            word_start = min(start + elapsed_cs / 100.0, end - 0.01)
+            elapsed_cs += cs
+            tags = (
+                f"\\an5\\pos({centre_x:.1f},{line['y']:.1f}){block_tags}"
+                f"\\fad({_POP_FADE_IN_MS},{_POP_FADE_OUT_MS})"
+                f"\\fscx{_POP_START_SCALE}\\fscy{_POP_START_SCALE}"
+                f"\\t(0,{_POP_RISE_MS},{_POP_RISE_ACCEL},"
+                f"\\fscx{_POP_PEAK_SCALE}\\fscy{_POP_PEAK_SCALE})"
+                f"\\t({_POP_RISE_MS},{_POP_SETTLE_MS},{_POP_SETTLE_ACCEL},\\fscx100\\fscy100)"
+            )
+            events.append(
+                _dialogue(word_start, end, "{" + tags + "}" + _escape_ass_text(unit), layer)
+            )
+    return events
+
+
+def _karaoke_zoom_events(layout, start, end, duration, style, layer) -> list[str]:
+    """"Karaoke phóng to": \\kf fill plus a zoom on the word being read.
+
+    Unlike the word pop, every event spans the whole cue — karaoke needs the words
+    it has not reached yet to be on screen in the secondary colour. A word waits its
+    turn behind a leading zero-width `\\k`, then fills with `\\kf`.
+    """
+    weights = [len(unit) for line in layout for unit, _ in line["words"]]
+    if not weights:
+        return []
+    allocation = iter(_allocate_centiseconds(max(1, int(round(duration * 100))), weights))
+    block_tags = str(style.get("block_tags") or "")
+    events: list[str] = []
+    elapsed_cs = 0
+    for line in layout:
+        for unit, centre_x in line["words"]:
+            cs = next(allocation)
+            lead_cs = elapsed_cs
+            t0 = elapsed_cs * 10
+            elapsed_cs += cs
+            dur_ms = max(1, cs * 10)
+            # Grow, hold while the word is actually being read, then ease back at
+            # its end. Both windows are clamped to a few frames: the old code let
+            # the shrink window reach zero length whenever a word was shorter than
+            # twice the rise, which snapped the scale back inside a single frame.
+            rise = max(80, min(_POP_RISE_MS, dur_ms // 3))
+            fall = max(120, min(200, dur_ms // 3))
+            fall_start = max(t0 + rise, t0 + dur_ms - fall)
+            tags = (
+                f"\\an5\\pos({centre_x:.1f},{line['y']:.1f}){block_tags}"
+                f"\\fad({_POP_FADE_IN_MS},{_POP_FADE_OUT_MS})"
+                f"\\t({t0},{t0 + rise},{_POP_RISE_ACCEL},"
+                f"\\fscx{_POP_PEAK_SCALE}\\fscy{_POP_PEAK_SCALE})"
+                f"\\t({fall_start},{fall_start + fall},{_POP_SETTLE_ACCEL},\\fscx100\\fscy100)"
+            )
+            karaoke = (f"{{\\k{lead_cs}}}" if lead_cs else "") + f"{{\\kf{cs}}}"
+            events.append(
+                _dialogue(start, end, "{" + tags + "}" + karaoke + _escape_ass_text(unit), layer)
+            )
+    return events
+
+
+# Overrides that mean the user took manual control of the text decoration; any of
+# them switches a preset's built-in opaque box over to the drawn rectangle, which
+# is what lets outline colour and background colour differ at all.
+_DECORATION_KEYS = ("backgroundEnabled", "backColor", "backOpacity", "outlineColor", "outlineWidth")
+
+
+def _resolve_render_style(preset_id: str, overrides: dict, measured: bool):
+    """Merge preset + user overrides into `(style, background)`.
+
+    `background` is `(inline colour, inline alpha)` when the cue gets a drawn
+    rectangle behind it, else None (the style may then still carry BorderStyle 3).
+
+    ASS makes this fiddlier than it looks: under BorderStyle 3 the OutlineColour
+    field *is* the box colour, so the built-in box and a text outline can never be
+    two colours at once. Drawing the box ourselves frees that field — but that needs
+    measured text, so without measurement we fall back to the built-in box and the
+    outline colour goes back to meaning the box colour.
+    """
+    style = dict(get_preset_style(preset_id))
+
+    primary = _hex_to_ass_colour(overrides.get("textColor"))
+    if primary:
+        style["primary"] = primary
+    outline_colour = _hex_to_ass_colour(overrides.get("outlineColor"))
+    outline_width = overrides.get("outlineWidth")
+    parsed_width: int | None = None
+    if outline_width is not None:
+        try:
+            parsed_width = max(0, min(20, int(outline_width)))
+        except (TypeError, ValueError):
+            parsed_width = None
+
+    preset_box = style.get("border_style") == 3
+    enabled = overrides.get("backgroundEnabled")
+    want_box = preset_box if enabled is None else bool(enabled)
+    box_colour = _hex_to_ass_colour(overrides.get("backColor"))
+    box_alpha = _opacity_to_alpha_tag(overrides.get("backOpacity"))
+
+    # Which model draws the background. The drawn rectangle is used when the user
+    # touched any decoration control, and for the word animations whose scaling
+    # would otherwise make the built-in box breathe.
+    touched = any(overrides.get(key) is not None for key in _DECORATION_KEYS)
+    animated = style.get("anim") in ("word_pop", "karaoke_zoom")
+    draw_box = measured and want_box and (touched or animated)
+
+    if draw_box or not want_box:
+        # The Outline fields belong to the text from here on.
+        style["border_style"] = 1
+        if preset_box:
+            style["outline_colour"] = _DEFAULT_STYLE["outline_colour"]
+            style["outline"] = _BOX_TEXT_OUTLINE if draw_box else _DEFAULT_STYLE["outline"]
+    if outline_colour and style["border_style"] != 3:
+        style["outline_colour"] = outline_colour
+    if parsed_width is not None and style["border_style"] != 3:
+        style["outline"] = parsed_width
+
+    if not want_box:
+        return style, None
+
+    if draw_box:
+        if box_colour:
+            colour, alpha = _split_ass_colour(box_colour)
+        elif preset_box:
+            colour, alpha = _split_ass_colour(get_preset_style(preset_id)["outline_colour"])
+        else:
+            colour, alpha = "&H000000&", "&H40&"
+        return style, (colour, box_alpha or alpha)
+
+    # No measurement: keep ASS's own opaque box, where OutlineColour is the box.
+    style["border_style"] = 3
+    style["shadow"] = 0
+    if box_colour or box_alpha:
+        base = box_colour or style["outline_colour"]
+        colour, alpha = _split_ass_colour(base)
+        alpha_hex = (box_alpha or alpha).strip("&H&") or "00"
+        style["outline_colour"] = f"&H{alpha_hex.upper()}{colour.strip('&H&')}"
+        style["outline"] = parsed_width if parsed_width is not None else _BOX_FALLBACK_PADDING
+    return style, None
+
+
+def _cue_events(
+    text: str,
+    start: float,
+    end: float,
+    style: dict,
+    background,
+    font_path: str | None,
+    font_size: int,
+    play_res: tuple[int, int],
+    margin_v: int,
+    margin_lr: int,
+    alignment: int,
+) -> list[str]:
+    """Every Dialogue line one cue expands into.
+
+    Static presets still produce exactly one event. The word animations produce one
+    per word (plus one per line for a drawn background), because that is what pins
+    each word to a fixed position.
+    """
+    lines = text.split("\n")
+    anim = style["anim"]
+    duration = end - start
+    positioned = anim in ("word_pop", "karaoke_zoom")
+
+    layout = None
+    if font_path and (positioned or background is not None):
+        layout = _layout_lines(
+            [(line, _karaoke_units(line)) for line in lines],
+            font_path, font_size, play_res, margin_v, margin_lr, alignment,
+        )
+    if layout is None and positioned:
+        logger.debug("[StorySubtitles] Word layout unavailable; using inline fallback.")
+
+    events: list[str] = []
+    text_layer = 0
+    if background is not None and layout is not None:
+        events.extend(_background_events(layout, start, end, background[0], background[1], font_size))
+        text_layer = 1
+
+    if layout is not None and anim == "word_pop":
+        events.extend(_word_pop_events(layout, start, end, duration, style, text_layer))
+    elif layout is not None and anim == "karaoke_zoom":
+        events.extend(_karaoke_zoom_events(layout, start, end, duration, style, text_layer))
+    else:
+        events.append(
+            _dialogue(start, end, _render_dialogue_text(text, style, duration), text_layer)
+        )
+    return events
+
+
 def build_ass(
     cues,
     font_family: str,
@@ -669,7 +1210,8 @@ def build_ass(
     alignment = _coerce_style_int(overrides.get("alignment"), 2)
     margin_lr = max(10, int(round(40 * scale)))
 
-    style = get_preset_style(preset_id)
+    font_path = _can_measure(font_family, font_size)
+    style, background = _resolve_render_style(preset_id, overrides, measured=font_path is not None)
     primary = style["primary"]
     secondary = style["secondary"]
     outline_colour = style["outline_colour"]
@@ -707,9 +1249,11 @@ def build_ass(
         text = str(cue.get("text", "")).strip()
         if not text or end <= start:
             continue
-        rendered = _render_dialogue_text(text, preset_id, end - start)
-        events.append(
-            f"Dialogue: 0,{_format_ass_time(start)},{_format_ass_time(end)},Default,,0,0,0,,{rendered}"
+        events.extend(
+            _cue_events(
+                text, start, end, style, background,
+                font_path, font_size, (play_x, play_y), margin_v, margin_lr, alignment,
+            )
         )
 
     return "\n".join(header + events) + "\n"

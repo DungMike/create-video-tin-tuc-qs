@@ -187,6 +187,55 @@ def _fmt_ass_ts(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
+def _ass_event_spans(ass_path: str) -> list[tuple[float, float]]:
+    """Every Dialogue event's (start, end), merged into sorted disjoint spans."""
+    spans: list[tuple[float, float]] = []
+    try:
+        with open(ass_path, "r", encoding="utf-8-sig") as handle:
+            for line in handle:
+                if not line.startswith("Dialogue:"):
+                    continue
+                fields = line[len("Dialogue:"):].split(",", 9)
+                if len(fields) < 10:
+                    continue
+                start = _parse_ass_ts(fields[1])
+                end = _parse_ass_ts(fields[2])
+                if end > start:
+                    spans.append((start, end))
+    except OSError:
+        return []
+    spans.sort()
+    merged: list[tuple[float, float]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _snap_segment_boundary(spans, nominal: float, window: float) -> float:
+    """Move a segment boundary off any subtitle that is on screen.
+
+    A cue cut in half by a boundary replays its entire animation in the next
+    segment: `_rebase_ass_file` shifts the event's Start/End, but the `\\t` and
+    `\\kf` offsets inside the text stay relative to the *original* Start, and a
+    straddling cue has its Start clamped to 0 — so t=0 lands at the boundary and
+    the word pops, the karaoke refills, the fade fades in all over again. Cutting
+    only where nothing is on screen sidesteps that for every preset at once.
+
+    Returns the nominal time unchanged when no gap is close enough to use.
+    """
+    for start, end in spans:
+        if not start < nominal < end:
+            continue
+        # Snap to whichever edge of the cue is nearer, if it is within reach.
+        if nominal - start <= end - nominal:
+            return start if nominal - start <= window else nominal
+        return end if end - nominal <= window else nominal
+    return nominal
+
+
 def _rebase_ass_file(src_ass: str, start: float, dur: float, out_ass: str) -> None:
     """Write a copy of `src_ass` whose Dialogue events are shifted to a segment.
 
@@ -1155,11 +1204,23 @@ class StoryVideoPipelineRunner:
         fall back to the single-pass overlay."""
         temp = _temp_dir(self.story_id)
         seg_dur = audio_duration / segments
+        # Cut between cues rather than at exact even offsets: a boundary that lands
+        # mid-cue makes that cue replay its animation in the next segment (see
+        # `_snap_segment_boundary`). Segments are encoded separately and concatenated,
+        # so uneven lengths cost nothing.
+        spans = _ass_event_spans(self._subtitle_ass_path)
+        bounds = [0.0]
+        for i in range(1, segments):
+            snapped = _snap_segment_boundary(spans, i * seg_dur, seg_dur * 0.25)
+            # Keep boundaries strictly increasing so no segment can come out empty.
+            bounds.append(min(max(snapped, bounds[-1] + 1.0), audio_duration - 1.0))
+        bounds.append(audio_duration)
+
         seg_cmds: list[list] = []
         seg_outputs: list[str] = []
         for i in range(segments):
-            start = i * seg_dur
-            dur = seg_dur if i < segments - 1 else (audio_duration - start)
+            start = bounds[i]
+            dur = bounds[i + 1] - start
             seg_ass = os.path.join(temp, f"segsub_{i}_{self.story_id}.ass")
             _rebase_ass_file(self._subtitle_ass_path, start, dur, seg_ass)
             seg_out = os.path.join(temp, f"segpart_{i}_{self.story_id}.mp4")

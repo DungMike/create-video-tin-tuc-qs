@@ -648,7 +648,16 @@ export async function generateSubtitlePreview(body: {
   maxCharsPerLine: number;
   maxLines: number;
   sampleClipId?: string;
-  styleOverrides?: { fontScale?: number };
+  /** Same keys build_ass whitelists, so the preview shows what the render will do. */
+  styleOverrides?: {
+    fontScale?: number;
+    textColor?: string;
+    outlineColor?: string;
+    outlineWidth?: number;
+    backgroundEnabled?: boolean;
+    backColor?: string;
+    backOpacity?: number;
+  };
 }) {
   return requestJson<{ previewPath: string }>("/api/story-video/subtitle-preview", {
     method: "POST",

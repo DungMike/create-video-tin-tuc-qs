@@ -1925,6 +1925,36 @@ def _subtitle_config_from_payload(payload: dict) -> dict:
         if font_scale > 0:
             style_overrides["fontScale"] = max(0.3, min(4.0, font_scale))
 
+    # Colours are passed through as the raw "#RRGGBB" the picker produced;
+    # build_ass validates and converts them, and drops anything malformed. Only
+    # keys the user actually set are forwarded, so an untouched form still renders
+    # exactly what the chosen preset always rendered.
+    for payload_key, override_key in (
+        ("subtitleTextColor", "textColor"),
+        ("subtitleOutlineColor", "outlineColor"),
+        ("subtitleBackColor", "backColor"),
+    ):
+        value = str(payload.get(payload_key, "") or "").strip()
+        if value:
+            style_overrides[override_key] = value
+
+    outline_width_raw = payload.get("subtitleOutlineWidth")
+    if outline_width_raw is not None and str(outline_width_raw).strip() != "":
+        try:
+            style_overrides["outlineWidth"] = max(0, min(20, int(outline_width_raw)))
+        except (TypeError, ValueError):
+            pass
+
+    if payload.get("subtitleBackgroundEnabled") is not None:
+        style_overrides["backgroundEnabled"] = bool(payload.get("subtitleBackgroundEnabled"))
+
+    back_opacity_raw = payload.get("subtitleBackOpacity")
+    if back_opacity_raw is not None and str(back_opacity_raw).strip() != "":
+        try:
+            style_overrides["backOpacity"] = max(0.0, min(1.0, float(back_opacity_raw)))
+        except (TypeError, ValueError):
+            pass
+
     return {
         "subtitle_font": str(payload.get("subtitleFont", "")).strip(),
         "subtitle_preset": preset_id,
@@ -2672,6 +2702,9 @@ def retry_batch_failed(batch_id: str):
             "subtitle_max_lines": s.get(
                 "subtitle_max_lines", Config.STORY_SUBTITLE_MAX_LINES
             ),
+            # Without this a retry silently re-renders at the default size and
+            # colours, so the replacement video does not match the rest of the batch.
+            "subtitle_style_overrides": s.get("subtitle_style_overrides") or {},
         })
 
     retry_batch_id = f"{batch_id}-retry"

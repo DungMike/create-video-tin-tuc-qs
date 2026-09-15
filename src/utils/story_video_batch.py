@@ -199,6 +199,9 @@ class StoryVideoBatchRunner:
                 "subtitle_max_lines": config.get(
                     "subtitle_max_lines", Config.STORY_SUBTITLE_MAX_LINES
                 ),
+                # Persisted so a retry can rebuild the same font size and colours;
+                # without it the retried item comes back styled differently.
+                "subtitle_style_overrides": config.get("subtitle_style_overrides") or {},
             })
 
         self._save_progress()

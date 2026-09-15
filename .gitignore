@@ -10,6 +10,7 @@ tests/*
 !tests/test_story_overlay_packs.py
 !tests/test_story_cta_overlay.py
 !tests/test_story_subtitles.py
+!tests/test_story_subtitle_segments.py
 !tests/test-transcript/
 tests/test-transcript/*
 !tests/test-transcript/test.srt

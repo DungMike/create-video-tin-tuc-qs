@@ -1,5 +1,6 @@
 import os
 import re
+import unicodedata
 import json
 
 import pytest
@@ -16,6 +17,25 @@ def _dialogue_lines(ass_text: str) -> list[str]:
 
 def _style_line(ass_text: str) -> str:
     return next(line for line in ass_text.splitlines() if line.startswith("Style:"))
+
+
+def _layer_of(dialogue_line: str) -> str:
+    return dialogue_line[len("Dialogue: "):].split(",", 1)[0]
+
+
+# The positioned (jitter-free) path needs a font this machine can actually measure.
+# Where it cannot, build_ass falls back to inline rendering, which the
+# `*_inline_fallback` tests below cover by forcing that branch.
+requires_measurable_font = pytest.mark.skipif(
+    ss._can_measure("Arial", 54) is None,
+    reason="no measurable Arial on this machine; only the inline fallback applies",
+)
+
+
+@pytest.fixture
+def unmeasurable_font(monkeypatch):
+    """Force the inline fallback branch (no Pillow / font file unresolvable)."""
+    monkeypatch.setattr(ss, "_resolve_font_file", lambda family: None)
 
 
 def test_subtitle_presets_registry():
@@ -336,25 +356,71 @@ def test_build_ass_preset_karaoke_pop_timing_and_colors():
     assert abs(sum(kf_values2) - 200) <= 1
 
 
-def test_build_ass_preset_word_bounce_reveals_each_word():
+@requires_measurable_font
+def test_build_ass_preset_word_bounce_positions_every_word():
     ass_text = ss.build_ass(
         [{"start": 0.0, "end": 3.0, "text": "một hai ba bốn"}], "Arial", "word_bounce"
     )
-    line = _dialogue_lines(ass_text)[0]
-    # One reset + hidden-alpha block per word, revealed via \t and bounced via \fscx.
-    assert line.count("\\r") == 4
-    assert line.count("\\alpha&HFF&") == 4
-    assert line.count("\\t(") == 12  # 3 transforms per word
-    assert "\\fscx135" in line and "\\fscx100" in line
-    # Word start times cover the cue: first word at 0, later words strictly increasing.
-    starts = [int(m) for m in re.findall(r"\\alpha&HFF&\\t\((\d+),", line)]
-    assert starts[0] == 0
+    lines = _dialogue_lines(ass_text)
+    # One event per word, each pinned with \pos. That is the whole point: a word
+    # can only scale without shoving its neighbours if libass never lays the line
+    # out itself.
+    assert len(lines) == 4
+    assert all("\\pos(" in line for line in lines)
+    assert all("\\an5" in line for line in lines)
+    # Each word bounces, and both transforms carry an easing exponent.
+    for line in lines:
+        assert "\\fscx112" in line and "\\fscx100" in line
+        assert line.count("\\t(") == 2
+        assert ",0.5,\\fscx112" in line and ",1.3,\\fscx100" in line
+    # Words are revealed in reading order by their own event start times.
+    starts = [line[len("Dialogue: "):].split(",")[1] for line in lines]
     assert starts == sorted(starts)
-    assert starts[-1] < 3000
+    assert starts[0] == "0:00:00.00"
+    # Horizontal positions advance left to right and never repeat.
+    xs = [float(re.search(r"\\pos\(([\d.]+),", line).group(1)) for line in lines]
+    assert xs == sorted(xs) and len(set(xs)) == 4
 
 
-def test_build_ass_preset_word_bounce_box_style():
-    ass_text = ss.build_ass([{"start": 0.0, "end": 2.0, "text": "abc def"}], "Arial", "word_bounce_box")
+def test_build_ass_preset_word_bounce_inline_fallback_has_no_scaling(unmeasurable_font):
+    ass_text = ss.build_ass(
+        [{"start": 0.0, "end": 3.0, "text": "một hai ba bốn"}], "Arial", "word_bounce"
+    )
+    lines = _dialogue_lines(ass_text)
+    assert len(lines) == 1
+    # Without measurement everything shares one line again, so scaling a word would
+    # reflow that line every frame -- the fallback reveals and pulses the border
+    # instead, neither of which changes the advance width.
+    assert "\\fscx" not in lines[0] and "\\fscy" not in lines[0]
+    assert lines[0].count("\\alpha&HFF&") == 4
+    assert "\\bord" in lines[0]
+
+
+@requires_measurable_font
+def test_build_ass_preset_word_bounce_box_draws_a_static_rectangle():
+    ass_text = ss.build_ass(
+        [{"start": 0.0, "end": 2.0, "text": "abc def"}], "Arial", "word_bounce_box"
+    )
+    lines = _dialogue_lines(ass_text)
+    boxes = [line for line in lines if "\\p1" in line]
+    words = [line for line in lines if "\\p1" not in line]
+    assert len(boxes) == 1 and len(words) == 2
+    # The box sits under the text and is drawn once at a fixed size, so it cannot
+    # breathe with the words the way ASS's own opaque box did.
+    assert _layer_of(boxes[0]) == "0"
+    assert all(_layer_of(line) == "1" for line in words)
+    assert "\\1c&H000000&" in boxes[0] and "\\1a&H80&" in boxes[0]
+    assert "\\fscx" not in boxes[0]
+    # BorderStyle goes back to 1 so the Outline fields describe the text outline.
+    fields = _style_line(ass_text)[len("Style: "):].split(",")
+    assert fields[15] == "1"
+
+
+def test_build_ass_preset_word_bounce_box_falls_back_to_opaque_box(unmeasurable_font):
+    ass_text = ss.build_ass(
+        [{"start": 0.0, "end": 2.0, "text": "abc def"}], "Arial", "word_bounce_box"
+    )
+    assert "\\p1" not in ass_text
     fields = _style_line(ass_text)[len("Style: "):].split(",")
     assert fields[15] == "3"  # BorderStyle = opaque box
     assert fields[5] == "&H80000000"
@@ -383,7 +449,29 @@ def test_build_ass_preset_color_pulse_beats_scale_with_duration():
     assert "\\1c&H00FFFF&" in long_line and "\\1c&HFFFFFF&" in long_line
 
 
+@requires_measurable_font
 def test_build_ass_preset_karaoke_zoom_keeps_kf_timing():
+    ass_text = ss.build_ass(
+        [{"start": 0.0, "end": 3.0, "text": "một hai ba"}], "Arial", "karaoke_zoom"
+    )
+    lines = _dialogue_lines(ass_text)
+    assert len(lines) == 3
+    kf_values = [int(re.search(r"\\kf(\d+)", line).group(1)) for line in lines]
+    assert abs(sum(kf_values) - 300) <= 1
+    # Karaoke needs the words it has not reached yet on screen in the secondary
+    # colour, so every event spans the whole cue and waits its turn behind a
+    # zero-width \k lead that matches the fill already spent.
+    assert all(line.startswith("Dialogue: 0,0:00:00.00,0:00:03.00") for line in lines)
+    leads = [int(m.group(1)) if (m := re.search(r"\\k(\d+)\}\{\\kf", line)) else 0 for line in lines]
+    assert leads == [0] + [sum(kf_values[:i]) for i in range(1, 3)]
+    # Each word zooms at its own fixed position, and no transform is zero-length.
+    for line in lines:
+        assert "\\pos(" in line and "\\fscx112" in line and "\\fscx100" in line
+        for start, stop in re.findall(r"\\t\((\d+),(\d+),", line):
+            assert int(stop) > int(start)
+
+
+def test_build_ass_preset_karaoke_zoom_inline_fallback_drops_the_zoom(unmeasurable_font):
     ass_text = ss.build_ass(
         [{"start": 0.0, "end": 3.0, "text": "một hai ba"}], "Arial", "karaoke_zoom"
     )
@@ -391,21 +479,156 @@ def test_build_ass_preset_karaoke_zoom_keeps_kf_timing():
     kf_values = [int(value) for value in re.findall(r"\\kf(\d+)", line)]
     assert len(kf_values) == 3
     assert abs(sum(kf_values) - 300) <= 1
-    # Every word gets its own reset + zoom-in/out pair.
-    assert line.count("\\r") == 3
-    assert line.count("\\fscx122") == 3
-    assert line.count("\\fscx100") == 3
+    assert "\\fscx" not in line  # inline scaling would reflow the line
 
 
+@requires_measurable_font
 def test_build_ass_preset_karaoke_neon_redeclares_blur_per_word():
     ass_text = ss.build_ass(
         [{"start": 0.0, "end": 2.0, "text": "abc def"}], "Arial", "karaoke_neon"
     )
-    line = _dialogue_lines(ass_text)[0]
-    # \r resets overrides, so the glow must be re-declared inside every block.
-    assert line.count("\\blur5") == 2
+    lines = _dialogue_lines(ass_text)
+    # One event per word, and each carries the glow, since no event inherits
+    # another's overrides.
+    assert len(lines) == 2
+    assert all(line.count("\\blur5") == 1 for line in lines)
     fields = _style_line(ass_text)[len("Style: "):].split(",")
     assert fields[5] == "&H00FFFF00"  # cyan glow outline
+
+
+# --- Thai and other scripts with combining marks ------------------------------
+
+THAI_LINE = "บางครั้งมันก็เป็นเพียงแค่ฉากหน้า"
+
+
+def test_grapheme_clusters_keep_thai_marks_on_their_base():
+    # "รั้ง" is ร + two nonspacing marks + ง: three clusters, not four characters.
+    assert ss._grapheme_clusters("รั้ง") == ["รั้", "ง"]
+    # A leading vowel belongs to the consonant written after it.
+    assert ss._grapheme_clusters("เป็น") == ["เป็", "น"]
+    # Scripts without marks are unchanged: one cluster per character.
+    assert ss._grapheme_clusters("한국어") == ["한", "국", "어"]
+    assert ss._grapheme_clusters("abc") == ["a", "b", "c"]
+
+
+def test_karaoke_units_never_start_with_a_bare_combining_mark():
+    # Slicing every two codepoints produced units like "้ง" — a tone mark with no
+    # base, which renders detached and measures as if it had a dotted-circle base.
+    units = ss._karaoke_units(THAI_LINE)
+    assert units
+    assert "".join(units) == THAI_LINE
+    for unit in units:
+        assert unicodedata.category(unit[0]) not in ("Mn", "Mc", "Me"), unit
+
+
+def test_karaoke_units_unchanged_for_scripts_without_marks():
+    assert ss._karaoke_units("한국어입니다") == ["한국", "어입", "니다"]
+    assert ss._karaoke_units("mot hai ba") == ["mot", "hai", "ba"]
+
+
+@requires_measurable_font
+def test_measure_font_is_scaled_to_the_ass_size_convention():
+    # ASS sizes a font by ascender-to-descender, Pillow by the em square. Without
+    # the correction every line was measured too wide — 12% for Arial, 33% for
+    # Leelawadee UI — which spread the positioned words apart.
+    path = ss._can_measure("Arial", 54)
+    font = ss._load_measure_font(path, 54)
+    ascent, descent = font.getmetrics()
+    assert abs((ascent + descent) - 54) <= 1
+
+
+@requires_measurable_font
+def test_thai_positioned_layout_matches_a_single_line_measurement():
+    font_path = ss._can_measure("Leelawadee UI", 54) or ss._can_measure("Tahoma", 54)
+    if not font_path:
+        pytest.skip("no Thai-capable measurable font on this machine")
+    units = ss._karaoke_units(THAI_LINE)
+    layout = ss._layout_lines(
+        [(THAI_LINE, units)], font_path, 54, (1920, 1080), 60, 40, 2
+    )
+    assert layout is not None and len(layout) == 1
+    line = layout[0]
+    assert len(line["words"]) == len(units)
+    # The units must tile the line, not sit scattered across a wider span: the
+    # distance from first to last centre cannot exceed the line's own width.
+    centres = [x for _, x in line["words"]]
+    assert centres == sorted(centres)
+    assert centres[-1] - centres[0] < line["width"]
+    # And the whole line is what one measurement of the same text says it is.
+    assert abs(line["width"] - ss._measure_width(font_path, 54, THAI_LINE)) < 1.0
+
+
+# --- Colour overrides ---------------------------------------------------------
+
+
+def test_hex_to_ass_colour_reverses_byte_order():
+    assert ss._hex_to_ass_colour("#FF8800") == "&H000088FF"
+    assert ss._hex_to_ass_colour("ff8800") == "&H000088FF"
+    assert ss._hex_to_ass_colour("#FF8800", alpha=128) == "&H800088FF"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["red", "#GGGGGG", "#FFF", "#FF88000", "", None, 255, "&H00FFFFFF",
+     "FFFFFF,0,0\nDialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,pwned"],
+)
+def test_hex_to_ass_colour_rejects_anything_but_six_hex_digits(value):
+    # The result is interpolated into the comma-separated Style: line, so anything
+    # that slips through here could shift the style fields or inject an event.
+    assert ss._hex_to_ass_colour(value) is None
+
+
+def test_build_ass_colour_overrides_land_in_the_style_line():
+    ass_text = ss.build_ass(
+        [{"start": 0.0, "end": 2.0, "text": "abc"}], "Arial", preset_id="clean",
+        style_overrides={"textColor": "#FF8800", "outlineColor": "#123456", "outlineWidth": 7},
+    )
+    fields = _style_line(ass_text)[len("Style: "):].split(",")
+    assert fields[3] == "&H000088FF"   # PrimaryColour
+    assert fields[5] == "&H00563412"   # OutlineColour
+    assert fields[16] == "7"           # Outline width
+
+
+def test_build_ass_ignores_malformed_colour_overrides():
+    plain = ss.build_ass([{"start": 0.0, "end": 2.0, "text": "abc"}], "Arial", preset_id="clean")
+    injected = ss.build_ass(
+        [{"start": 0.0, "end": 2.0, "text": "abc"}], "Arial", preset_id="clean",
+        style_overrides={"textColor": "nope", "outlineColor": "#zz1122", "outlineWidth": "big"},
+    )
+    assert _style_line(injected) == _style_line(plain)
+    assert len(_dialogue_lines(injected)) == 1
+
+
+@requires_measurable_font
+def test_build_ass_background_override_draws_a_rectangle_under_the_text():
+    ass_text = ss.build_ass(
+        [{"start": 0.0, "end": 2.0, "text": "abc def"}], "Arial", preset_id="clean",
+        style_overrides={
+            "backgroundEnabled": True, "backColor": "#102030", "backOpacity": 0.5,
+            "outlineColor": "#FF0000",
+        },
+    )
+    lines = _dialogue_lines(ass_text)
+    boxes = [line for line in lines if "\\p1" in line]
+    assert len(boxes) == 1
+    assert _layer_of(boxes[0]) == "0"
+    assert "\\1c&H302010&" in boxes[0]
+    assert "\\1a&H80&" in boxes[0]   # 0.5 opacity
+    # Drawing the box ourselves is what lets it differ from the outline colour:
+    # ASS's own opaque box reuses the OutlineColour field for both.
+    fields = _style_line(ass_text)[len("Style: "):].split(",")
+    assert fields[15] == "1"          # BorderStyle stays outline+shadow
+    assert fields[5] == "&H000000FF"  # outline is red, independent of the box
+
+
+def test_build_ass_background_disabled_turns_off_a_preset_box():
+    ass_text = ss.build_ass(
+        [{"start": 0.0, "end": 2.0, "text": "abc"}], "Arial", preset_id="box_dark",
+        style_overrides={"backgroundEnabled": False},
+    )
+    assert "\\p1" not in ass_text
+    fields = _style_line(ass_text)[len("Style: "):].split(",")
+    assert fields[15] == "1"
 
 
 def test_build_ass_preset_emphasis_bold():
