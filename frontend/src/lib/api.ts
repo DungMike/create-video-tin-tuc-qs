@@ -18,6 +18,7 @@ import type {
   StartStoryHarvestRequest,
   StartStoryLibraryNormalizeResponse,
   StoryBatchProgress,
+  StoryBatchQueue,
   StoryDecorFrame,
   StoryDecorImage,
   StoryDecorMaskMode,
@@ -583,7 +584,12 @@ export async function createStoryBatch(payload: CreateStoryBatchRequest, audioFi
   if (subtitleFiles?.length) {
     subtitleFiles.forEach((f) => fd.append("subtitle_files", f));
   }
-  return requestJson<{ batchId: string }>("/api/story-video/batch/create", { method: "POST", body: fd });
+  return requestJson<{ batchId: string; queuePosition: number }>("/api/story-video/batch/create", { method: "POST", body: fd });
+}
+
+/** Batch đang chạy + đang chờ + vừa xong (mới nhất trước). */
+export async function getStoryBatchQueue() {
+  return requestJson<StoryBatchQueue>("/api/story-video/batch/queue");
 }
 
 /** Scan a folder on the machine running the backend — no upload, just paths. */
@@ -623,7 +629,7 @@ export async function cancelStoryBatch(batchId: string) {
 }
 
 export async function retryStoryBatchFailed(batchId: string) {
-  return requestJson<{ batchId: string; retryCount: number }>(`/api/story-video/batch/${batchId}/retry-failed`, { method: "POST" });
+  return requestJson<{ batchId: string; retryCount: number; queuePosition: number }>(`/api/story-video/batch/${batchId}/retry-failed`, { method: "POST" });
 }
 
 // === Story Subtitles ===

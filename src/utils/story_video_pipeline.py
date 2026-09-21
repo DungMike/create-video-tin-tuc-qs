@@ -139,8 +139,18 @@ def _temp_dir(story_id: str) -> str:
     return path
 
 
-def _output_dir() -> str:
+def _output_dir(subdir: str = "") -> str:
+    """Thu muc chua video thanh pham.
+
+    Batch truyen ``subdir`` = batch id de moi batch co thu muc rieng, video cua cac
+    batch khong lan vao nhau; render le khong truyen nen van ra thang ``story-video/``.
+    """
     path = os.path.join(Config.OUTPUT_DIR, "story-video")
+    if subdir:
+        # Chi nhan ten thu muc phang (batch id), khong cho "..", dau gach cheo...
+        if not all(ch.isascii() and (ch.isalnum() or ch in "-_") for ch in subdir):
+            raise ValueError(f"Invalid output subdir: {subdir!r}")
+        path = os.path.join(path, subdir)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -286,6 +296,9 @@ class StoryVideoPipelineRunner:
         self.input_type = config_dict.get("input_type", "script_url")
         self.input_value = config_dict.get("input_value", "")
         self.output_name = config_dict.get("output_name", "")
+        # Batch gan batch id vao day de moi batch co thu muc output rieng; render le
+        # de trong nen video van ra thang story-video/ nhu cu.
+        self.output_subdir = str(config_dict.get("output_subdir", "") or "").strip()
         self.clip_tags = config_dict.get("clip_tags", [])
         # A render can draw clips from several libraries at once: their pools are
         # merged into one deck so a clip only repeats after every clip of every
@@ -2002,11 +2015,12 @@ class StoryVideoPipelineRunner:
         if not safe_name:
             safe_name = f"story_{self.story_id}"
 
-        final_path = os.path.join(_output_dir(), f"{safe_name}.mp4")
+        output_dir = _output_dir(self.output_subdir)
+        final_path = os.path.join(output_dir, f"{safe_name}.mp4")
 
         counter = 1
         while os.path.isfile(final_path):
-            final_path = os.path.join(_output_dir(), f"{safe_name}_{counter}.mp4")
+            final_path = os.path.join(output_dir, f"{safe_name}_{counter}.mp4")
             counter += 1
 
         ok = FFmpegHelper.run_command([

@@ -2549,17 +2549,56 @@ def create_story_batch():
     # this render. Off by default so batches don't freeze other apps unless requested.
     optimize_mode = bool(shared_config.get("optimizeMode", False))
 
+    # Batch vao hang doi: moi luc chi render 1 batch, batch nay xong moi toi batch sau.
+    # Video ra thu muc output rieng OUTPUT_DIR/story-video/<batch_id>/.
     runner = StoryVideoBatchRunner(batch_id, story_configs, optimize_mode=optimize_mode)
-    runner.start_async()
+    queue_position = runner.enqueue()
 
     logger.info(
-        f"[StoryVideo] Started batch: batch_id={batch_id}, items={len(story_configs)}, "
-        f"optimize_mode={optimize_mode}, "
+        f"[StoryVideo] Queued batch: batch_id={batch_id}, items={len(story_configs)}, "
+        f"queue_position={queue_position}, optimize_mode={optimize_mode}, "
         f"decor_images={len(set(decor_assignments)) if decor_assignments else 0}, "
         f"waveforms={len(set(waveform_assignments)) if waveform_assignments else 0}, "
         f"cta_overlays={len(set(cta_assignments)) if cta_assignments else 0}"
     )
-    return jsonify({"batchId": batch_id}), 202
+    return jsonify({"batchId": batch_id, "queuePosition": queue_position}), 202
+
+
+def _public_batch_status(status: str) -> str:
+    """Trang thai batch theo tu vung cua UI: running -> processing, partial -> completed."""
+    if status == "running":
+        return "processing"
+    if status == "partial":
+        return "completed"
+    return status
+
+
+# ---------------------------------------------------------------------------
+# 14b. GET /api/story-video/batch/queue - hang doi batch (dang chay + dang cho + vua xong)
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/batch/queue", methods=["GET"])
+def get_batch_queue():
+    from src.utils.story_video_batch import batch_output_dir, load_batch_progress, queue_snapshot
+
+    snapshot = queue_snapshot()
+    queued_ids = snapshot["queuedIds"]
+    batches = []
+    for batch_id in snapshot["historyIds"]:
+        progress = load_batch_progress(batch_id)
+        if not progress:
+            continue
+        batches.append({
+            "batchId": batch_id,
+            "status": _public_batch_status(progress.get("status", "pending")),
+            "queuePosition": queued_ids.index(batch_id) + 1 if batch_id in queued_ids else 0,
+            "totalItems": progress.get("total", 0),
+            "completedItems": progress.get("completed", 0),
+            "failedItems": progress.get("failed", 0),
+            "cancelledItems": progress.get("cancelled", 0),
+            "outputDir": batch_output_dir(progress),
+            "queuedAt": progress.get("queuedAt", ""),
+        })
+    return jsonify({"activeBatchId": snapshot["activeBatchId"], "batches": batches})
 
 
 # ---------------------------------------------------------------------------
@@ -2597,20 +2636,19 @@ def get_batch_progress(batch_id: str):
             "ctaOverlayName": story.get("cta_overlay_name", ""),
         })
 
-    batch_status = progress.get("status", "pending")
-    if batch_status == "running":
-        batch_status = "processing"
-    elif batch_status == "partial":
-        batch_status = "completed"
+    from src.utils.story_video_batch import batch_output_dir, queue_position
 
     return jsonify({
         "batchId": progress.get("batchId", batch_id),
-        "status": batch_status,
+        "status": _public_batch_status(progress.get("status", "pending")),
         "totalItems": progress.get("total", len(items)),
         "completedItems": progress.get("completed", 0),
         "failedItems": progress.get("failed", 0),
         "cancelledItems": progress.get("cancelled", 0),
         "currentIndex": progress.get("current", 0),
+        # Vi tri trong hang doi (1 = batch ke tiep); 0 = dang chay hoac da xong.
+        "queuePosition": queue_position(batch_id),
+        "outputDir": batch_output_dir(progress),
         "items": items,
     })
 
@@ -2646,7 +2684,11 @@ def cancel_story_batch(batch_id: str):
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/batch/<batch_id>/retry-failed", methods=["POST"])
 def retry_batch_failed(batch_id: str):
-    from src.utils.story_video_batch import StoryVideoBatchRunner, load_batch_progress
+    from src.utils.story_video_batch import (
+        StoryVideoBatchRunner,
+        is_batch_queued_or_active,
+        load_batch_progress,
+    )
 
     progress = load_batch_progress(batch_id)
     if not progress:
@@ -2708,13 +2750,27 @@ def retry_batch_failed(batch_id: str):
         })
 
     retry_batch_id = f"{batch_id}-retry"
+    if is_batch_queued_or_active(retry_batch_id):
+        # Tao lai runner se ghi de progress cua batch retry dang cho/dang chay.
+        return _error("Batch retry dang cho hoac dang chay.", code="retry_in_progress", status=409)
     runner = StoryVideoBatchRunner(
-        retry_batch_id, retry_configs, optimize_mode=bool(progress.get("optimizeMode", False))
+        retry_batch_id,
+        retry_configs,
+        optimize_mode=bool(progress.get("optimizeMode", False)),
+        # Video retry nam chung thu muc output voi batch goc.
+        output_subdir=progress.get("outputSubdir") or batch_id,
     )
-    runner.start_async()
+    queue_position = runner.enqueue()
 
-    logger.info(f"[StoryVideo] Retrying {len(retry_configs)} failed items from batch {batch_id}")
-    return jsonify({"batchId": retry_batch_id, "retryCount": len(retry_configs)}), 202
+    logger.info(
+        f"[StoryVideo] Queued retry of {len(retry_configs)} failed items from batch {batch_id} "
+        f"(queue_position={queue_position})"
+    )
+    return jsonify({
+        "batchId": retry_batch_id,
+        "retryCount": len(retry_configs),
+        "queuePosition": queue_position,
+    }), 202
 
 
 # ---------------------------------------------------------------------------

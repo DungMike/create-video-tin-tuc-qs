@@ -772,15 +772,40 @@ export interface StoryBatchItemProgress {
   ctaOverlayName?: string;
 }
 
+/** "queued" = đang chờ trong hàng đợi batch (mỗi lúc chỉ render 1 batch). */
+export type StoryBatchStatus = "queued" | "pending" | "processing" | "cancelling" | "cancelled" | "completed" | "failed";
+
 export interface StoryBatchProgress {
   batchId: string;
-  status: "pending" | "processing" | "cancelling" | "cancelled" | "completed" | "failed";
+  status: StoryBatchStatus;
   totalItems: number;
   completedItems: number;
   failedItems: number;
   cancelledItems: number;
   currentIndex: number;
+  /** Vị trí trong hàng đợi (1 = chạy kế tiếp); 0 khi đang chạy hoặc đã xong. */
+  queuePosition?: number;
+  /** Thư mục chứa video của batch trên máy render; "" với batch tạo trước khi có thư mục riêng. */
+  outputDir?: string;
   items: StoryBatchItemProgress[];
+}
+
+export interface StoryBatchQueueEntry {
+  batchId: string;
+  status: StoryBatchStatus;
+  queuePosition: number;
+  totalItems: number;
+  completedItems: number;
+  failedItems: number;
+  cancelledItems: number;
+  outputDir: string;
+  queuedAt: string;
+}
+
+export interface StoryBatchQueue {
+  activeBatchId: string | null;
+  /** Các batch gần đây, mới nhất trước. */
+  batches: StoryBatchQueueEntry[];
 }
 
 /** Rectangle, in 1920x1080 output coordinates, that the video is fitted into. */

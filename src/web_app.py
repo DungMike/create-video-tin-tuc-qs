@@ -83,4 +83,9 @@ def spa(path: str):
 
 
 if __name__ == "__main__":
+    # Chi khoi phuc hang doi batch khi chay server that: test import `app` khong duoc
+    # vo tinh chay lai cac batch dang cho tren storage that.
+    from src.utils.story_video_batch import resume_batch_queue
+
+    resume_batch_queue()
     app.run(host=Config.WEB_HOST, port=Config.WEB_PORT, debug=False)

@@ -378,6 +378,13 @@ export function StoryVideoSettingsPage() {
   const [decorGroupEdit, setDecorGroupEdit] = useState<{ from: string; value: string } | null>(null);
   const [decorGroupInputFor, setDecorGroupInputFor] = useState<string | null>(null);
   const [decorGroupBusy, setDecorGroupBusy] = useState(false);
+  // Upload nhieu anh mot luot: tien do tung file, roi hang doi duyet lan luot.
+  const [decorUploadProgress, setDecorUploadProgress] = useState<{ done: number; total: number } | null>(null);
+  // Id cac anh vua upload, dung thu tu chon file. Rong = khong con duyet.
+  const [decorReviewQueue, setDecorReviewQueue] = useState<string[]>([]);
+  const [decorReviewIndex, setDecorReviewIndex] = useState(0);
+  // Anh da bam "Luu khung" trong luot duyet nay.
+  const [decorReviewDone, setDecorReviewDone] = useState<string[]>([]);
   const [tvNoiseOverlays, setTvNoiseOverlays] = useState<TVNoiseOverlay[]>([]);
   const [selectedNoiseId, setSelectedNoiseId] = useState("");
   const [noiseForm, setNoiseForm] = useState<TVNoiseForm>(DEFAULT_NOISE_FORM);
@@ -469,6 +476,18 @@ export function StoryVideoSettingsPage() {
         : decorByGroup.filter((entry) => entry.group === decorGroupFilter),
     [decorByGroup, decorGroupFilter],
   );
+
+  // Hang doi duyet, da bo nhung anh bi xoa giua luot. Thu tu upload duoc giu
+  // nguyen nen `decorReviewIndex` luon la vi tri trong danh sach nay.
+  const decorReviewItems = useMemo(
+    () =>
+      decorReviewQueue
+        .map((id) => decorImages.find((item) => item.id === id))
+        .filter((item): item is StoryDecorImage => Boolean(item)),
+    [decorReviewQueue, decorImages],
+  );
+  // Xoa anh dang duyet lam danh sach ngan lai, nen index phai kep lai moi lan ve.
+  const decorReviewAt = Math.min(decorReviewIndex, Math.max(0, decorReviewItems.length - 1));
 
   // Both overlay sections show the same two boxes, differing only in which one
   // is being dragged — so each section renders the pair with `active` swapped.
@@ -622,47 +641,111 @@ export function StoryVideoSettingsPage() {
     setDecorPreviewPath(null);
   }, [selectedDecorId]);
 
-  const handleDecorUpload = async (file: File | null) => {
-    if (!file) return;
+  const handleDecorUpload = async (files: FileList | null) => {
+    // FileList bi xoa ngay sau khi input duoc reset, nen phai copy trong nhip
+    // dong bo dau tien — truoc bat ky `await` nao.
+    const list = files ? Array.from(files) : [];
+    if (!list.length) return;
     setIsDecorUploading(true);
     setErrorMessage(null);
     setDecorNotice(null);
+    setDecorUploadProgress({ done: 0, total: list.length });
+    const uploaded: StoryDecorImage[] = [];
+    const failed: string[] = [];
     try {
-      const res = await uploadDecorImage(file, decorUploadGroup);
-      await loadDecorImages();
-      setSelectedDecorId(res.image.id);
-      // Neu dang loc theo mot nhom khac, anh vua upload se bi an di — keo bo loc
-      // sang nhom cua no de nguoi dung thay ngay ket qua.
-      setDecorGroupFilter((current) =>
-        current === null || current === (res.image.group ?? "") ? current : (res.image.group ?? ""),
-      );
-      if (res.image.autoDetected === false) {
-        // Khong con la loi: anh khong co nen xanh van dung duoc, backend da bat
-        // san che do tu ve va dat mot khung 16:9 giua anh cho nguoi dung keo.
+      // Backend nhan tung file mot, va viec do nen xanh la CPU-bound: upload lan
+      // luot de khong ep server tach nhieu anh cung luc, va de mot file loi
+      // khong keo ca luot upload xuong theo.
+      for (const file of list) {
+        try {
+          const res = await uploadDecorImage(file, decorUploadGroup);
+          uploaded.push(res.image);
+        } catch (err) {
+          failed.push(`${file.name} (${err instanceof ApiError ? err.message : "loi khong xac dinh"})`);
+        }
+        setDecorUploadProgress({ done: uploaded.length + failed.length, total: list.length });
+      }
+
+      if (uploaded.length) {
+        await loadDecorImages();
+        // Hang doi duyet: cau hinh nen xanh lan luot cho tung anh vua upload.
+        setDecorReviewQueue(uploaded.map((image) => image.id));
+        setDecorReviewIndex(0);
+        setDecorReviewDone([]);
+        setSelectedDecorId(uploaded[0].id);
+        const group = uploaded[0].group ?? "";
+        // Neu dang loc theo mot nhom khac, anh vua upload se bi an di — keo bo loc
+        // sang nhom cua no de nguoi dung thay ngay ket qua.
+        setDecorGroupFilter((current) => (current === null || current === group ? current : group));
+        // Anh khong co nen xanh khong phai loi: backend da bat san che do tu ve
+        // va dat mot khung 16:9 giua anh cho nguoi dung keo.
+        const manual = uploaded.filter((image) => image.autoDetected === false).length;
         setDecorNotice(
-          "Ảnh chưa có nền xanh — đã bật chế độ “Tự tạo vùng nền xanh”. " +
-            "Hãy kéo khung 16:9 trùm khít mặt màn hình trong ảnh rồi bấm “Lưu khung”.",
+          `Đã upload ${uploaded.length} ảnh. ` +
+            (manual
+              ? `${manual} ảnh chưa có nền xanh — đã bật chế độ “Tự tạo vùng nền xanh”, hãy kéo ` +
+                "khung 16:9 trùm khít mặt màn hình rồi bấm “Lưu khung”. "
+              : "Tất cả đều dò được vùng nền xanh. ") +
+            "Duyệt lần lượt từng ảnh ở thanh “Duyệt ảnh vừa upload”; lưu xong sẽ tự sang ảnh kế tiếp.",
         );
       }
-    } catch (err) {
-      setErrorMessage(err instanceof ApiError ? err.message : "Khong the upload anh decor.");
+      if (failed.length) {
+        setErrorMessage(`Khong upload duoc ${failed.length}/${list.length} anh decor: ${failed.join("; ")}`);
+      }
     } finally {
       setIsDecorUploading(false);
+      setDecorUploadProgress(null);
     }
+  };
+
+  /** Mo mot anh trong hang doi duyet (index va o dang chon luon di cung nhau). */
+  const goToDecorReview = (index: number) => {
+    const target = decorReviewItems[index];
+    if (!target) return;
+    setDecorReviewIndex(index);
+    setSelectedDecorId(target.id);
+  };
+
+  const closeDecorReview = () => {
+    setDecorReviewQueue([]);
+    setDecorReviewIndex(0);
+    setDecorReviewDone([]);
+  };
+
+  /** Sang anh chua luu ke tiep; luu het ca loat thi dong thanh duyet. */
+  const advanceDecorReview = (fromIndex: number, doneIds: string[]) => {
+    const pending = (from: number, to: number) =>
+      decorReviewItems.findIndex(
+        (item, index) => index >= from && index < to && !doneIds.includes(item.id),
+      );
+    // Tim phia sau truoc, roi quay vong ve dau: anh bi nhay qua giua luot van
+    // phai duoc nhac lai, khong thi thanh duyet dong khi no con chua cau hinh.
+    const after = pending(fromIndex + 1, decorReviewItems.length);
+    const next = after === -1 ? pending(0, fromIndex) : after;
+    if (next === -1) closeDecorReview();
+    else goToDecorReview(next);
   };
 
   const handleDecorSave = async (updates: Partial<StoryDecorImage>) => {
     if (!selectedDecor) return;
+    const savedId = selectedDecor.id;
     setIsDecorSaving(true);
     setErrorMessage(null);
     try {
-      const res = await updateDecorImage(selectedDecor.id, updates);
-      setDecorImages((current) =>
-        current.map((item) => (item.id === selectedDecor.id ? res.image : item)),
-      );
+      const res = await updateDecorImage(savedId, updates);
+      setDecorImages((current) => current.map((item) => (item.id === savedId ? res.image : item)));
       // Re-key or re-frame invalidates the composed still.
       setDecorPreviewPath(null);
       setDecorNotice(null);
+      // Dang duyet loat anh vua upload: luu xong thi tu sang anh ke tiep.
+      const queueIndex = decorReviewItems.findIndex((item) => item.id === savedId);
+      if (queueIndex !== -1) {
+        const doneIds = decorReviewDone.includes(savedId)
+          ? decorReviewDone
+          : [...decorReviewDone, savedId];
+        setDecorReviewDone(doneIds);
+        advanceDecorReview(queueIndex, doneIds);
+      }
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the luu anh decor.");
     } finally {
@@ -762,6 +845,9 @@ export function StoryVideoSettingsPage() {
       await deleteDecorImage(imageId);
       setSelectedDecorId("");
       setDecorPreviewPath(null);
+      // Anh da bien mat thi khong con gi de duyet cho no nua.
+      setDecorReviewQueue((current) => current.filter((id) => id !== imageId));
+      setDecorReviewDone((current) => current.filter((id) => id !== imageId));
       await loadDecorImages();
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the xoa anh decor.");
@@ -2225,20 +2311,28 @@ export function StoryVideoSettingsPage() {
               <Label className="mt-2">Upload ảnh decor (có sẵn nền xanh, hoặc tự vẽ vùng)</Label>
               <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
                 {isDecorUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
-                <span>{isDecorUploading ? "Đang tách nền xanh..." : "Chọn ảnh PNG / JPG / WEBP"}</span>
+                <span>
+                  {isDecorUploading
+                    ? decorUploadProgress
+                      ? `Đang tách nền xanh ${decorUploadProgress.done}/${decorUploadProgress.total}...`
+                      : "Đang tách nền xanh..."
+                    : "Chọn một hoặc nhiều ảnh PNG / JPG / WEBP"}
+                </span>
                 <Input
                   type="file"
                   accept=".png,.jpg,.jpeg,.webp,.bmp"
+                  multiple
                   className="hidden"
                   disabled={isDecorUploading}
                   onChange={(event) => {
-                    void handleDecorUpload(event.currentTarget.files?.[0] ?? null);
+                    void handleDecorUpload(event.currentTarget.files);
                     event.currentTarget.value = "";
                   }}
                 />
               </label>
               <p className="text-xs text-muted-foreground">
-                Ảnh sẽ được kéo về đúng 1920x1080, nên dùng ảnh 16:9. Nếu ảnh có sẵn nền xanh,
+                Chọn được nhiều ảnh cùng lúc — cả loạt vào chung nhóm ở trên, upload lần lượt từng
+                ảnh. Ảnh sẽ được kéo về đúng 1920x1080, nên dùng ảnh 16:9. Nếu ảnh có sẵn nền xanh,
                 vùng xanh được dò tự động ngay khi upload. Nếu không, chế độ “Tự tạo vùng nền
                 xanh” tự bật để bạn kéo khung 16:9 lên đúng mặt màn hình.
               </p>
@@ -2380,7 +2474,13 @@ export function StoryVideoSettingsPage() {
                           >
                             <button
                               type="button"
-                              onClick={() => setSelectedDecorId(item.id)}
+                              onClick={() => {
+                                setSelectedDecorId(item.id);
+                                // Chon tu danh sach ben canh cung phai keo thanh
+                                // duyet theo, khong de hai cho tro vao hai anh.
+                                const queueIndex = decorReviewItems.findIndex((entry) => entry.id === item.id);
+                                if (queueIndex !== -1) setDecorReviewIndex(queueIndex);
+                              }}
                               className="flex w-full min-w-0 items-center gap-3 text-left"
                             >
                               <img
@@ -2466,6 +2566,89 @@ export function StoryVideoSettingsPage() {
 
           {selectedDecor ? (
             <div className="grid gap-4">
+              {decorReviewItems.length ? (
+                <div className="rounded-lg border border-primary/40 bg-primary/5 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold text-foreground">
+                      Duyệt ảnh vừa upload — ảnh {decorReviewAt + 1}/{decorReviewItems.length}
+                    </span>
+                    <Badge variant="secondary" className="rounded-full">
+                      {decorReviewDone.length}/{decorReviewItems.length} đã lưu khung
+                    </Badge>
+                    <div className="ml-auto flex items-center gap-1.5">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2 text-xs"
+                        disabled={decorReviewAt === 0}
+                        onClick={() => goToDecorReview(decorReviewAt - 1)}
+                      >
+                        Ảnh trước
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2 text-xs"
+                        disabled={decorReviewAt >= decorReviewItems.length - 1}
+                        onClick={() => goToDecorReview(decorReviewAt + 1)}
+                      >
+                        Ảnh sau
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2 text-xs"
+                        title="Đóng thanh duyệt"
+                        onClick={closeDecorReview}
+                      >
+                        <X className="mr-1 size-3.5" />
+                        Xong
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+                    {decorReviewItems.map((item, index) => {
+                      const isDone = decorReviewDone.includes(item.id);
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          title={item.name}
+                          onClick={() => goToDecorReview(index)}
+                          className={`relative shrink-0 overflow-hidden rounded border-2 transition-colors ${
+                            index === decorReviewAt ? "border-primary" : "border-transparent hover:border-border"
+                          }`}
+                        >
+                          <img
+                            src={`/media/${item.processedRelativePath ?? item.relativePath}?t=${encodeURIComponent(item.updatedAt ?? "")}`}
+                            alt={item.name}
+                            className="h-11 w-[74px] object-cover"
+                          />
+                          <span
+                            className={`absolute inset-x-0 bottom-0 truncate px-1 text-center text-[9px] font-semibold ${
+                              isDone
+                                ? "bg-primary/85 text-primary-foreground"
+                                : item.autoDetected === false
+                                  ? "bg-amber-500/85 text-black"
+                                  : "bg-black/65 text-white"
+                            }`}
+                          >
+                            {isDone ? "Đã lưu" : item.autoDetected === false ? "Tự vẽ" : "Auto"}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    Kiểm tra (hoặc kéo lại) vùng nền xanh cho từng ảnh rồi bấm “Lưu khung” — lưu xong
+                    tự sang ảnh chưa duyệt kế tiếp. Ảnh gắn nhãn “Tự vẽ” là ảnh không có nền xanh,
+                    bắt buộc phải kéo khung trước khi dùng để render.
+                  </p>
+                </div>
+              ) : null}
               <StoryDecorFrameEditor
                 key={selectedDecor.id}
                 image={selectedDecor}
