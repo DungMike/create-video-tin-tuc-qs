@@ -1968,6 +1968,23 @@ def _subtitle_config_from_payload(payload: dict) -> dict:
     }
 
 
+def _subtitle_config_for_style(style: dict, shared_config: dict) -> dict:
+    """Pipeline subtitle config for one saved subtitle style.
+
+    Font and size fall back to the batch form when the style has none (every
+    built-in preset), so a Thai batch keeps its Thai font. Colours never fall back:
+    a style is a finished look, and a colour set in the form must not repaint it.
+    Line limits always come from the form — they follow the language, not the look.
+    """
+    from src.utils.subtitle_styles import STYLE_FIELD_KEYS
+
+    payload = {key: style[key] for key in STYLE_FIELD_KEYS if style.get(key) is not None}
+    for key in ("subtitleFont", "subtitleFontScale", "subtitleMaxCharsPerLine", "subtitleMaxLines"):
+        if not payload.get(key) and shared_config.get(key) is not None:
+            payload[key] = shared_config[key]
+    return _subtitle_config_from_payload(payload)
+
+
 @story_video_bp.route("/api/story-video/subtitle-fonts", methods=["GET"])
 def get_subtitle_fonts():
     from src.utils.story_subtitles import scan_fonts
@@ -2013,12 +2030,68 @@ def upload_subtitle_font():
 @story_video_bp.route("/api/story-video/subtitle-presets", methods=["GET"])
 def get_subtitle_presets():
     from src.utils.story_subtitles import SUBTITLE_PRESETS
+    from src.utils.subtitle_styles import hidden_preset_ids
 
+    # A preset the user deleted from the subtitle-style list is flagged rather than
+    # dropped, so a form still set to it can keep showing its name.
+    hidden = hidden_preset_ids()
     presets = [
-        {"id": item["id"], "name": item["name"], "description": item["description"]}
+        {
+            "id": item["id"],
+            "name": item["name"],
+            "description": item["description"],
+            "hidden": item["id"] in hidden,
+        }
         for item in SUBTITLE_PRESETS
     ]
     return jsonify({"presets": presets})
+
+
+def _subtitle_styles_response():
+    from src.utils.subtitle_styles import hidden_preset_ids, list_subtitle_styles
+
+    return {"styles": list_subtitle_styles(), "hiddenBuiltinCount": len(hidden_preset_ids())}
+
+
+@story_video_bp.route("/api/story-video/subtitle-styles", methods=["GET"])
+def get_subtitle_styles():
+    return jsonify(_subtitle_styles_response())
+
+
+@story_video_bp.route("/api/story-video/subtitle-styles", methods=["POST"])
+def create_subtitle_style_route():
+    """Save the subtitle form as a named style. Body: {name, subtitleFont, subtitlePreset, ...}."""
+    from src.utils.subtitle_styles import create_subtitle_style
+
+    data = request.get_json(silent=True) or {}
+    try:
+        style = create_subtitle_style(data)
+    except ValueError as exc:
+        return _error(str(exc), code="invalid_subtitle_style")
+
+    logger.info(f"[StoryVideo] Subtitle style saved: {style['id']} ({style['name']})")
+    return jsonify({"style": style}), 201
+
+
+@story_video_bp.route("/api/story-video/subtitle-styles/restore-builtin", methods=["POST"])
+def restore_subtitle_styles_route():
+    from src.utils.subtitle_styles import restore_builtin_styles
+
+    restored = restore_builtin_styles()
+    logger.info(f"[StoryVideo] Restored {restored} built-in subtitle style(s)")
+    return jsonify(_subtitle_styles_response())
+
+
+@story_video_bp.route("/api/story-video/subtitle-styles/<style_id>", methods=["DELETE"])
+def delete_subtitle_style_route(style_id: str):
+    """Delete a custom style; a built-in (``preset:<id>``) is hidden instead."""
+    from src.utils.subtitle_styles import delete_subtitle_style
+
+    if not delete_subtitle_style(style_id):
+        return _error("Cau hinh phu de khong ton tai.", code="subtitle_style_not_found", status=404)
+
+    logger.info(f"[StoryVideo] Subtitle style deleted: {style_id}")
+    return jsonify({"deleted": True, "styleId": style_id})
 
 
 @story_video_bp.route("/api/story-video/subtitle-preview", methods=["POST"])
@@ -2461,6 +2534,26 @@ def create_story_batch():
         shutil.rmtree(batch_dir, ignore_errors=True)
         return cta_error
 
+    # Cau hinh phu de cung xoay vong nhu vay. Khong chon = ca batch dung chung
+    # cau hinh o form phu de (hanh vi cu).
+    from src.utils.subtitle_styles import build_subtitle_style_rotation, get_subtitle_style
+
+    style_assignments, style_error = _resolve_overlay_rotation(
+        shared_config.get("subtitleStyleIds"),
+        len(items),
+        build_subtitle_style_rotation,
+        "Khong co cau hinh phu de nao dung duoc (da bi xoa).",
+        "subtitle_style_unusable",
+    )
+    if style_error is not None:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+        return style_error
+    # Moi cau hinh chi giai mot lan, du no roi vao bao nhieu video.
+    style_subtitle_configs = {
+        style_id: _subtitle_config_for_style(get_subtitle_style(style_id) or {}, shared_config)
+        for style_id in dict.fromkeys(style_assignments)
+    }
+
     # Build story configs
     story_configs = []
     for idx, item in enumerate(items):
@@ -2521,6 +2614,7 @@ def create_story_batch():
                     )
                 subtitle_path = subtitle_ref
 
+        subtitle_style_id = style_assignments[idx] if style_assignments else ""
         story_configs.append({
             "story_id": f"sv-{str(uuid.uuid4())[:8]}",
             "input_type": input_type,
@@ -2542,7 +2636,12 @@ def create_story_batch():
             "voice_id": str(shared_config.get("voiceId", "")).strip(),
             "subtitle_path": subtitle_path,
             "intro_video_path": intro_video_path,
-            **shared_subtitle_config,
+            "subtitle_style_id": subtitle_style_id,
+            **(
+                style_subtitle_configs[subtitle_style_id]
+                if subtitle_style_id
+                else shared_subtitle_config
+            ),
         })
 
     # Optimize mode (per-batch): suspend configured competing apps + boost ffmpeg for
@@ -2559,7 +2658,8 @@ def create_story_batch():
         f"queue_position={queue_position}, optimize_mode={optimize_mode}, "
         f"decor_images={len(set(decor_assignments)) if decor_assignments else 0}, "
         f"waveforms={len(set(waveform_assignments)) if waveform_assignments else 0}, "
-        f"cta_overlays={len(set(cta_assignments)) if cta_assignments else 0}"
+        f"cta_overlays={len(set(cta_assignments)) if cta_assignments else 0}, "
+        f"subtitle_styles={len(style_subtitle_configs)}"
     )
     return jsonify({"batchId": batch_id, "queuePosition": queue_position}), 202
 
@@ -2630,10 +2730,11 @@ def get_batch_progress(batch_id: str):
             "message": source.get("message", ""),
             "result": source.get("result"),
             "error": source.get("error"),
-            # Which decor image / waveform / CTA this item drew from the batch rotation.
+            # Which decor image / waveform / CTA / subtitle style this item drew from the batch rotation.
             "decorImageName": story.get("decor_image_name", ""),
             "waveformName": story.get("waveform_overlay_name", ""),
             "ctaOverlayName": story.get("cta_overlay_name", ""),
+            "subtitleStyleName": story.get("subtitle_style_name", ""),
         })
 
     from src.utils.story_video_batch import batch_output_dir, queue_position
@@ -2747,6 +2848,9 @@ def retry_batch_failed(batch_id: str):
             # Without this a retry silently re-renders at the default size and
             # colours, so the replacement video does not match the rest of the batch.
             "subtitle_style_overrides": s.get("subtitle_style_overrides") or {},
+            # Only for display: the resolved fields above already fix the look, even
+            # if the style has since been deleted.
+            "subtitle_style_id": s.get("subtitle_style_id", ""),
         })
 
     retry_batch_id = f"{batch_id}-retry"

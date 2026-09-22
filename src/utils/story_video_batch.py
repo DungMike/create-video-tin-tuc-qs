@@ -376,6 +376,16 @@ class StoryVideoBatchRunner:
         record = get_cta_overlay(overlay_id)
         return str(record.get("name") or overlay_id) if record else overlay_id
 
+    @staticmethod
+    def _subtitle_style_name(style_id: str) -> str:
+        """Display name for the subtitle style this item drew, for the batch UI."""
+        if not style_id:
+            return ""
+        from src.utils.subtitle_styles import get_subtitle_style
+
+        record = get_subtitle_style(style_id)
+        return str(record.get("name") or style_id) if record else style_id
+
     def __init__(
         self,
         batch_id: str,
@@ -462,6 +472,8 @@ class StoryVideoBatchRunner:
                 # Persisted so a retry can rebuild the same font size and colours;
                 # without it the retried item comes back styled differently.
                 "subtitle_style_overrides": config.get("subtitle_style_overrides") or {},
+                "subtitle_style_id": config.get("subtitle_style_id", ""),
+                "subtitle_style_name": self._subtitle_style_name(config.get("subtitle_style_id", "")),
             })
 
         self._save_progress()

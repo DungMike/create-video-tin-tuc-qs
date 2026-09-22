@@ -7,6 +7,7 @@ import type {
   CreateStoryBatchRequest,
   CreateStoryLibraryRequest,
   CreateStoryVideoRequest,
+  CreateSubtitleStyleRequest,
   CtaOverlay,
   DownloadProgress,
   DriveAudioImportProgress,
@@ -47,6 +48,8 @@ import type {
   StoryVideoProvider,
   SubtitleFontInfo,
   SubtitlePresetInfo,
+  SubtitleStyle,
+  SubtitleStylesResponse,
   TVEffectCustomSaveResponse,
   TVEffectParams,
   TVEffectPreviewResponse,
@@ -669,6 +672,32 @@ export async function generateSubtitlePreview(body: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  });
+}
+
+export async function getSubtitleStyles() {
+  return requestJson<SubtitleStylesResponse>("/api/story-video/subtitle-styles");
+}
+
+export async function createSubtitleStyle(body: CreateSubtitleStyleRequest) {
+  return requestJson<{ style: SubtitleStyle }>("/api/story-video/subtitle-styles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Cấu hình có sẵn (`preset:<id>`) chỉ bị ẩn, khôi phục bằng restoreBuiltinSubtitleStyles. */
+export async function deleteSubtitleStyle(id: string) {
+  return requestJson<{ deleted: boolean; styleId: string }>(
+    `/api/story-video/subtitle-styles/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function restoreBuiltinSubtitleStyles() {
+  return requestJson<SubtitleStylesResponse>("/api/story-video/subtitle-styles/restore-builtin", {
+    method: "POST",
   });
 }
 

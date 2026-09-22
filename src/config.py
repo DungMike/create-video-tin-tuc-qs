@@ -210,6 +210,8 @@ class Config:
     STORY_DRIVE_AUDIO_MAX_TOTAL_MB = int(os.getenv("STORY_DRIVE_AUDIO_MAX_TOTAL_MB", "4096"))
     STORY_FONTS_DIR = os.path.join(STORAGE_DIR, "story_fonts")
     STORY_SUBTITLE_PREVIEW_DIR = os.path.join(STORAGE_DIR, "story_subtitle_previews")
+    # Saved subtitle styles (named font/size/colour/effect combos) that a batch can rotate through.
+    STORY_SUBTITLE_STYLE_DIR = os.path.join(STORAGE_DIR, "story_subtitle_styles")
     STORY_SUBTITLE_MAX_CHARS_PER_LINE = int(os.getenv("STORY_SUBTITLE_MAX_CHARS_PER_LINE", "42"))
     STORY_SUBTITLE_MAX_LINES = int(os.getenv("STORY_SUBTITLE_MAX_LINES", "2"))
     STORY_SUBTITLE_DEFAULT_FONT = os.getenv("STORY_SUBTITLE_DEFAULT_FONT", "Arial")

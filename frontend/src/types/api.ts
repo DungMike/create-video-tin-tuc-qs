@@ -725,6 +725,13 @@ export interface CreateStoryBatchRequest {
      * Rỗng = không dùng ảnh decor.
      */
     decorImageIds?: string[];
+    /**
+     * Cấu hình phụ đề tham gia xoay vòng cho batch này (bộ bài xáo như
+     * `ctaOverlayIds`). Khi có, màu/hiệu ứng ở form bị bỏ qua; font + cỡ chữ ở form
+     * chỉ dùng cho cấu hình có sẵn, số ký tự/dòng và số dòng vẫn dùng chung.
+     * Rỗng = cả batch dùng cấu hình ở form (hành vi cũ).
+     */
+    subtitleStyleIds?: string[];
     voiceId?: string;
     subtitleFont?: string;
     subtitlePreset?: string;
@@ -753,7 +760,39 @@ export interface SubtitlePresetInfo {
   id: string;
   name: string;
   description: string;
+  /** Người dùng đã xoá preset này khỏi danh sách cấu hình phụ đề — ẩn khỏi ô chọn hiệu ứng. */
+  hidden?: boolean;
 }
+
+/**
+ * Một cấu hình phụ đề đã lưu. Khoá đặt trùng tên với payload /batch/create.
+ *
+ * `builtin` = sinh từ preset có sẵn (id `preset:<presetId>`): không có font/cỡ chữ,
+ * nên lấy font + cỡ chữ đang chọn ở form. Xoá cấu hình có sẵn chỉ ẩn nó đi.
+ */
+export interface SubtitleStyle {
+  id: string;
+  name: string;
+  builtin: boolean;
+  description?: string;
+  subtitleFont?: string;
+  subtitlePreset: string;
+  subtitleFontScale?: number;
+  subtitleTextColor?: string;
+  subtitleOutlineColor?: string;
+  subtitleOutlineWidth?: number;
+  subtitleBackgroundEnabled?: boolean;
+  subtitleBackColor?: string;
+  subtitleBackOpacity?: number;
+}
+
+export interface SubtitleStylesResponse {
+  styles: SubtitleStyle[];
+  /** Số cấu hình có sẵn đang bị ẩn (khôi phục được). */
+  hiddenBuiltinCount: number;
+}
+
+export type CreateSubtitleStyleRequest = Omit<SubtitleStyle, "id" | "builtin" | "description">;
 
 export interface StoryBatchItemProgress {
   id: string;
@@ -770,6 +809,8 @@ export interface StoryBatchItemProgress {
   waveformName?: string;
   /** CTA overlay item này bốc được; "" khi batch không xoay vòng CTA. */
   ctaOverlayName?: string;
+  /** Cấu hình phụ đề item này bốc được; "" khi batch không xoay vòng phụ đề. */
+  subtitleStyleName?: string;
 }
 
 /** "queued" = đang chờ trong hàng đợi batch (mỗi lúc chỉ render 1 batch). */
