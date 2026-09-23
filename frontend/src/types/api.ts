@@ -56,6 +56,9 @@ export interface BakeStoryLibraryRequest {
   waveformId?: string;
   ctaId?: string;
   unitSeconds?: number;
+  /** Ken Burns nung sẵn vào từng clip: tắt, trôi khung, hoặc phóng dần. */
+  motion?: "off" | "pan" | "zoom";
+  motionZoom?: number;
 }
 
 export interface BakeStoryLibraryResponse {
@@ -622,6 +625,8 @@ export interface LocalAudioFolderItem {
   outputName: string;
   subtitlePath: string;
   subtitleName: string;
+  /** `<tên audio>.chapters.txt` cùng thư mục; "" khi không có. */
+  chaptersPath?: string;
   sizeMb: number;
 }
 
@@ -651,6 +656,10 @@ export interface CreateStoryVideoRequest {
   waveformOverlayId?: string;
   /** Ảnh decor (khung TV) dùng cho render đơn. "" = tắt. */
   decorImageId?: string;
+  /** Bố cục (kiểu dựng nhóm layout). Rỗng + có decor = khung TV như cũ. */
+  layoutId?: string;
+  /** Hiệu ứng bổ trợ áp lên video. */
+  modifierIds?: string[];
   voiceId?: string;
   subtitleFont?: string;
   subtitlePreset?: string;
@@ -691,6 +700,8 @@ export interface CreateStoryBatchItem {
   outputName: string;
   /** Upload index for an uploaded .srt, or an absolute local path. */
   subtitleFile?: string;
+  /** Upload index for an uploaded `.chapters.txt`, or an absolute local path. */
+  chaptersFile?: string;
 }
 
 export interface CreateStoryBatchRequest {
@@ -725,6 +736,14 @@ export interface CreateStoryBatchRequest {
      * Rỗng = không dùng ảnh decor.
      */
     decorImageIds?: string[];
+    /**
+     * Bố cục tham gia xoay vòng: mỗi video bốc đúng một bố cục (bộ bài xáo như
+     * sóng âm/CTA). Bố cục cần decor lấy ảnh từ `decorImageIds`. Rỗng + có
+     * `decorImageIds` = mọi video dùng khung TV (hành vi cũ).
+     */
+    layoutIds?: string[];
+    /** Hiệu ứng bổ trợ áp cho mọi video của batch, chồng lên bố cục. */
+    modifierIds?: string[];
     /**
      * Cấu hình phụ đề tham gia xoay vòng cho batch này (bộ bài xáo như
      * `ctaOverlayIds`). Khi có, màu/hiệu ứng ở form bị bỏ qua; font + cỡ chữ ở form
@@ -811,6 +830,118 @@ export interface StoryBatchItemProgress {
   ctaOverlayName?: string;
   /** Cấu hình phụ đề item này bốc được; "" khi batch không xoay vòng phụ đề. */
   subtitleStyleName?: string;
+  /** Bố cục item này bốc được; "" khi batch không chọn bố cục. */
+  layoutName?: string;
+  /** Hiệu ứng bổ trợ áp cho item này. */
+  modifierNames?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Kiểu dựng (edit styles): bố cục xoay vòng theo video + hiệu ứng bổ trợ cả batch.
+// Khoá và kiểu trường khớp src/utils/edit_styles/spec.py.
+// ---------------------------------------------------------------------------
+export type EditStyleGroup = "layout" | "modifier";
+
+export interface EditStylePoint {
+  x: number;
+  y: number;
+}
+
+export interface EditStyleRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export type EditStyleParamValue =
+  | number
+  | string
+  | boolean
+  | string[]
+  | EditStylePoint
+  | EditStyleRect
+  | null;
+
+interface EditStyleFieldBase {
+  key: string;
+  label: string;
+  /** Nhóm hiển thị trong form ("Vị trí", "Phụ đề", ...). "" = nhóm chung. */
+  group: string;
+}
+
+export type EditStyleField = EditStyleFieldBase &
+  (
+    | { type: "number" | "int"; default: number; min: number; max: number; step: number }
+    | { type: "color"; default: string }
+    | { type: "bool"; default: boolean }
+    | { type: "select"; default: string; options: { value: string; label: string }[] }
+    | { type: "text"; default: string; maxLength: number }
+    | { type: "font"; default: string }
+    | { type: "rect"; default: EditStyleRect; aspect: number | null }
+    /** `default` null = giữ vị trí lưu ở bản ghi sóng âm/CTA. `size` = khung vẽ trên editor. */
+    | { type: "point"; default: EditStylePoint | null; size: [number, number] | null }
+    | { type: "list"; default: string[]; maxItems: number }
+    /** Ảnh upload: giá trị là đường dẫn "images/<file>" dưới `imageBase`; null = dùng ảnh tự sinh. */
+    | { type: "image"; default: null }
+    | { type: "imageList"; default: string[]; maxItems: number }
+  );
+
+export interface EditStyleType {
+  id: string;
+  group: EditStyleGroup;
+  phase: number;
+  name: string;
+  description: string;
+  /** Thời gian render so với bố cục hiện tại, đo trên mẫu 10 phút. */
+  labRatio: number | null;
+  /** Chỉ vào vòng xoay khi batch có chọn ảnh decor. */
+  requiresDecor: boolean;
+  /** Thu nhỏ khung hình: không dùng được với thư viện đã bake sẵn sóng âm/CTA. */
+  shrinksFrame: boolean;
+  /** Dùng tiêu đề chương (file `.chapters.txt` hoặc tự chia theo SRT). */
+  needsChapters: boolean;
+  /** Làm trên sóng âm/CTA: vô tác dụng với thư viện đã bake đủ (bỏ qua bước overlay). */
+  needsOverlayPass: boolean;
+  fields: EditStyleField[];
+}
+
+export interface EditStyleRecord {
+  id: string;
+  type: string;
+  group: EditStyleGroup;
+  name: string;
+  enabled: boolean;
+  params: Record<string, EditStyleParamValue>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface EditStylesResponse {
+  types: EditStyleType[];
+  styles: EditStyleRecord[];
+  /** Thư mục gốc của ảnh upload, để dựng URL: `/media/<imageBase>/<ref>`. */
+  imageBase: string;
+}
+
+export interface CreateEditStyleRequest {
+  type: string;
+  name?: string;
+  params?: Record<string, EditStyleParamValue>;
+  /** Nhân bản từ bản ghi này (cùng kiểu). */
+  copyFrom?: string;
+}
+
+export interface UpdateEditStyleRequest {
+  name?: string;
+  enabled?: boolean;
+  params?: Record<string, EditStyleParamValue>;
+}
+
+export interface EditStylePreviewRequest {
+  libraryId?: string;
+  decorImageId?: string;
+  modifierIds?: string[];
 }
 
 /** "queued" = đang chờ trong hàng đợi batch (mỗi lúc chỉ render 1 batch). */

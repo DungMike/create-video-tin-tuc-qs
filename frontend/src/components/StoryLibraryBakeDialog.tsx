@@ -47,6 +47,9 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
   const [styles, setStyles] = useState<TVEffectStyle[]>([]);
   const [customParams, setCustomParams] = useState<TVEffectParams | null>(null);
   const [styleId, setStyleId] = useState("");
+  // Ken Burns is baked into each clip here, so the render pays nothing for it.
+  const [motion, setMotion] = useState<"off" | "pan" | "zoom">("off");
+  const [motionZoom, setMotionZoom] = useState(1.1);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -141,6 +144,8 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
         sourceLibraryId: source.id,
         name: trimmed,
         mode: "style" as const,
+        motion,
+        motionZoom,
         ...styleField,
       };
       const res = await bakeStoryLibrary(payload);
@@ -273,6 +278,39 @@ export function StoryLibraryBakeDialog({ source, onBaked, disabled = false }: St
                   ))}
                   {customParams ? <option value={CUSTOM_OPTION}>Custom (cấu hình đã lưu)</option> : null}
                 </select>
+              </div>
+              <div className="grid gap-1.5">
+                <Label htmlFor="bake-motion" className="text-xs">
+                  Chuyển động Ken Burns (nung sẵn vào clip)
+                </Label>
+                <div className="flex items-center gap-2">
+                  <select
+                    id="bake-motion"
+                    value={motion}
+                    disabled={busy}
+                    onChange={(e) => setMotion(e.target.value as "off" | "pan" | "zoom")}
+                    className="h-10 flex-1 rounded-md border border-input bg-background px-3 text-sm"
+                  >
+                    <option value="off">Tắt (giữ nguyên khung hình)</option>
+                    <option value="pan">Trôi khung chậm</option>
+                    <option value="zoom">Phóng dần / thu dần</option>
+                  </select>
+                  <Input
+                    type="number"
+                    min={1.02}
+                    max={1.4}
+                    step={0.01}
+                    value={motionZoom}
+                    disabled={busy || motion === "off"}
+                    onChange={(e) => setMotionZoom(Number(e.target.value) || 1.1)}
+                    className="w-24"
+                    title="Mức phóng"
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Hướng trôi được bốc theo từng clip nên cả thư viện không trôi cùng một kiểu. Nung sẵn nên
+                  lúc render không tốn thêm thời gian.
+                </p>
               </div>
               <div className="grid gap-1.5">
                 <Label htmlFor="bake-name" className="text-xs">

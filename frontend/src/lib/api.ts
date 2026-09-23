@@ -6,11 +6,15 @@ import type {
   CommitStoryHarvestResponse,
   CreateStoryBatchRequest,
   CreateStoryLibraryRequest,
+  CreateEditStyleRequest,
   CreateStoryVideoRequest,
   CreateSubtitleStyleRequest,
   CtaOverlay,
   DownloadProgress,
   DriveAudioImportProgress,
+  EditStylePreviewRequest,
+  EditStyleRecord,
+  EditStylesResponse,
   EffectPreviewJob,
   EffectPreviewSource,
   LocalAudioFolderScan,
@@ -57,6 +61,7 @@ import type {
   TVNoiseOverlay,
   TVNoiseOverlayJob,
   TVNoiseOverlayUploadResponse,
+  UpdateEditStyleRequest,
   UpdateStoryLibraryRequest,
   VoicesResponse,
   WaveformOverlay,
@@ -553,11 +558,17 @@ export async function generateTVNoiseDemo(overlayId?: string, sampleClipId?: str
 
 // === Story Video ===
 
-export async function createStoryVideo(payload: CreateStoryVideoRequest, audioFile?: File, subtitleFile?: File) {
-  if (audioFile || subtitleFile) {
+export async function createStoryVideo(
+  payload: CreateStoryVideoRequest,
+  audioFile?: File,
+  subtitleFile?: File,
+  chaptersFile?: File,
+) {
+  if (audioFile || subtitleFile || chaptersFile) {
     const fd = new FormData();
     if (audioFile) fd.append("audio", audioFile);
     if (subtitleFile) fd.append("subtitle", subtitleFile);
+    if (chaptersFile) fd.append("chapters", chaptersFile);
     fd.append("payload", JSON.stringify(payload));
     return requestJson<{ storyId: string }>("/api/story-video/create", { method: "POST", body: fd });
   }
@@ -578,7 +589,12 @@ export async function cancelStoryVideo(storyId: string) {
 
 // === Story Video Batch ===
 
-export async function createStoryBatch(payload: CreateStoryBatchRequest, audioFiles?: File[], subtitleFiles?: File[]) {
+export async function createStoryBatch(
+  payload: CreateStoryBatchRequest,
+  audioFiles?: File[],
+  subtitleFiles?: File[],
+  chapterFiles?: File[],
+) {
   const fd = new FormData();
   fd.append("payload", JSON.stringify(payload));
   if (audioFiles?.length) {
@@ -586,6 +602,9 @@ export async function createStoryBatch(payload: CreateStoryBatchRequest, audioFi
   }
   if (subtitleFiles?.length) {
     subtitleFiles.forEach((f) => fd.append("subtitle_files", f));
+  }
+  if (chapterFiles?.length) {
+    chapterFiles.forEach((f) => fd.append("chapter_files", f));
   }
   return requestJson<{ batchId: string; queuePosition: number }>("/api/story-video/batch/create", { method: "POST", body: fd });
 }
@@ -699,6 +718,66 @@ export async function restoreBuiltinSubtitleStyles() {
   return requestJson<SubtitleStylesResponse>("/api/story-video/subtitle-styles/restore-builtin", {
     method: "POST",
   });
+}
+
+// === Kiểu dựng (edit styles) ===
+
+export async function getEditStyles() {
+  return requestJson<EditStylesResponse>("/api/story-video/edit-styles");
+}
+
+export async function createEditStyle(body: CreateEditStyleRequest) {
+  return requestJson<{ style: EditStyleRecord }>("/api/story-video/edit-styles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateEditStyle(id: string, body: UpdateEditStyleRequest) {
+  return requestJson<{ style: EditStyleRecord }>(`/api/story-video/edit-styles/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteEditStyle(id: string) {
+  return requestJson<{ deleted: boolean; styleId: string }>(
+    `/api/story-video/edit-styles/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** Ảnh cho một trường ảnh của kiểu dựng (PNG/JPG/WEBP); trả về bản ghi đã cập nhật. */
+export async function uploadEditStyleImage(id: string, key: string, file: File) {
+  const fd = new FormData();
+  fd.append("file", file);
+  return requestJson<{ style: EditStyleRecord }>(
+    `/api/story-video/edit-styles/${encodeURIComponent(id)}/images/${encodeURIComponent(key)}`,
+    { method: "POST", body: fd },
+  );
+}
+
+/** Bỏ ảnh: `ref` để xoá một ảnh trong danh sách, bỏ trống để xoá cả trường. */
+export async function deleteEditStyleImage(id: string, key: string, ref?: string) {
+  const query = ref ? `?ref=${encodeURIComponent(ref)}` : "";
+  return requestJson<{ style: EditStyleRecord }>(
+    `/api/story-video/edit-styles/${encodeURIComponent(id)}/images/${encodeURIComponent(key)}${query}`,
+    { method: "DELETE" },
+  );
+}
+
+/** Render ~10 giây của bản ghi đã lưu (chạy đồng bộ, vài giây tới vài chục giây). */
+export async function renderEditStylePreview(id: string, body: EditStylePreviewRequest) {
+  return requestJson<{ previewPath: string }>(
+    `/api/story-video/edit-styles/${encodeURIComponent(id)}/preview`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 // === Waveform Overlay ===

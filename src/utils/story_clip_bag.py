@@ -59,13 +59,50 @@ class SharedClipBag:
         if not pool:
             raise ValueError("SharedClipBag.draw() requires a non-empty pool")
         with self._lock:
-            deck = self._decks.get(key)
-            if not deck:
-                deck = list(pool)
-                random.shuffle(deck)
-                self._decks[key] = deck
-            if exclude:
-                for i in range(len(deck) - 1, -1, -1):
-                    if deck[i][0] not in exclude:
-                        return deck.pop(i)
-            return deck.pop()
+            return self._pop_seed(self._deck(key, pool), exclude)
+
+    def draw_run(
+        self,
+        key: tuple,
+        pool: list[tuple[str, float]],
+        want: int,
+        successor,
+        exclude: set[str] | frozenset = frozenset(),
+    ) -> list[tuple[str, float]]:
+        """Draw a seed clip plus up to ``want - 1`` of the clips that follow it.
+
+        ``successor(path)`` names the next clip cut from the same source (or None).
+        Consecutive clips of one source are contiguous pieces of it, so playing
+        them back to back gives one seamless longer shot. A successor is taken
+        only while it is still in the deck, so the no-replacement guarantee of
+        ``draw()`` holds for every clip of the run.
+        """
+        if not pool:
+            raise ValueError("SharedClipBag.draw_run() requires a non-empty pool")
+        with self._lock:
+            deck = self._deck(key, pool)
+            run = [self._pop_seed(deck, exclude)]
+            next_path = successor(run[-1][0])
+            while len(run) < max(1, int(want)) and next_path and next_path not in exclude:
+                idx = next((i for i, item in enumerate(deck) if item[0] == next_path), None)
+                if idx is None:
+                    break
+                run.append(deck.pop(idx))
+                next_path = successor(next_path)
+            return run
+
+    def _deck(self, key: tuple, pool: list[tuple[str, float]]) -> list[tuple[str, float]]:
+        deck = self._decks.get(key)
+        if not deck:
+            deck = list(pool)
+            random.shuffle(deck)
+            self._decks[key] = deck
+        return deck
+
+    @staticmethod
+    def _pop_seed(deck: list[tuple[str, float]], exclude) -> tuple[str, float]:
+        if exclude:
+            for i in range(len(deck) - 1, -1, -1):
+                if deck[i][0] not in exclude:
+                    return deck.pop(i)
+        return deck.pop()

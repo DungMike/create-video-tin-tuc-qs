@@ -1441,6 +1441,15 @@ def bake_story_library():
         return _error(exc.message, code=exc.code, status=status)
 
     target_library_id = target.get("id")
+    # Ken Burns is baked per clip here, so the render pays nothing for it.
+    motion = str(data.get("motion") or "off").strip()
+    motion = motion if motion in ("pan", "zoom") else "off"
+    try:
+        motion_zoom = max(1.0, min(1.4, float(data.get("motionZoom") or 1.1)))
+    except (TypeError, ValueError):
+        motion_zoom = 1.1
+    clip_seconds = float(source.get("clipDuration") or Config.STORY_CLIP_DURATION or 3)
+
     set_library_metadata(
         target_library_id,
         styled=True,
@@ -1448,6 +1457,8 @@ def bake_story_library():
         styleLabel=style_label,
         styleParams=style_params,
         sourceLibraryId=source_library_id,
+        motion=motion,
+        motionZoom=motion_zoom,
         bakedAt=_utc_now_iso(),
     )
 
@@ -1460,6 +1471,9 @@ def bake_story_library():
         style_filter=style_filter,
         style_id=style_id,
         style_label=style_label,
+        motion=motion,
+        motion_zoom=motion_zoom,
+        clip_seconds=clip_seconds,
     )
     runner.start_async()
     logger.info(
@@ -1882,6 +1896,70 @@ def _resolve_decor_selection(image_ids, library_ids, count):
     return assignments, None
 
 
+def _clean_ids(values) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [str(item).strip() for item in values if str(item or "").strip()]
+
+
+def _resolve_edit_selection(shared_config: dict, library_ids, count: int):
+    """Deal layouts across ``count`` videos and decide which of them get a decor image.
+
+    Returns ``((layout_per_item, decor_per_item, modifier_ids), error_response)``.
+
+    - No ``layoutIds``: the old behaviour. ``decorImageIds`` alone puts every video
+      in the TV frame (``_resolve_decor_selection``), so old payloads and retries of
+      old batches render exactly as before.
+    - With ``layoutIds``: one enabled layout per video, dealt from a shuffled deck.
+      Decor images are dealt only to the videos that drew a layout needing one.
+    - ``modifierIds`` apply to every video (one record per modifier type).
+    """
+    from src.utils.edit_styles import store
+    from src.utils.story_decor_images import build_decor_rotation
+    from src.utils.story_library import any_fully_baked_library
+
+    layout_ids = _clean_ids(shared_config.get("layoutIds"))
+    decor_ids = _clean_ids(shared_config.get("decorImageIds"))
+    modifier_ids = _clean_ids(shared_config.get("modifierIds"))
+
+    modifiers = store.resolve_modifiers(modifier_ids)
+    if modifier_ids and not modifiers:
+        return None, _error("Khong co hieu ung bo tro nao dung duoc (da tat hoac da xoa).",
+                            code="modifier_unusable")
+    modifier_out = [m["id"] for m in modifiers]
+
+    if not layout_ids:
+        decor_assignments, decor_error = _resolve_decor_selection(decor_ids, library_ids, count)
+        if decor_error is not None:
+            return None, decor_error
+        return (["" for _ in range(count)], decor_assignments or ["" for _ in range(count)], modifier_out), None
+
+    layouts = store.build_layout_rotation(layout_ids, count)
+    if not layouts:
+        return None, _error("Khong co bo cuc nao dung duoc (da tat hoac da xoa).", code="layout_unusable")
+
+    if any_fully_baked_library(library_ids) and any(store.type_flag(lid, "shrinksFrame") for lid in set(layouts)):
+        return None, _error(
+            "Thu vien da bake san song am/CTA: cac bo cuc thu nho khung hinh se thu nho ca song am/CTA. "
+            "Bo chon cac bo cuc do hoac chon thu vien chua bake.",
+            code="layout_baked_library_conflict",
+        )
+
+    decor_slots = [i for i, lid in enumerate(layouts) if store.type_flag(lid, "requiresDecor")]
+    decor_per_item = ["" for _ in range(count)]
+    if decor_slots:
+        if not decor_ids:
+            return None, _error("Bo cuc khung TV can it nhat 1 anh decor. Hay chon anh decor.",
+                                code="layout_needs_decor")
+        dealt = build_decor_rotation(decor_ids, len(decor_slots))
+        if not dealt:
+            return None, _error("Khong co anh decor nao dung duoc (chua tach nen hoac da bi xoa).",
+                                code="decor_unusable")
+        for slot, image_id in zip(decor_slots, dealt):
+            decor_per_item[slot] = image_id
+    return (layouts, decor_per_item, modifier_out), None
+
+
 def _resolve_overlay_rotation(overlay_ids, count, build_rotation, empty_message, empty_code):
     """Validate a waveform/CTA selection and deal it out across ``count`` videos.
 
@@ -2151,10 +2229,12 @@ def create_story_video():
             return _error("payload khong phai JSON hop le.", code="invalid_payload")
         audio_file = request.files.get("audio")
         subtitle_file = request.files.get("subtitle")
+        chapters_file = request.files.get("chapters")
     else:
         data = request.get_json(silent=True) or {}
         audio_file = None
         subtitle_file = None
+        chapters_file = None
 
     input_type = str(data.get("inputType", "")).strip()
     if input_type not in ("audio_file", "script_url"):
@@ -2202,15 +2282,27 @@ def create_story_video():
     if not input_value:
         return _error("inputValue không được để trống.", code="missing_input_value")
 
-    # A single render takes one decor image; the rotation only applies to batches.
-    decor_selection, decor_error = _resolve_decor_selection(
-        [str(data.get("decorImageId") or "").strip()],
+    chapters_path = ""
+    if chapters_file and chapters_file.filename:
+        chapters_path = os.path.join(story_dir, "chapters.txt")
+        chapters_file.save(chapters_path)
+
+    # A single render takes one layout and one decor image; rotation only applies
+    # to batches. Without a layout, a decor image means the TV frame, as before.
+    layout_id = str(data.get("layoutId") or "").strip()
+    edit_selection, edit_error = _resolve_edit_selection(
+        {
+            "layoutIds": [layout_id] if layout_id else [],
+            "decorImageIds": [str(data.get("decorImageId") or "").strip()],
+            "modifierIds": data.get("modifierIds") or [],
+        },
         library_ids,
         1,
     )
-    if decor_error is not None:
-        return decor_error
-    decor_image_id = decor_selection[0] if decor_selection else ""
+    if edit_error is not None:
+        return edit_error
+    layouts, decors, modifier_ids = edit_selection
+    decor_image_id = decors[0] if decors else ""
 
     config_dict = {
         "input_type": input_type,
@@ -2223,6 +2315,9 @@ def create_story_video():
         "skip_tv_effect": bool(data.get("skipTvEffect", False)),
         "waveform_overlay_id": str(data.get("waveformOverlayId", "")).strip(),
         "decor_image_id": decor_image_id,
+        "layout_id": layouts[0] if layouts else "",
+        "modifier_ids": modifier_ids,
+        "chapters_path": chapters_path,
         "voice_id": str(data.get("voiceId", "")).strip(),
         "subtitle_path": subtitle_path,
         **_subtitle_config_from_payload(data),
@@ -2339,6 +2434,8 @@ def get_drive_audio_import(session_id: str):
 # 13b. POST /api/story-video/batch/local-folder - scan a folder on this machine
 # ---------------------------------------------------------------------------
 LOCAL_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+# "<audio stem>.chapters.txt": chapter titles/labels and quote marks for edit styles.
+CHAPTERS_SUFFIX = ".chapters.txt"
 
 
 @story_video_bp.route("/api/story-video/batch/local-folder", methods=["POST"])
@@ -2369,10 +2466,13 @@ def scan_local_audio_folder():
     walker = os.walk(folder) if recursive else [(folder, [], os.listdir(folder))]
     for dir_path, _dirs, filenames in walker:
         subtitles: dict[str, str] = {}
+        chapter_files: dict[str, str] = {}
         audio_names: list[str] = []
         for name in filenames:
             ext = os.path.splitext(name)[1].lower()
-            if ext == ".srt":
+            if name.lower().endswith(CHAPTERS_SUFFIX):
+                chapter_files[name[: -len(CHAPTERS_SUFFIX)].lower()] = os.path.join(dir_path, name)
+            elif ext == ".srt":
                 subtitles[os.path.splitext(name)[0].lower()] = os.path.join(dir_path, name)
             elif ext in LOCAL_AUDIO_EXTENSIONS:
                 audio_names.append(name)
@@ -2390,12 +2490,14 @@ def scan_local_audio_folder():
             except OSError:
                 size_bytes = 0
             total_bytes += size_bytes
+            chapters_path = chapter_files.get(stem.lower(), "")
             items.append({
                 "audioPath": audio_path,
                 "audioName": name,
                 "outputName": stem,
                 "subtitlePath": subtitle_path,
                 "subtitleName": os.path.basename(subtitle_path) if subtitle_path else "",
+                "chaptersPath": chapters_path,
                 "sizeMb": round(size_bytes / (1024 * 1024), 2),
             })
         orphan_subtitles += len(set(subtitles) - used_stems)
@@ -2483,6 +2585,18 @@ def create_story_batch():
             subtitle_name_map[safe_name] = saved_subtitle_path
             subtitle_name_map[str(sf.filename)] = saved_subtitle_path
 
+    # Chapter files (<audio stem>.chapters.txt), mapped exactly like subtitles.
+    chapter_files = request.files.getlist("chapter_files")
+    chapter_file_map: dict[int, str] = {}
+    chapter_name_map: dict[str, str] = {}
+    for i, cf in enumerate(chapter_files):
+        if cf.filename:
+            saved_chapter_path = os.path.join(batch_dir, f"chapters_{i}.txt")
+            cf.save(saved_chapter_path)
+            chapter_file_map[i] = saved_chapter_path
+            chapter_name_map[secure_filename(cf.filename)] = saved_chapter_path
+            chapter_name_map[str(cf.filename)] = saved_chapter_path
+
     shared_subtitle_config = _subtitle_config_from_payload(shared_config)
 
     # Resolve the (optional) shared intro once for the whole batch. Empty id means
@@ -2495,16 +2609,15 @@ def create_story_batch():
             shutil.rmtree(batch_dir, ignore_errors=True)
             return _error("Intro không tồn tại.", code="intro_not_found", status=404)
 
-    # Decor images ("khung TV") rotate across the batch: one shuffled deck dealt
-    # out so every run of N videos uses all N images in a different order.
-    decor_assignments, decor_error = _resolve_decor_selection(
-        shared_config.get("decorImageIds"),
-        library_ids,
-        len(items),
-    )
-    if decor_error is not None:
+    # Layouts ("bo cuc") rotate across the batch: one shuffled deck dealt out so
+    # every run of N videos uses all N layouts in a different order. Decor images
+    # go only to the videos that drew a TV layout (or to every video when the
+    # payload has decor ids and no layouts: the old "use decor" behaviour).
+    edit_selection, edit_error = _resolve_edit_selection(shared_config, library_ids, len(items))
+    if edit_error is not None:
         shutil.rmtree(batch_dir, ignore_errors=True)
-        return decor_error
+        return edit_error
+    layout_assignments, decor_assignments, modifier_ids = edit_selection
 
     # Song am va CTA cung xoay vong theo cach do: chon nhieu cau hinh thi moi N
     # video lien tiep dung du N cau hinh, thu tu ngau nhien. Khong chon = giu
@@ -2614,6 +2727,16 @@ def create_story_batch():
                     )
                 subtitle_path = subtitle_ref
 
+        chapters_ref = str(item.get("chaptersFile", "")).strip()
+        chapters_path = ""
+        if chapters_ref:
+            if chapters_ref.isdigit() and int(chapters_ref) in chapter_file_map:
+                chapters_path = chapter_file_map[int(chapters_ref)]
+            elif chapters_ref in chapter_name_map:
+                chapters_path = chapter_name_map[chapters_ref]
+            elif os.path.isabs(chapters_ref) and os.path.isfile(chapters_ref):
+                chapters_path = chapters_ref
+
         subtitle_style_id = style_assignments[idx] if style_assignments else ""
         story_configs.append({
             "story_id": f"sv-{str(uuid.uuid4())[:8]}",
@@ -2633,6 +2756,9 @@ def create_story_batch():
             ),
             "cta_overlay_id": cta_assignments[idx] if cta_assignments else "",
             "decor_image_id": decor_assignments[idx] if decor_assignments else "",
+            "layout_id": layout_assignments[idx] if layout_assignments else "",
+            "modifier_ids": list(modifier_ids),
+            "chapters_path": chapters_path,
             "voice_id": str(shared_config.get("voiceId", "")).strip(),
             "subtitle_path": subtitle_path,
             "intro_video_path": intro_video_path,
@@ -2656,7 +2782,8 @@ def create_story_batch():
     logger.info(
         f"[StoryVideo] Queued batch: batch_id={batch_id}, items={len(story_configs)}, "
         f"queue_position={queue_position}, optimize_mode={optimize_mode}, "
-        f"decor_images={len(set(decor_assignments)) if decor_assignments else 0}, "
+        f"layouts={len({lid for lid in layout_assignments if lid})}, modifiers={len(modifier_ids)}, "
+        f"decor_images={len({d for d in decor_assignments if d})}, "
         f"waveforms={len(set(waveform_assignments)) if waveform_assignments else 0}, "
         f"cta_overlays={len(set(cta_assignments)) if cta_assignments else 0}, "
         f"subtitle_styles={len(style_subtitle_configs)}"
@@ -2735,6 +2862,8 @@ def get_batch_progress(batch_id: str):
             "waveformName": story.get("waveform_overlay_name", ""),
             "ctaOverlayName": story.get("cta_overlay_name", ""),
             "subtitleStyleName": story.get("subtitle_style_name", ""),
+            "layoutName": story.get("layout_name", ""),
+            "modifierNames": story.get("modifier_names") or [],
         })
 
     from src.utils.story_video_batch import batch_output_dir, queue_position
@@ -2831,6 +2960,10 @@ def retry_batch_failed(batch_id: str):
             "library_ids": s.get("library_ids") or [s.get("library_id", "")],
             "skip_tv_effect": bool(s.get("skip_tv_effect", False)),
             "decor_image_id": s.get("decor_image_id", ""),
+            # Retry giu dung bo cuc / hieu ung bo tro ma item da boc o lan chay truoc.
+            "layout_id": s.get("layout_id", ""),
+            "modifier_ids": s.get("modifier_ids") or [],
+            "chapters_path": s.get("chapters_path", ""),
             # Retry giu dung song am / CTA ma item da boc o lan chay truoc.
             "waveform_overlay_id": s.get("waveform_overlay_id", ""),
             "cta_overlay_id": s.get("cta_overlay_id", ""),
@@ -3129,6 +3262,111 @@ def delete_cta_overlay(overlay_id: str):
 
     logger.info(f"[StoryVideo] CTA overlay deleted: {overlay_id}")
     return jsonify({"deleted": True, "overlayId": overlay_id})
+
+
+# ---------------------------------------------------------------------------
+# 19a. Edit styles ("kieu dung"): layouts rotated per video + batch-wide modifiers.
+#      Each record is one variant of a type with its own params (src/utils/edit_styles).
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/edit-styles", methods=["GET"])
+def get_edit_styles():
+    from src.utils.edit_styles.spec import public_types
+    from src.utils.edit_styles.store import list_edit_styles
+
+    # Pictures are served by /media relative to STORAGE_DIR: `/media/<imageBase>/<ref>`.
+    image_base = os.path.relpath(Config.STORY_EDIT_STYLE_DIR, Config.STORAGE_DIR).replace("\\", "/")
+    return jsonify({"types": public_types(), "styles": list_edit_styles(), "imageBase": image_base})
+
+
+@story_video_bp.route("/api/story-video/edit-styles/<style_id>/images/<key>", methods=["POST"])
+def upload_edit_style_image(style_id: str, key: str):
+    from src.utils.edit_styles.store import add_image
+
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return _error("Chua chon file anh.", code="missing_file")
+    try:
+        record = add_image(style_id, key, upload.stream, upload.filename)
+    except ValueError as exc:
+        return _error(str(exc), code="invalid_edit_style_image")
+    if not record:
+        return _error("Kieu dung khong ton tai.", code="edit_style_not_found", status=404)
+    return jsonify({"style": record})
+
+
+@story_video_bp.route("/api/story-video/edit-styles/<style_id>/images/<key>", methods=["DELETE"])
+def delete_edit_style_image(style_id: str, key: str):
+    from src.utils.edit_styles.store import remove_image
+
+    try:
+        record = remove_image(style_id, key, request.args.get("ref") or None)
+    except ValueError as exc:
+        return _error(str(exc), code="invalid_edit_style_image")
+    if not record:
+        return _error("Kieu dung khong ton tai.", code="edit_style_not_found", status=404)
+    return jsonify({"style": record})
+
+
+@story_video_bp.route("/api/story-video/edit-styles", methods=["POST"])
+def create_edit_style_route():
+    from src.utils.edit_styles.store import create_edit_style
+
+    data = request.get_json(silent=True) or {}
+    try:
+        record = create_edit_style(
+            str(data.get("type") or "").strip(),
+            name=data.get("name"),
+            params=data.get("params") if isinstance(data.get("params"), dict) else None,
+            copy_from=str(data.get("copyFrom") or "").strip() or None,
+        )
+    except ValueError as exc:
+        return _error(str(exc), code="invalid_edit_style")
+    return jsonify({"style": record}), 201
+
+
+@story_video_bp.route("/api/story-video/edit-styles/<style_id>", methods=["PATCH"])
+def patch_edit_style(style_id: str):
+    from src.utils.edit_styles.store import update_edit_style
+
+    data = request.get_json(silent=True) or {}
+    updates = {key: data[key] for key in ("name", "enabled", "params") if key in data}
+    record = update_edit_style(style_id, updates)
+    if not record:
+        return _error("Kieu dung khong ton tai.", code="edit_style_not_found", status=404)
+    return jsonify({"style": record})
+
+
+@story_video_bp.route("/api/story-video/edit-styles/<style_id>", methods=["DELETE"])
+def delete_edit_style_route(style_id: str):
+    from src.utils.edit_styles.store import delete_edit_style
+
+    if not delete_edit_style(style_id):
+        return _error("Kieu dung khong ton tai.", code="edit_style_not_found", status=404)
+    return jsonify({"deleted": True, "styleId": style_id})
+
+
+@story_video_bp.route("/api/story-video/edit-styles/<style_id>/preview", methods=["POST"])
+def preview_edit_style(style_id: str):
+    """Render a ~10s clip of this style with the real overlay pass (synchronous)."""
+    from src.utils.edit_styles.preview import render_preview
+
+    data = request.get_json(silent=True) or {}
+    library_id = str(data.get("libraryId") or "").strip()
+    sample = _find_sample_clip(data.get("sampleClipId"), library_id or None)
+    if not sample:
+        return _error("Chua co clip mau trong thu vien de xem thu.", code="no_sample", status=404)
+    try:
+        preview_path = render_preview(
+            style_id, sample, library_id=library_id,
+            decor_image_id=str(data.get("decorImageId") or "").strip(),
+            modifier_ids=_clean_ids(data.get("modifierIds")),
+        )
+    except ValueError as exc:
+        return _error(str(exc), code="edit_style_not_found", status=404)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"[StoryVideo] Edit style preview failed: {exc}", exc_info=True)
+        return _error(f"Khong render duoc ban xem thu: {exc}", code="edit_style_preview_failed", status=500)
+    return jsonify({"previewPath": preview_path})
 
 
 # ---------------------------------------------------------------------------

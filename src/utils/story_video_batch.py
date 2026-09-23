@@ -386,6 +386,16 @@ class StoryVideoBatchRunner:
         record = get_subtitle_style(style_id)
         return str(record.get("name") or style_id) if record else style_id
 
+    @staticmethod
+    def _edit_style_name(style_id: str) -> str:
+        """Display name for a layout/modifier record, for the batch UI."""
+        if not style_id:
+            return ""
+        from src.utils.edit_styles.store import get_edit_style
+
+        record = get_edit_style(style_id)
+        return str(record.get("name") or style_id) if record else style_id
+
     def __init__(
         self,
         batch_id: str,
@@ -474,6 +484,13 @@ class StoryVideoBatchRunner:
                 "subtitle_style_overrides": config.get("subtitle_style_overrides") or {},
                 "subtitle_style_id": config.get("subtitle_style_id", ""),
                 "subtitle_style_name": self._subtitle_style_name(config.get("subtitle_style_id", "")),
+                # Retry-failed rebuilds configs from this progress entry only, so the
+                # edit style has to be recorded here or a retried item loses it.
+                "layout_id": config.get("layout_id", ""),
+                "layout_name": self._edit_style_name(config.get("layout_id", "")),
+                "modifier_ids": list(config.get("modifier_ids") or []),
+                "modifier_names": [self._edit_style_name(m) for m in config.get("modifier_ids") or []],
+                "chapters_path": config.get("chapters_path", ""),
             })
 
         self._save_progress()

@@ -262,6 +262,11 @@ class Config:
     # Noi video ra ngoai khung mot chut de vien xanh con sot khong bao gio ho ra.
     STORY_DECOR_OVERSCAN = float(os.getenv("STORY_DECOR_OVERSCAN", "0.01"))
 
+    # --- Story edit styles (bo cuc xoay vong theo batch + hieu ung bo tro) ---
+    STORY_EDIT_STYLE_DIR = os.path.join(STORAGE_DIR, "story_edit_styles")
+    # Font bundled with the app (OFL), copied into STORY_FONTS_DIR on first use so libass finds them.
+    STORY_BUNDLED_FONTS_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
+
     # --- Story TV Noise Overlay ---
     STORY_TV_NOISE_OVERLAY_DIR = os.path.join(STORAGE_DIR, "story_tv_noise_overlays")
     # Bo clip nguoi dung tai len de xem truoc ca chong hieu ung trong video that.

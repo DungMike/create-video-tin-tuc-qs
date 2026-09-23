@@ -26,6 +26,7 @@ a half-baked library renderable and what limits the loss from a hard crash to th
 last checkpoint.
 """
 
+import hashlib
 import os
 import threading
 import uuid
@@ -70,6 +71,41 @@ def _run_ffmpeg_with_fallback(cmd: list, hwaccel_len: int, cancel_cb) -> bool:
     if not ok and hwaccel_len and not cancel_cb():
         ok = FFmpegHelper.run_command(cmd[:2] + cmd[2 + hwaccel_len:], cancel_callback=cancel_cb)
     return ok
+
+
+# Where the framing travels, as fractions of the spare margin: left-right, up-down
+# and the four diagonals. One is picked per clip from its id, so a library does not
+# drift the same way in every shot.
+_MOTION_PATHS = [(0.0, 0.5, 1.0, 0.5), (1.0, 0.5, 0.0, 0.5), (0.5, 0.0, 0.5, 1.0), (0.5, 1.0, 0.5, 0.0),
+                 (0.0, 0.0, 1.0, 1.0), (1.0, 1.0, 0.0, 0.0), (0.0, 1.0, 1.0, 0.0), (1.0, 0.0, 0.0, 1.0)]
+
+
+def motion_filter(motion: str, zoom: float, seconds: float, seed: str, size=(1920, 1080)) -> str:
+    """Ken Burns for a baked clip: a slow drift ("pan") or a slow zoom ("zoom").
+
+    Baked once per clip, so the render pays nothing for it (the same move at render
+    time measured 3.1x realtime — see tests/test-render/README.md, idea 10).
+    """
+    zoom = max(1.0, min(1.4, float(zoom or 1.0)))
+    if motion not in ("pan", "zoom") or zoom <= 1.001:
+        return ""
+    w, h = size
+    zw, zh = (int(round(w * zoom)) // 2) * 2, (int(round(h * zoom)) // 2) * 2
+    x0, y0, x1, y1 = _MOTION_PATHS[int(hashlib.sha1(seed.encode("utf-8")).hexdigest(), 16) % len(_MOTION_PATHS)]
+    duration = max(0.5, float(seconds or 3))
+    if motion == "pan":
+        # One scale, then the crop window walks across the spare margin.
+        progress = f"min(t/{duration:.3f},1)"
+        return (f"scale={zw}:{zh},crop={w}:{h}"
+                f":x='({zw - w})*({x0}+({x1 - x0})*{progress})'"
+                f":y='({zh - h})*({y0}+({y1 - y0})*{progress})',")
+    frames = max(2, int(round(duration * 30)))
+    grow = f"1+{zoom - 1:.4f}*on/{frames}"
+    shrink = f"{zoom:.4f}-{zoom - 1:.4f}*on/{frames}"
+    z = grow if (x0 + y0) <= 1.0 else shrink
+    return (f"zoompan=z='{z}':d=1:s={w}x{h}:fps=30"
+            f":x='(iw-iw/zoom)*({x0}+({x1 - x0})*on/{frames})'"
+            f":y='(ih-ih/zoom)*({y0}+({y1 - y0})*on/{frames})',")
 
 
 def _style_only_cmd(src_path: str, out_path: str, style_filter: str, hwaccel: list) -> list:
@@ -196,6 +232,9 @@ class StoryLibraryBakeRunner:
         style_filter: str,
         style_id: str,
         style_label: str,
+        motion: str = "off",
+        motion_zoom: float = 1.0,
+        clip_seconds: float = 3.0,
     ):
         self.job_id = job_id
         self.source_library_id = source_library_id
@@ -204,6 +243,9 @@ class StoryLibraryBakeRunner:
         self.style_filter = style_filter
         self.style_id = style_id
         self.style_label = style_label
+        self.motion = motion
+        self.motion_zoom = motion_zoom
+        self.clip_seconds = clip_seconds
 
         self._lock = threading.RLock()
         self._max_workers = max(1, int(Config.STORY_BAKE_MAX_WORKERS))
@@ -335,7 +377,8 @@ class StoryLibraryBakeRunner:
         hwaccel = _hwaccel_flags()
 
         # style-only: single clip, style filter, keep source metadata
-        cmd = _style_only_cmd(src_paths[0], out_path, self.style_filter, hwaccel)
+        prefix = motion_filter(self.motion, self.motion_zoom, self.clip_seconds, out_id) + self.style_filter
+        cmd = _style_only_cmd(src_paths[0], out_path, prefix, hwaccel)
         if not self._run_ffmpeg_with_fallback(cmd, len(hwaccel)) or not os.path.isfile(out_path):
             return None
         a = srcs[0]
@@ -525,6 +568,9 @@ def resume_bake_job(job_id: str) -> "StoryLibraryBakeRunner | None":
         style_filter=style_filter,
         style_id=progress.get("styleId") or record.get("styleId") or "",
         style_label=progress.get("styleLabel") or record.get("styleLabel") or "",
+        motion=str(record.get("motion") or "off"),
+        motion_zoom=float(record.get("motionZoom") or 1.0),
+        clip_seconds=float(record.get("clipDuration") or 3.0),
     )
     runner.start_async()
     return runner
@@ -606,7 +652,9 @@ def bake_and_append_clips(
             progress_cb({"stage": "baking", "current": idx + 1, "total": total,
                          "message": f"Đang bake clip {idx + 1}/{total} vào thư viện..."})
 
-        cmd = _style_only_cmd(src_path, out_path, style_filter, hwaccel)
+        prefix = motion_filter(str(record.get("motion") or "off"), float(record.get("motionZoom") or 1.0),
+                               float(record.get("clipDuration") or 3.0), out_id) + style_filter
+        cmd = _style_only_cmd(src_path, out_path, prefix, hwaccel)
         if not _run_ffmpeg_with_fallback(cmd, len(hwaccel), no_cancel) or not os.path.isfile(out_path):
             continue
         duration = FFmpegHelper.probe_duration(out_path) or 0

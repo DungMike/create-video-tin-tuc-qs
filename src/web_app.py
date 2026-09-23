@@ -21,6 +21,11 @@ from src.routes.story_video_routes import story_video_bp  # noqa: E402
 app.register_blueprint(story_video_bp)
 app.config["MAX_CONTENT_LENGTH"] = Config.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
+# Fonts the edit styles draw with (Thai OFL faces) must sit in STORY_FONTS_DIR:
+# that is the only folder libass gets as fontsdir and the one the font picker scans.
+from src.utils.story_subtitles import ensure_bundled_fonts  # noqa: E402
+ensure_bundled_fonts()
+
 
 def _frontend_dist_dir() -> str:
     return os.path.abspath(Config.FRONTEND_DIST_DIR)

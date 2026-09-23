@@ -1208,7 +1208,9 @@ def build_ass(
     font_size = _coerce_style_int(overrides.get("fontSize"), scaled_default)
     margin_v = _coerce_style_int(overrides.get("marginV"), int(round(60 * scale)))
     alignment = _coerce_style_int(overrides.get("alignment"), 2)
-    margin_lr = max(10, int(round(40 * scale)))
+    # Symmetric on purpose: the positioned presets (word_pop, karaoke_zoom, drawn
+    # boxes) centre each line between equal side margins when laying it out.
+    margin_lr = max(10, _coerce_style_int(overrides.get("marginLR"), int(round(40 * scale))))
 
     font_path = _can_measure(font_family, font_size)
     style, background = _resolve_render_style(preset_id, overrides, measured=font_path is not None)
@@ -1494,6 +1496,30 @@ def _list_font_files(directory: str) -> list[str]:
         for name in names
         if name.lower().endswith(_FONT_EXTENSIONS) and os.path.isfile(os.path.join(directory, name))
     )
+
+
+def ensure_bundled_fonts() -> int:
+    """Copy the fonts shipped under src/assets/fonts into STORY_FONTS_DIR if missing.
+
+    Returns how many were copied. Never raises: a missing font only changes the
+    face libass falls back to, it must not stop the server from starting.
+    """
+    source = getattr(Config, "STORY_BUNDLED_FONTS_DIR", "")
+    copied = 0
+    try:
+        if not source or not os.path.isdir(source):
+            return 0
+        os.makedirs(Config.STORY_FONTS_DIR, exist_ok=True)
+        for path in _list_font_files(source):
+            target = os.path.join(Config.STORY_FONTS_DIR, os.path.basename(path))
+            if not os.path.isfile(target):
+                shutil.copy2(path, target)
+                copied += 1
+    except OSError as exc:
+        logger.warning(f"[StorySubtitles] Could not install bundled fonts: {exc}")
+    if copied:
+        logger.info(f"[StorySubtitles] Installed {copied} bundled font(s) into {Config.STORY_FONTS_DIR}")
+    return copied
 
 
 def _fonts_scan_signature(paths: list[str]) -> str:
