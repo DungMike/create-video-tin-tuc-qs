@@ -48,9 +48,10 @@ export function HeroCard({
 export function PageSection({
   children,
   className,
-}: PropsWithChildren<{ className?: string }>) {
+  id,
+}: PropsWithChildren<{ className?: string; id?: string }>) {
   return (
-    <Card className={cn("border-border/70 bg-card/90 shadow-lg backdrop-blur", className)}>
+    <Card id={id} className={cn("scroll-mt-4 border-border/70 bg-card/90 shadow-lg backdrop-blur", className)}>
       <CardContent className="p-4 md:p-6">{children}</CardContent>
     </Card>
   );

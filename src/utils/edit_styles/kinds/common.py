@@ -147,6 +147,16 @@ def extract_stills(clips: list[str], out_dir: str, size=(480, 270), workers: int
     return [names[clip] for clip in clips]
 
 
+def _ffconcat_entry(pic: str) -> str:
+    """One ``file`` entry, absolute so the concat demuxer resolves it correctly.
+
+    The demuxer resolves relative entries against the .ffconcat's OWN directory,
+    not the process CWD -- so a project-relative path (STORAGE_DIR=./storage)
+    gets appended to the temp dir and ffmpeg opens temp/./storage/... instead.
+    """
+    return os.path.abspath(pic).replace("\\", "/").replace("'", "'\\''")
+
+
 def write_ffconcat(pictures: list[str], starts: list[float], total: float, ss: float | None, path: str) -> str:
     """Picture k shown from ``starts[k]`` to the next start, as an image sequence for ``-f concat``.
 
@@ -161,11 +171,11 @@ def write_ffconcat(pictures: list[str], starts: list[float], total: float, ss: f
         a = max(a, ss)
         if b <= a:
             continue
-        safe = pic.replace("\\", "/").replace("'", "'\\''")
+        safe = _ffconcat_entry(pic)
         lines += [f"file '{safe}'", f"duration {b - a:.3f}"]
         last = safe
     if last is None and pictures:
-        last = pictures[-1].replace("\\", "/")
+        last = _ffconcat_entry(pictures[-1])
         lines += [f"file '{last}'", "duration 1.000"]
     if last is not None:
         lines.append(f"file '{last}'")  # concat quirk: the last duration needs a trailing entry

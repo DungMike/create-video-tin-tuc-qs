@@ -1023,8 +1023,40 @@ export interface StoryDecorImage {
   /** False when the green region had to be placed by hand. */
   autoDetected?: boolean;
   enabled?: boolean;
+  /** Đã dùng cho 1 video rồi: không vào vòng xoay nữa (mỗi ảnh chỉ dùng 1 lần). */
+  used?: boolean;
+  usedAt?: string | null;
+  /** Set when the image was imported from a Pexels/Pixabay search. */
+  source?: { provider: StoryVideoProvider; id: string; pageUrl?: string; author?: string };
   createdAt: string;
   updatedAt?: string;
+}
+
+/** A Pexels/Pixabay photo hit, already filtered to >=1920x1080 and ~16:9. */
+export interface StoryProviderImage {
+  provider: StoryVideoProvider;
+  id: string;
+  title: string;
+  thumbnailUrl: string;
+  downloadUrl: string;
+  pageUrl: string;
+  width: number;
+  height: number;
+  author: string;
+}
+
+export interface StoryProviderImageSearchResponse {
+  provider: StoryVideoProvider;
+  items: StoryProviderImage[];
+  page: number;
+  /** Hits the provider returned for this page before the Full HD / 16:9 filter. */
+  rawCount: number;
+  filteredOut: number;
+  hasMore: boolean;
+  /** e.g. the Pixabay key lacks full API access, so hi-res hits were hidden. */
+  notice?: string;
+  /** `provider:id` of photos already in the decor library. */
+  importedKeys: string[];
 }
 
 export interface WaveformOverlay {
