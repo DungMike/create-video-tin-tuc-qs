@@ -1020,11 +1020,25 @@ export interface StoryDecorImage {
   cornerRadius?: number;
   /** Grows the video past the frame edges so a green fringe can never show. */
   overscan?: number;
+  /**
+   * Gaussian blur of the photo around the window, px in 1920x1080.
+   * `null`/missing = follow the shared default; a number overrides it.
+   * Only `maskMode: "manual"` uses it.
+   */
+  blurRadius?: number | null;
+  /** How much blur the PNG on disk actually carries; lets drift self-heal. */
+  blurBaked?: number;
   /** False when the green region had to be placed by hand. */
   autoDetected?: boolean;
   enabled?: boolean;
   createdAt: string;
   updatedAt?: string;
+}
+
+/** Settings shared by every decor image, not tied to one picture. */
+export interface StoryDecorSettings {
+  /** Default blur for manual-mode images that do not set their own. */
+  backgroundBlur: number;
 }
 
 export interface WaveformOverlay {

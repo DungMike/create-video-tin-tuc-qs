@@ -48,6 +48,7 @@ import {
   selectTVEffectStyle,
   updateCtaOverlay,
   updateDecorImage,
+  updateDecorSettings,
   updateTVNoiseOverlay,
   updateWaveformOverlay,
   uploadCtaOverlay,
@@ -375,6 +376,12 @@ export function StoryVideoSettingsPage() {
   // null = xem tat ca nhom; "" = nhom "chua phan nhom".
   const [decorGroupFilter, setDecorGroupFilter] = useState<string | null>(null);
   const [decorUploadGroup, setDecorUploadGroup] = useState("");
+  // Do mo mac dinh cho anh decor tu ve vung nen. `draft` la gia tri dang keo
+  // tren thanh truot; chi khi bam "Ap dung" no moi thanh gia tri that, vi moi
+  // lan ap la server ve lai PNG cua tat ca anh dang theo mac dinh chung.
+  const [decorBlur, setDecorBlur] = useState(0);
+  const [decorBlurDraft, setDecorBlurDraft] = useState("0");
+  const [isDecorBlurSaving, setIsDecorBlurSaving] = useState(false);
   const [decorGroupEdit, setDecorGroupEdit] = useState<{ from: string; value: string } | null>(null);
   const [decorGroupInputFor, setDecorGroupInputFor] = useState<string | null>(null);
   const [decorGroupBusy, setDecorGroupBusy] = useState(false);
@@ -597,10 +604,36 @@ export function StoryVideoSettingsPage() {
   const loadDecorImages = async () => {
     const res = await getDecorImages();
     setDecorImages(res.images);
+    if (res.settings) {
+      setDecorBlur(res.settings.backgroundBlur);
+      setDecorBlurDraft(String(res.settings.backgroundBlur));
+    }
     setSelectedDecorId((current) =>
       current && res.images.some((item) => item.id === current) ? current : res.images[0]?.id ?? "",
     );
     return res.images;
+  };
+
+  /** Redraws every inheriting PNG server-side, so it is a button, not a live slider. */
+  const handleDecorBlurApply = async () => {
+    const next = Number(decorBlurDraft);
+    if (!Number.isFinite(next)) return;
+    setIsDecorBlurSaving(true);
+    setErrorMessage(null);
+    setDecorNotice(null);
+    try {
+      const res = await updateDecorSettings({ backgroundBlur: next });
+      setDecorImages(res.images);
+      setDecorBlur(res.settings.backgroundBlur);
+      setDecorBlurDraft(String(res.settings.backgroundBlur));
+      // The composed still on screen was rendered before the blur changed.
+      setDecorPreviewPath(null);
+      setDecorNotice(`Đã áp độ mờ ${res.settings.backgroundBlur}px cho các ảnh theo mặc định chung.`);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the cap nhat do mo chung.");
+    } finally {
+      setIsDecorBlurSaving(false);
+    }
   };
 
   useEffect(() => {
@@ -2287,6 +2320,47 @@ export function StoryVideoSettingsPage() {
             <StatusAlert title="Ảnh decor" message={decorNotice} />
           </div>
         ) : null}
+        <div className="mb-5 rounded-lg border border-input bg-muted/30 p-4">
+          <Label htmlFor="decor-blur-default" className="flex items-center justify-between gap-2">
+            <span>Làm mờ ảnh nền — mặc định chung</span>
+            <span className="font-mono text-xs text-muted-foreground">{decorBlurDraft}px</span>
+          </Label>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <input
+              id="decor-blur-default-range"
+              type="range"
+              className="h-10 min-w-[160px] flex-1 cursor-pointer"
+              min={0}
+              max={40}
+              step={1}
+              value={Number(decorBlurDraft) || 0}
+              onChange={(event) => setDecorBlurDraft(event.currentTarget.value)}
+            />
+            <Input
+              id="decor-blur-default"
+              type="number"
+              className="w-24"
+              min={0}
+              max={40}
+              value={decorBlurDraft}
+              onChange={(event) => setDecorBlurDraft(event.currentTarget.value)}
+            />
+            <Button
+              type="button"
+              onClick={() => void handleDecorBlurApply()}
+              disabled={isDecorBlurSaving || Number(decorBlurDraft) === decorBlur}
+            >
+              {isDecorBlurSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+              Áp dụng
+            </Button>
+          </div>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Chỉ áp cho ảnh ở chế độ “Tự tạo vùng nền xanh”. Nền mờ làm cửa sổ video sắc nét nổi
+            hẳn lên — cùng ý tưởng với kiểu dựng “Hai lớp cùng nguồn”. 0 = tắt. Độ mờ được nướng
+            sẵn vào ảnh nên <em>không</em> tốn thêm thời gian render. Bấm “Áp dụng” sẽ vẽ lại ảnh
+            của mọi khung đang theo mặc định chung; khung nào tự đặt riêng thì giữ nguyên.
+          </p>
+        </div>
         <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
           <div className="space-y-4">
             <div className="grid gap-2">
@@ -2653,6 +2727,7 @@ export function StoryVideoSettingsPage() {
                 key={selectedDecor.id}
                 image={selectedDecor}
                 previewPath={decorPreviewPath}
+                defaultBlur={decorBlur}
                 isPreviewLoading={isDecorPreviewLoading}
                 isSaving={isDecorSaving}
                 onRequestPreview={() => void handleDecorFramePreview()}

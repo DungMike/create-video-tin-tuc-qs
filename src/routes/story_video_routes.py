@@ -3376,13 +3376,22 @@ def preview_edit_style(style_id: str):
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/decor-images", methods=["GET"])
 def get_decor_images():
-    from src.utils.story_decor_images import list_decor_groups, load_decor_index
+    from src.utils.story_decor_images import (
+        list_decor_groups,
+        load_decor_index,
+        load_decor_settings,
+    )
 
-    images = load_decor_index().get("images", [])
+    index = load_decor_index()
+    images = index.get("images", [])
     images.sort(key=lambda item: str(item.get("createdAt") or ""))
     # Groups are derived from the records, so the UI never has to reconcile a
     # separate list against the images it is showing.
-    return jsonify({"images": images, "groups": list_decor_groups()})
+    return jsonify({
+        "images": images,
+        "groups": list_decor_groups(),
+        "settings": load_decor_settings(index),
+    })
 
 
 @story_video_bp.route("/api/story-video/decor-images", methods=["POST"])
@@ -3431,6 +3440,19 @@ def patch_decor_image(image_id: str):
             except (TypeError, ValueError):
                 return _error(f"Gia tri {key} khong hop le.", code="invalid_value")
 
+    # Rieng mot nhanh: ``null`` o day co nghia ("theo mac dinh chung"), nen no
+    # khong the di nho hai vong tren -- ca hai deu bo qua None. Van phai ep
+    # kieu tai cho de mot chuoi rac tra ve 400 chu khong vo thanh 500 duoi kia.
+    if "blurRadius" in payload:
+        raw = payload["blurRadius"]
+        if raw is None:
+            updates["blurRadius"] = None
+        else:
+            try:
+                updates["blurRadius"] = float(raw)
+            except (TypeError, ValueError):
+                return _error("Gia tri blurRadius khong hop le.", code="invalid_value")
+
     try:
         record = update_decor_image(image_id, updates)
     except Exception as exc:
@@ -3439,6 +3461,39 @@ def patch_decor_image(image_id: str):
     if not record:
         return _error("Anh decor khong ton tai.", code="decor_not_found", status=404)
     return jsonify({"image": record})
+
+
+@story_video_bp.route("/api/story-video/decor-images/settings", methods=["PATCH"])
+def patch_decor_image_settings():
+    """Do mo mac dinh chung cho moi anh decor tu ve vung nen.
+
+    Anh nao dang theo mac dinh chung se duoc ve lai PNG ngay trong request --
+    khoang 0,6s moi anh, nen mot thu vien vai chuc anh mat vai giay. Doi lai,
+    khi request tra ve thi moi thu tren dia da dung, khong con trang thai nua
+    voi nao de render boc phai. Anh da tu dat rieng va anh che do chroma khong
+    bi dong toi.
+
+    Nhu ``/group`` o duoi, segment tinh "settings" khong the bi sibling
+    ``<image_id>`` nuot mat: Werkzeug xep rule khong tham so len truoc.
+    """
+    from src.utils.story_decor_images import apply_decor_blur_default
+
+    payload = request.get_json(silent=True) or {}
+    if "backgroundBlur" not in payload:
+        return _error("Thieu backgroundBlur.", code="invalid_value")
+    try:
+        blur = float(payload["backgroundBlur"])
+    except (TypeError, ValueError):
+        return _error("Gia tri backgroundBlur khong hop le.", code="invalid_value")
+
+    try:
+        settings, images = apply_decor_blur_default(blur)
+    except Exception as exc:
+        logger.error(f"[StoryVideo] Decor settings update failed: {exc}", exc_info=True)
+        return _error(f"Khong the cap nhat cai dat: {exc}", code="decor_settings_failed", status=500)
+
+    images = sorted(images, key=lambda item: str(item.get("createdAt") or ""))
+    return jsonify({"settings": settings, "images": images})
 
 
 @story_video_bp.route("/api/story-video/decor-images/group", methods=["PATCH"])

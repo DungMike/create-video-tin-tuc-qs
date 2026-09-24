@@ -37,3 +37,14 @@ __pycache__/
 tests/test_google_drive_audio.py
 tests/benchmarks/samples.zip
 tests/test_google_drive_audio.py
+tests/benchmarks/samples/sample_10a.srt
+tests/benchmarks/samples/sample_10b - Copy (2).srt
+tests/benchmarks/samples/sample_10b - Copy (3).srt
+tests/benchmarks/samples/sample_10b - Copy (4).srt
+tests/benchmarks/samples/sample_10b - Copy (5).srt
+tests/benchmarks/samples/sample_10b - Copy.srt
+tests/benchmarks/samples/sample_30a - Copy (2).srt
+tests/benchmarks/samples/sample_30a - Copy (3).srt
+tests/benchmarks/samples/sample_30a - Copy (4).srt
+tests/benchmarks/samples/sample_30a - Copy (5).srt
+tests/benchmarks/samples/sample_30a - Copy.srt

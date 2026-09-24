@@ -77,6 +77,40 @@ def save_decor_index(data: dict):
     shutil.move(tmp, path)
 
 
+# --------------------------------------------------------------------------- #
+# Shared settings (mac dinh chung cho moi anh decor)
+# --------------------------------------------------------------------------- #
+# Ban kinh Gaussian toi da, tinh theo pixel cua khung 1920x1080. Tren 40 thi
+# anh chi con la mang mau, khong con nhan ra bo cuc goc nua.
+DECOR_BLUR_MAX = 40.0
+
+
+def _clamp_blur(value) -> float:
+    """Ban kinh blur hop le, lam tron 1 chu so; gia tri rac coi nhu 0 (tat)."""
+    try:
+        radius = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if radius != radius:  # NaN
+        return 0.0
+    return round(max(0.0, min(radius, DECOR_BLUR_MAX)), 1)
+
+
+def load_decor_settings(index: dict | None = None) -> dict:
+    """Cai dat dung chung cho ca thu vien anh decor.
+
+    Nam trong chinh ``index.json`` duoi khoa ``settings`` de khong de them mot
+    file trang thai thu hai co the lech nhip voi danh sach anh.
+    """
+    data = index if index is not None else load_decor_index()
+    stored = data.get("settings")
+    stored = stored if isinstance(stored, dict) else {}
+    # Config chi la gia tri khoi tao: khi nguoi dung da luu mot lan thi ban da
+    # luu thang, doi bien moi truong khong am tham ghi de lua chon cua ho.
+    raw = stored.get("backgroundBlur", Config.STORY_DECOR_BLUR)
+    return {"backgroundBlur": _clamp_blur(raw)}
+
+
 def _relative(filename: str) -> str:
     return f"story_decor_images/{filename}"
 
@@ -526,7 +560,68 @@ def corner_radius_of(record: dict, frame: dict | None = None) -> int:
     return max(0, min(radius, min(frame["w"], frame["h"]) // 2))
 
 
-def build_manual_mask_png(source_path: str, record: dict) -> str:
+def _blur_keeping_hole_out(base, mask, radius: float):
+    """Lam mo anh ma khong keo vung man hinh loang ra ngoai o cua.
+
+    Mo thang ca tam anh la sai: Gaussian lay trung binh moi pixel quanh no, ke
+    ca nhung pixel sap bi duc thanh lo. Vung man hinh trong anh thuong rat sang
+    (hoac rat toi), nen no bi keo *ra ngoai* va ve mot quang sang om lay cua so
+    video, rong toi 3 lan ban kinh. Do duoc voi phong=60 / man hinh=255 /
+    sigma=20: pixel ngay sat mep o cua doc ra **156** thay vi 60.
+
+    Cach chua la chuan hoa theo mask: mo ``rgb * keep`` roi chia cho ``keep``
+    cung da mo. Moi pixel ket qua thanh trung binh cua *rieng* nhung pixel duoc
+    giu lai, con vung lo khong dong gop gi. Do lai cung canh tren: 60.8 -- dung
+    nhu chua mo bao gio.
+    """
+    from PIL import Image, ImageFilter
+
+    import numpy as np
+
+    def _blur_plane(plane):
+        """Gaussian tren mot kenh. PIL khong mo duoc anh float nen di qua uint8:
+        ca tu so lan mau so deu nam gon trong 0..255 nen khong mat gi dang ke."""
+        img = Image.fromarray(np.clip(plane, 0, 255).astype(np.uint8), "L")
+        return np.asarray(img.filter(ImageFilter.GaussianBlur(radius)), dtype=np.float32)
+
+    keep = np.asarray(mask, dtype=np.float32) / 255.0
+    # Sat mep o cua mau so tut ve ~0.5, sau trong long lo thi ve 0; kep lai de
+    # khong chia cho 0. Nhung pixel do deu nam trong lo va se bi alpha 0 xoa di.
+    weight = np.maximum(_blur_plane(keep * 255.0) / 255.0, 1.0 / 255.0)
+
+    rgb = np.asarray(base.convert("RGB"), dtype=np.float32)
+    out = np.empty_like(rgb)
+    for channel in range(3):
+        out[:, :, channel] = _blur_plane(rgb[:, :, channel] * keep) / weight
+
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), "RGB").convert("RGBA")
+
+
+def blur_radius_of(record: dict, settings: dict | None = None) -> float:
+    """Do mo cua anh nen quanh o cua, tinh bang pixel cua khung 1920x1080.
+
+    Chi co nghia o che do ``manual``: o do anh la mot mang mau dac bao quanh o
+    cua da duc, lam mo no khien cua so video sac net noi han len. Che do
+    ``chroma`` tra ve 0 -- ``colorkey`` chay trong cung mot luot ffmpeg nen mot
+    ``gblur`` dat truoc se lam mau xanh loang ra ca phong, con dat sau thi lam
+    nhoe chinh mep o cua vua key ra.
+
+    ``blurRadius`` cua rieng anh: ``None``/thieu = theo mac dinh chung, so =
+    tu dat rieng. Do do 0 la mot lua chon that ("anh nay khong mo"), khac han
+    voi "chua chon gi".
+    """
+    if decor_mask_mode(record) != "manual":
+        return 0.0
+    own = record.get("blurRadius")
+    if own is None:
+        # ``settings`` la ban da giai quyet san, truyen vao de mot luot ap hang
+        # loat khong phai doc lai index.json cho tung anh.
+        resolved = settings if settings is not None else load_decor_settings()
+        return _clamp_blur(resolved.get("backgroundBlur"))
+    return _clamp_blur(own)
+
+
+def build_manual_mask_png(source_path: str, record: dict, settings: dict | None = None) -> str:
     """Punch the frame rectangle into the photo's alpha; no green screen needed.
 
     ``colorkey`` can only clear pixels close to the key colour, so a photo with
@@ -546,6 +641,7 @@ def build_manual_mask_png(source_path: str, record: dict) -> str:
     width, height = target_size()
     frame = _clamp_frame(record)
     radius = corner_radius_of(record, frame)
+    blur = blur_radius_of(record, settings)
 
     with Image.open(source_path) as img:
         # The browser rotates by EXIF when it displays the photo, so the
@@ -568,19 +664,58 @@ def build_manual_mask_png(source_path: str, record: dict) -> str:
         draw.rounded_rectangle(box, radius=radius, fill=0)
     else:
         draw.rectangle(box, fill=0)
+
+    # Blur the photo *through* the same mask, so the screen area never bleeds
+    # out and haloes the video window; then punch the crisp alpha on top, which
+    # keeps the one edge that has to stay exact razor sharp. Skipped entirely
+    # at 0 so the no-blur path is byte-for-byte what it has always been.
+    if blur > 0:
+        try:
+            base = _blur_keeping_hole_out(base, mask, blur)
+        except ImportError as exc:  # noqa: BLE001 - optional dependency guard
+            logger.warning(f"[DecorImage] Blur unavailable, giu anh net: {exc}")
+
     base.putalpha(mask)
 
     os.makedirs(Config.STORY_DECOR_DIR, exist_ok=True)
-    base.save(output_path, "PNG")
-    logger.info(f"[DecorImage] Manual mask {frame} radius={radius} -> {output_path}")
+    # Ghi ra file tam roi thay cho nhanh, khong ghi de thang len ban dang song:
+    # mot luot ap do mo hang loat co the ve lai hang chuc PNG trong luc mot
+    # render chay nen dang dua dung file do cho ffmpeg doc.
+    tmp_path = output_path + ".tmp"
+    base.save(tmp_path, "PNG")
+    os.replace(tmp_path, output_path)
+    logger.info(f"[DecorImage] Manual mask {frame} radius={radius} blur={blur} -> {output_path}")
     return processed_filename
 
 
-def regenerate_decor_mask(source_path: str, record: dict) -> str:
+def regenerate_decor_mask(source_path: str, record: dict, settings: dict | None = None) -> str:
     """Rebuild the RGBA PNG through whichever mask mode the record asks for."""
     if decor_mask_mode(record) == "manual":
-        return build_manual_mask_png(source_path, record)
+        return build_manual_mask_png(source_path, record, settings)
     return preprocess_decor_image(source_path, record)
+
+
+def _rebuild_processed(record: dict, settings: dict | None = None):
+    """Ve lai PNG cho record va ghi nho do mo vua nuong vao no.
+
+    ``blurBaked`` la do mo that su dang nam trong file tren dia. Nho no ma
+    viec "PNG co con dung khong" tro thanh mot phep so sanh, thay vi phai doan
+    tu lich su: mot anh bi bo sot trong luot ap hang loat (file goc mat, dia
+    day) se tu sua lai o lan PATCH ke tiep.
+    """
+    source_path = _absolute(str(record["filename"]))
+    old_processed = record.get("processedFilename")
+    # ``settings`` phai di kem suot ca duong: luc ap hang loat, gia tri moi chua
+    # duoc ghi xuong dia, nen doc lai tu index se ra dung ban cu va ta se nuong
+    # nham do mo roi con ghi lai "da nuong" mot con so khong dung su that.
+    record["processedFilename"] = regenerate_decor_mask(source_path, record, settings)
+    record["processedRelativePath"] = _relative(record["processedFilename"])
+    record["blurBaked"] = blur_radius_of(record, settings)
+    if old_processed and old_processed != record["processedFilename"]:
+        try:
+            os.remove(_absolute(str(old_processed)))
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -636,14 +771,16 @@ def create_decor_image(file_storage, group: str = "", mode: str = "") -> dict:
         "maskMode": mask_mode,
         "cornerRadius": 0,
         "overscan": Config.STORY_DECOR_OVERSCAN,
+        # None = theo mac dinh chung. Anh moi upload di theo thanh truot chung
+        # cho toi khi nguoi dung tu dat rieng cho no.
+        "blurRadius": None,
         "autoDetected": bool(detected),
         "enabled": True,
         "createdAt": datetime.now().isoformat(),
         "updatedAt": datetime.now().isoformat(),
     }
 
-    record["processedFilename"] = regenerate_decor_mask(filepath, record)
-    record["processedRelativePath"] = _relative(record["processedFilename"])
+    _rebuild_processed(record)
 
     index = load_decor_index()
     images = index.get("images", [])
@@ -697,6 +834,19 @@ def update_decor_image(image_id: str, updates: dict) -> dict | None:
             regenerate = True
         record["cornerRadius"] = next_radius
 
+    # Membership, not is-not-None: an explicit ``null`` means "back to the
+    # shared default", which is a different state from "not sent at all".
+    if "blurRadius" in updates:
+        raw = updates["blurRadius"]
+        record["blurRadius"] = None if raw is None else _clamp_blur(raw)
+
+    # So muc do mo dang yeu cau voi muc that su nam trong PNG tren dia, thay vi
+    # rinh tung thay doi. Nho vay mot anh lech nhip vi bat ky ly do nao -- doi
+    # mac dinh chung luc no dang loi, ban ghi cu chua tung co blur -- deu tu
+    # sua lai o lan luu ke tiep.
+    if manual and blur_radius_of(record) != _clamp_blur(record.get("blurBaked") or 0):
+        regenerate = True
+
     for key in ("name", "overscan"):
         if key in updates and updates[key] is not None:
             record[key] = updates[key]
@@ -713,19 +863,61 @@ def update_decor_image(image_id: str, updates: dict) -> dict | None:
         regenerate = True
 
     if regenerate:
-        source_path = _absolute(str(record["filename"]))
-        old_processed = record.get("processedFilename")
-        record["processedFilename"] = regenerate_decor_mask(source_path, record)
-        record["processedRelativePath"] = _relative(record["processedFilename"])
-        if old_processed and old_processed != record["processedFilename"]:
-            try:
-                os.remove(_absolute(str(old_processed)))
-            except OSError:
-                pass
+        _rebuild_processed(record)
 
     record["updatedAt"] = datetime.now().isoformat()
     save_decor_index(index)
     return record
+
+
+def apply_decor_blur_default(value) -> tuple[dict, list]:
+    """Doi do mo mac dinh chung, va ve lai nhung anh dang di theo no.
+
+    Chi dung toi record ``manual`` co ``blurRadius is None``: anh da tu dat
+    rieng va moi anh ``chroma`` deu khong lien quan, nen khong bi dong vao.
+    Ghi ``index.json`` dung mot lan o cuoi -- ghi sau moi anh vua thua vua de
+    lai mot file nua vo neu co su co giua chung.
+    """
+    # Mot cap load/save duy nhat cho ca cai dat lan moi anh vua ve lai. Neu
+    # luu cai dat truoc roi moi ve tung anh, mot su co giua chung se de lai
+    # index noi "mo 20px" trong khi moi PNG tren dia van dang net.
+    index = load_decor_index()
+    images = index.get("images", [])
+    settings = load_decor_settings(index)
+    next_blur = _clamp_blur(value)
+
+    index["settings"] = {**(index.get("settings") or {}), "backgroundBlur": next_blur}
+    resolved = {"backgroundBlur": next_blur}
+    now = datetime.now().isoformat()
+    rebuilt = 0
+    failed = 0
+
+    for record in images:
+        if decor_mask_mode(record) != "manual" or record.get("blurRadius") is not None:
+            continue
+        if blur_radius_of(record, resolved) == _clamp_blur(record.get("blurBaked") or 0):
+            continue
+        try:
+            _rebuild_processed(record, resolved)
+        except Exception as exc:  # noqa: BLE001 - mot anh hong khong duoc chan ca luot
+            # Anh goc bi xoa ngoai app, dia day... Bo qua anh do: ``blurBaked``
+            # cua no khong nhich nen lan luu sau se tu thu lai.
+            failed += 1
+            logger.warning(f"[DecorImage] Khong ve lai duoc {record.get('id')}: {exc}")
+            continue
+        # updatedAt la thu frontend dung de pha cache thumbnail, va cung la khoa
+        # cache cua lop kinh trong tv_glass -- khong nhich len thi ca hai deu
+        # tiep tuc phuc vu ban truoc khi mo.
+        record["updatedAt"] = now
+        rebuilt += 1
+
+    index["images"] = images
+    save_decor_index(index)
+    logger.info(
+        f"[DecorImage] Blur mac dinh {settings['backgroundBlur']} -> {next_blur}px, "
+        f"ve lai {rebuilt} anh, loi {failed}."
+    )
+    return load_decor_settings(index), images
 
 
 def delete_decor_image_record(image_id: str) -> bool:

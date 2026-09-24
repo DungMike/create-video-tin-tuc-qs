@@ -27,6 +27,7 @@ import type {
   StoryDecorFrame,
   StoryDecorImage,
   StoryDecorMaskMode,
+  StoryDecorSettings,
   StoryHarvestDeleteRequest,
   StoryHarvestDeleteResponse,
   StoryHarvestItemsResponse,
@@ -831,8 +832,28 @@ export async function deleteCtaOverlay(id: string) {
 // === Story Decor Images (khung TV) ===
 
 export async function getDecorImages() {
-  return requestJson<{ images: StoryDecorImage[]; groups?: string[] }>(
-    "/api/story-video/decor-images",
+  return requestJson<{
+    images: StoryDecorImage[];
+    groups?: string[];
+    settings?: StoryDecorSettings;
+  }>("/api/story-video/decor-images");
+}
+
+/**
+ * Change the blur every manual decor image follows by default.
+ *
+ * The server redraws each inheriting PNG before it answers, so the reply
+ * carries the whole refreshed list -- the new `updatedAt` on each record is
+ * what busts the browser's cached thumbnails.
+ */
+export async function updateDecorSettings(payload: Partial<StoryDecorSettings>) {
+  return requestJson<{ settings: StoryDecorSettings; images: StoryDecorImage[] }>(
+    "/api/story-video/decor-images/settings",
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
   );
 }
 

@@ -261,6 +261,11 @@ class Config:
     STORY_DECOR_BLEND = float(os.getenv("STORY_DECOR_BLEND", "0.05"))
     # Noi video ra ngoai khung mot chut de vien xanh con sot khong bao gio ho ra.
     STORY_DECOR_OVERSCAN = float(os.getenv("STORY_DECOR_OVERSCAN", "0.01"))
+    # Lam mo anh nen quanh o cua (chi che do "manual"), de cua so video sac net
+    # noi bat len -- cung y tuong voi kieu dung "Hai lop cung nguon". Chi la gia
+    # tri khoi tao cho thanh truot chung; nguoi dung chinh lai trong index.json.
+    # Mac dinh 0 = tat, nen cai dat cu giu nguyen hanh vi.
+    STORY_DECOR_BLUR = float(os.getenv("STORY_DECOR_BLUR", "0"))
 
     # --- Story edit styles (bo cuc xoay vong theo batch + hieu ung bo tro) ---
     STORY_EDIT_STYLE_DIR = os.path.join(STORAGE_DIR, "story_edit_styles")

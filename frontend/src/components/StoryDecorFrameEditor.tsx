@@ -11,6 +11,8 @@ const FRAME_H = 1080;
 const ASPECT = FRAME_W / FRAME_H;
 const HANDLE = 26; // hit radius, in frame px
 const MIN_SIDE = 64;
+/** Mirrors `story_decor_images.DECOR_BLUR_MAX`; past this the photo is just colour. */
+const BLUR_MAX = 40;
 /** Config.STORY_DECOR_KEY_COLOR, only ever drawn as a hint on the canvas. */
 const CHROMA_GREEN = "0,177,64";
 
@@ -20,6 +22,12 @@ interface StoryDecorFrameEditorProps {
   image: StoryDecorImage;
   /** Still composed by the backend (library frame fitted into this decor frame). */
   previewPath: string | null;
+  /**
+   * Blur this image falls back to when it sets none of its own. The component
+   * cannot derive it -- an inheriting record simply has no value -- so without
+   * it the canvas would draw sharp while the server bakes a blur.
+   */
+  defaultBlur: number;
   isPreviewLoading?: boolean;
   isSaving?: boolean;
   onRequestPreview: () => void;
@@ -118,6 +126,7 @@ function traceRect(
 export function StoryDecorFrameEditor({
   image,
   previewPath,
+  defaultBlur,
   isPreviewLoading = false,
   isSaving = false,
   onRequestPreview,
@@ -134,6 +143,10 @@ export function StoryDecorFrameEditor({
   const [keyColor, setKeyColor] = useState(image.keyColor ?? "0x00b140");
   const [similarity, setSimilarity] = useState(String(image.similarity ?? 0.15));
   const [blend, setBlend] = useState(String(image.blend ?? 0.05));
+  // Two pieces, because "follow the shared default" and "0px" look identical in
+  // a single number: the flag says which one the user meant.
+  const [blurOwn, setBlurOwn] = useState(() => image.blurRadius != null);
+  const [blurRadius, setBlurRadius] = useState(String(image.blurRadius ?? defaultBlur));
   // A self-drawn area is 16:9 by default — it is the shape the video already
   // has, so anything else only wastes picture. The user can still unlock it for
   // an off-aspect screen (an old 4:3 TV in the photo).
@@ -159,9 +172,11 @@ export function StoryDecorFrameEditor({
     setKeyColor(image.keyColor ?? "0x00b140");
     setSimilarity(String(image.similarity ?? 0.15));
     setBlend(String(image.blend ?? 0.05));
+    setBlurOwn(image.blurRadius != null);
+    setBlurRadius(String(image.blurRadius ?? defaultBlur));
     setLockAspect(mode === "manual" || isSourceAspect(image.frame));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [image.id, image.updatedAt]);
+  }, [image.id, image.updatedAt, defaultBlur]);
 
   // Chroma mode draws the keyed PNG, because its transparent hole IS the
   // alignment target. Manual mode has no hole yet — we are about to cut one —
@@ -196,6 +211,10 @@ export function StoryDecorFrameEditor({
   }, [previewPath]);
 
   const radiusPx = Math.max(0, Math.min(Number(cornerRadius) || 0, maxRadius(frame)));
+  /** What the server will actually bake: the override if set, else the shared default. */
+  const blurPx = !isManual
+    ? 0
+    : Math.max(0, Math.min(blurOwn ? Number(blurRadius) || 0 : defaultBlur, BLUR_MAX));
 
   const drawCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -209,8 +228,18 @@ export function StoryDecorFrameEditor({
     if (previewBitmap) {
       ctx.drawImage(previewBitmap, 0, 0, FRAME_W, FRAME_H);
     } else if (isManual) {
-      // The untouched photo: the area is drawn on top of it, below.
-      if (decorBitmap) ctx.drawImage(decorBitmap, 0, 0, FRAME_W, FRAME_H);
+      // The untouched photo: the area is drawn on top of it, below. Blurred
+      // here only as a hint at what the server will bake — and only in this
+      // branch, because the composed still above already carries the real
+      // blur and would come out doubled. save/restore keeps the filter off
+      // the green area, the handles and the label drawn further down; a bare
+      // `ctx.filter` would smear all of them too.
+      if (decorBitmap) {
+        ctx.save();
+        if (blurPx > 0) ctx.filter = `blur(${blurPx}px)`;
+        ctx.drawImage(decorBitmap, 0, 0, FRAME_W, FRAME_H);
+        ctx.restore();
+      }
     } else {
       // No still yet: a checkerboard makes the keyed-out hole obvious.
       const size = 60;
@@ -271,7 +300,7 @@ export function StoryDecorFrameEditor({
     ctx.fillStyle = "#e2e8f0";
     ctx.fillText(label, frame.x + 13, boxY + 30);
     ctx.restore();
-  }, [frame, decorBitmap, previewBitmap, isManual, radiusPx]);
+  }, [frame, decorBitmap, previewBitmap, isManual, radiusPx, blurPx]);
 
   useEffect(() => {
     drawCanvas();
@@ -566,30 +595,73 @@ export function StoryDecorFrameEditor({
         </div>
 
         {isManual ? (
-          <div className="grid gap-1 sm:col-span-2">
-            <Label htmlFor="decor-radius">Bo góc ({radiusPx}px)</Label>
-            <div className="flex items-center gap-2">
-              <input
-                id="decor-radius-range"
-                type="range"
-                className="h-10 flex-1 cursor-pointer"
-                min={0}
-                max={maxRadius(frame)}
-                step={1}
-                value={radiusPx}
-                onChange={(event) => setCornerRadius(event.currentTarget.value)}
-              />
-              <Input
-                id="decor-radius"
-                type="number"
-                className="w-24"
-                min={0}
-                max={maxRadius(frame)}
-                value={cornerRadius}
-                onChange={(event) => setCornerRadius(event.currentTarget.value)}
-              />
+          <>
+            <div className="grid gap-1 sm:col-span-2">
+              <Label htmlFor="decor-radius">Bo góc ({radiusPx}px)</Label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="decor-radius-range"
+                  type="range"
+                  className="h-10 flex-1 cursor-pointer"
+                  min={0}
+                  max={maxRadius(frame)}
+                  step={1}
+                  value={radiusPx}
+                  onChange={(event) => setCornerRadius(event.currentTarget.value)}
+                />
+                <Input
+                  id="decor-radius"
+                  type="number"
+                  className="w-24"
+                  min={0}
+                  max={maxRadius(frame)}
+                  value={cornerRadius}
+                  onChange={(event) => setCornerRadius(event.currentTarget.value)}
+                />
+              </div>
             </div>
-          </div>
+
+            <div className="grid gap-1 sm:col-span-2">
+              <Label htmlFor="decor-blur">Làm mờ ảnh nền ({blurPx}px)</Label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="decor-blur-range"
+                  type="range"
+                  className="h-10 flex-1 cursor-pointer disabled:opacity-40"
+                  min={0}
+                  max={BLUR_MAX}
+                  step={1}
+                  value={blurPx}
+                  disabled={!blurOwn}
+                  onChange={(event) => setBlurRadius(event.currentTarget.value)}
+                />
+                <Input
+                  id="decor-blur"
+                  type="number"
+                  className="w-24"
+                  min={0}
+                  max={BLUR_MAX}
+                  value={blurOwn ? blurRadius : String(defaultBlur)}
+                  disabled={!blurOwn}
+                  onChange={(event) => setBlurRadius(event.currentTarget.value)}
+                />
+              </div>
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={!blurOwn}
+                  onChange={(event) => {
+                    const inherit = event.currentTarget.checked;
+                    setBlurOwn(!inherit);
+                    // Unticking starts from what the image is showing right
+                    // now, so the slider never jumps the moment it unlocks.
+                    if (!inherit) setBlurRadius(String(blurPx));
+                  }}
+                />
+                Theo mặc định chung ({defaultBlur}px)
+              </label>
+            </div>
+          </>
         ) : (
           <>
             <div className="grid gap-1">
@@ -658,6 +730,10 @@ export function StoryDecorFrameEditor({
               keyColor,
               similarity: Number(similarity),
               blend: Number(blend),
+              // Only in manual mode: sending it for a chroma image would clear
+              // an override it still has stored, which would then be silently
+              // gone if the image is ever switched back to manual.
+              ...(isManual ? { blurRadius: blurOwn ? blurPx : null } : {}),
             })
           }
           disabled={isSaving}
