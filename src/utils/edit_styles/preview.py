@@ -47,9 +47,11 @@ def _sample_srt(path: str, seconds: float):
 
 
 def _first_decor_id() -> str:
+    """A decor image to preview with. Prefers an unused one, but a preview never
+    consumes anything — so when the library is spent it still shows one."""
     from src.utils.story_decor_images import get_enabled_decor_images
 
-    images = get_enabled_decor_images()
+    images = get_enabled_decor_images(unused_only=True) or get_enabled_decor_images()
     return str(images[0]["id"]) if images else ""
 
 

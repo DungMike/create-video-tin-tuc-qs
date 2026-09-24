@@ -37,7 +37,9 @@ finds that rectangle automatically on upload.
 import json
 import math
 import os
+import random
 import shutil
+import threading
 import uuid
 from datetime import datetime
 
@@ -733,9 +735,82 @@ def create_decor_image(file_storage, group: str = "", mode: str = "") -> dict:
     image_id = str(uuid.uuid4())[:8]
     safe_name = secure_filename(file_storage.filename)
     filename = f"{image_id}_{safe_name}"
-    filepath = _absolute(filename)
-    file_storage.save(filepath)
+    file_storage.save(_absolute(filename))
+    return _register_decor_image(image_id, filename, os.path.splitext(safe_name)[0], group, mode)
 
+
+_import_lock = threading.Lock()
+
+
+def find_decor_by_source(provider: str, source_id: str) -> dict | None:
+    """The decor image already imported from this provider photo, if any."""
+    for item in load_decor_index().get("images", []):
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+        if source.get("provider") == provider and str(source.get("id")) == str(source_id):
+            return item
+    return None
+
+
+def imported_source_keys() -> list[str]:
+    """``provider:id`` of every decor image that came from a provider search."""
+    keys = []
+    for item in load_decor_index().get("images", []):
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+        if source.get("provider") and source.get("id"):
+            keys.append(f"{source['provider']}:{source['id']}")
+    return keys
+
+
+def import_decor_image(item: dict, group: str = "") -> dict:
+    """Download a Pexels/Pixabay search hit and register it like an upload.
+
+    Raises ``FileExistsError`` when that photo was imported before.
+    """
+    from src.utils.decor_image_search import download_provider_image
+
+    provider = str(item.get("provider") or "").strip().lower()
+    source_id = str(item.get("id") or "").strip()
+    download_url = str(item.get("downloadUrl") or "").strip()
+    if provider not in {"pexels", "pixabay"} or not source_id or not download_url:
+        raise ValueError("Anh tu provider khong hop le.")
+    if find_decor_by_source(provider, source_id):
+        raise FileExistsError(f"Anh {provider} {source_id} da co trong thu vien decor.")
+
+    image_id = str(uuid.uuid4())[:8]
+    # The download (seconds to over a minute on the Pexels CDN) runs outside the
+    # lock so the UI can import several photos in parallel; only the index
+    # read-modify-write below is serialised.
+    path = download_provider_image(download_url, Config.STORY_DECOR_DIR, f"{image_id}_{provider}_{source_id}")
+    display_name = secure_filename(str(item.get("title") or ""))[:60] or f"{provider}_{source_id}"
+    source = {
+        "provider": provider,
+        "id": source_id,
+        "pageUrl": str(item.get("pageUrl") or ""),
+        "author": str(item.get("author") or ""),
+    }
+    try:
+        with _import_lock:
+            if find_decor_by_source(provider, source_id):
+                raise FileExistsError(f"Anh {provider} {source_id} da co trong thu vien decor.")
+            # Stock photos never carry a painted green screen, and detection can
+            # still latch onto green scenery (grass, walls) — always start manual.
+            return _register_decor_image(image_id, os.path.basename(path), display_name, group, "manual", source)
+    except Exception:
+        if os.path.exists(path):
+            os.remove(path)
+        raise
+
+
+def _register_decor_image(
+    image_id: str,
+    filename: str,
+    display_name: str,
+    group: str = "",
+    mode: str = "",
+    source: dict | None = None,
+) -> dict:
+    """Detect/mask a source file already saved as ``filename`` and index it."""
+    filepath = _absolute(filename)
     width, height = target_size()
     # An explicit "manual" skips detection entirely: the user wants to draw the
     # screen area themselves even on a photo that does have some green in it.
@@ -760,7 +835,7 @@ def create_decor_image(file_storage, group: str = "", mode: str = "") -> dict:
 
     record = {
         "id": image_id,
-        "name": os.path.splitext(safe_name)[0] or image_id,
+        "name": display_name or image_id,
         "group": normalize_group(group),
         "filename": filename,
         "relativePath": _relative(filename),
@@ -779,6 +854,8 @@ def create_decor_image(file_storage, group: str = "", mode: str = "") -> dict:
         "createdAt": datetime.now().isoformat(),
         "updatedAt": datetime.now().isoformat(),
     }
+    if source:
+        record["source"] = source
 
     _rebuild_processed(record)
 
@@ -858,6 +935,12 @@ def update_decor_image(image_id: str, updates: dict) -> dict | None:
 
     if "enabled" in updates and updates["enabled"] is not None:
         record["enabled"] = bool(updates["enabled"])
+
+    # Hand-editing the used mark is the way back: an image spent on a batch that
+    # was cancelled, or one the user simply wants to run again, is freed here.
+    if "used" in updates and updates["used"] is not None:
+        record["used"] = bool(updates["used"])
+        record["usedAt"] = datetime.now().isoformat() if record["used"] else None
 
     if not processed_abs_path(record):
         regenerate = True
@@ -968,8 +1051,13 @@ def resolve_decor_image(image_id: str) -> tuple[dict, str] | None:
     return record, path
 
 
-def get_enabled_decor_images(group: str | None = None) -> list[dict]:
-    """Usable decor images; pass ``group`` to keep only one theme."""
+def get_enabled_decor_images(group: str | None = None, *, unused_only: bool = False) -> list[dict]:
+    """Usable decor images; pass ``group`` to keep only one theme.
+
+    ``unused_only`` drops the ones already spent — what a render needs. A
+    preview does not consume anything, so it leaves the flag off and can still
+    show a spent image.
+    """
     wanted = None if group is None else normalize_group(group)
     return [
         item
@@ -977,17 +1065,123 @@ def get_enabled_decor_images(group: str | None = None) -> list[dict]:
         if item.get("enabled", True)
         and processed_abs_path(item)
         and (wanted is None or decor_group_of(item) == wanted)
+        and not (unused_only and decor_is_used(item))
     ]
 
 
-def build_decor_rotation(image_ids: list[str], count: int) -> list[str]:
-    """Assign a decor image to each of ``count`` videos, shuffled without replacement.
+# --------------------------------------------------------------------------- #
+# One-time use
+# --------------------------------------------------------------------------- #
+# A decor image is a recognisable photo, not a neutral effect: the same living
+# room behind two videos reads as the same video. So an image is dealt to
+# exactly one render, marked ``used`` the moment it is dealt, and never enters a
+# rotation again. Running out is a normal state, not an error — the caller
+# swaps the video over to a layout that needs no decor image (see
+# ``story_video_routes._resolve_edit_selection``).
+#
+# The flag gates *allocation* only. ``resolve_decor_image`` ignores it on
+# purpose, so a retried or resumed batch still renders the image it was already
+# dealt.
 
-    The deck is shuffled, dealt out, then reshuffled — so a batch of 50 over 7
-    images uses all 7 in every run of 7, in a different order each time, and no
-    image is starved the way independent random picks would allow.
+
+def decor_is_used(record: dict) -> bool:
+    return bool(record.get("used"))
+
+
+def claim_decor_images(image_ids: list[str], count: int) -> tuple[list[str], int]:
+    """Take up to ``count`` unused decor images and mark them used, in one write.
+
+    Returns ``(claimed, usable_total)``: the ids dealt out — shuffled, all
+    distinct, and possibly fewer than ``count`` or empty — plus how many of
+    ``image_ids`` exist with a keyed PNG at all, spent or not. That second number
+    is what tells the two shortfalls apart: ``usable_total == 0`` means the
+    selection itself is broken (deleted, or never keyed) and deserves an error,
+    while a short ``claimed`` list only means the library ran out.
+
+    Picking and marking under a single index load/save is what keeps two batches
+    queued in the same moment from being dealt the same image.
     """
-    from src.utils.asset_rotation import deal_rotation
+    wanted = list(dict.fromkeys(
+        str(item or "").strip() for item in (image_ids or []) if str(item or "").strip()
+    ))
+    if not wanted or count <= 0:
+        return [], 0
 
-    usable = [image_id for image_id in image_ids if resolve_decor_image(image_id)]
-    return deal_rotation(usable, count)
+    index = load_decor_index()
+    by_id = {str(item.get("id")): item for item in index.get("images", [])}
+
+    usable = [image_id for image_id in wanted
+              if by_id.get(image_id) and processed_abs_path(by_id[image_id])]
+    free = [image_id for image_id in usable if not decor_is_used(by_id[image_id])]
+    random.shuffle(free)
+    claimed = free[:count]
+
+    if claimed:
+        now = datetime.now().isoformat()
+        for image_id in claimed:
+            record = by_id[image_id]
+            record["used"] = True
+            record["usedAt"] = now
+            record["updatedAt"] = now
+        save_decor_index(index)
+
+    logger.info(
+        f"[DecorImage] Claimed {len(claimed)}/{count} image(s) from {len(usable)} usable; "
+        f"{len(free) - len(claimed)} unused left in this selection."
+    )
+    return claimed, len(usable)
+
+
+def release_decor_images(image_ids) -> int:
+    """Put claimed images back in the pool. Returns how many were freed.
+
+    For the abort paths only: a batch that fails to be *created* after its
+    images were dealt would otherwise spend them on a batch that never runs.
+    """
+    wanted = {str(item or "").strip() for item in (image_ids or []) if str(item or "").strip()}
+    if not wanted:
+        return 0
+
+    index = load_decor_index()
+    freed = 0
+    for record in index.get("images", []):
+        if str(record.get("id")) in wanted and decor_is_used(record):
+            record["used"] = False
+            record["usedAt"] = None
+            record["updatedAt"] = datetime.now().isoformat()
+            freed += 1
+    if freed:
+        save_decor_index(index)
+        logger.info(f"[DecorImage] Released {freed} claimed image(s) back to the pool.")
+    return freed
+
+
+def reset_decor_used(group: str | None = None, image_ids=None) -> int:
+    """Clear the used mark so a set can be rotated again. Returns how many were cleared.
+
+    ``image_ids`` wins when given; otherwise ``group`` clears one theme and
+    ``None`` clears the whole library.
+    """
+    wanted = None
+    if image_ids is not None:
+        wanted = {str(item or "").strip() for item in image_ids if str(item or "").strip()}
+        if not wanted:
+            return 0
+    target_group = None if group is None else normalize_group(group)
+
+    index = load_decor_index()
+    cleared = 0
+    for record in index.get("images", []):
+        if not decor_is_used(record):
+            continue
+        if wanted is not None and str(record.get("id")) not in wanted:
+            continue
+        if wanted is None and target_group is not None and decor_group_of(record) != target_group:
+            continue
+        record["used"] = False
+        record["usedAt"] = None
+        record["updatedAt"] = datetime.now().isoformat()
+        cleared += 1
+    if cleared:
+        save_decor_index(index)
+    return cleared

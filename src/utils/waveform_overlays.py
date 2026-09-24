@@ -97,7 +97,7 @@ def build_waveform_rotation(overlay_ids: list[str], count: int) -> list[str]:
     """Chia cac song am da chon cho ``count`` video (bo bai xao).
 
     Cac id khong tra cuu duoc (da xoa, chua xu ly xong) bi loai truoc khi chia,
-    dung nhu :func:`src.utils.story_decor_images.build_decor_rotation`.
+    roi chia bang :func:`src.utils.asset_rotation.deal_rotation`.
     """
     from src.utils.asset_rotation import deal_rotation
 

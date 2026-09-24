@@ -47,6 +47,8 @@ import type {
   StoryPrefetchDiscardResponse,
   StoryPrefetchSession,
   StoryPrefetchStartRequest,
+  StoryProviderImage,
+  StoryProviderImageSearchResponse,
   StoryProviderVideo,
   StoryProviderVideoSearchResponse,
   StoryVideoProgress,
@@ -874,6 +876,19 @@ export async function uploadDecorImage(
   });
 }
 
+export async function searchDecorProviderImages(provider: StoryVideoProvider, query: string, page = 1) {
+  const params = new URLSearchParams({ q: query, page: String(page) });
+  return requestJson<StoryProviderImageSearchResponse>(`/api/story-video/decor-image-search/${provider}?${params}`);
+}
+
+export async function importDecorImage(item: StoryProviderImage, group?: string) {
+  return requestJson<{ image: StoryDecorImage }>("/api/story-video/decor-images/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ item, group: group ?? "" }),
+  });
+}
+
 export async function renameDecorGroup(from: string, to: string) {
   return requestJson<{ moved: number; groups: string[] }>(
     "/api/story-video/decor-images/group",
@@ -888,6 +903,17 @@ export async function renameDecorGroup(from: string, to: string) {
 export async function updateDecorImage(id: string, payload: Partial<StoryDecorImage>) {
   return requestJson<{ image: StoryDecorImage }>(`/api/story-video/decor-images/${id}`, {
     method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Bỏ dấu "đã dùng" để ảnh vào lại vòng xoay. Không truyền gì = toàn bộ thư viện.
+ */
+export async function resetDecorImagesUsed(payload: { group?: string; imageIds?: string[] } = {}) {
+  return requestJson<{ cleared: number }>("/api/story-video/decor-images/reset-used", {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });

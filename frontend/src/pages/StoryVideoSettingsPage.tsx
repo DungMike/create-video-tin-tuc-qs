@@ -1,4 +1,4 @@
-import { Check, Eye, Link as LinkIcon, Loader2, Pencil, Save, Sparkles, Star, Trash2, Upload, X } from "lucide-react";
+import { Check, Eye, Link as LinkIcon, Loader2, Pencil, Plus, Save, Sparkles, Star, Trash2, Upload, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
@@ -6,9 +6,11 @@ import { EmptyCard } from "@/components/empty-card";
 import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
 import { StoryDecorFrameEditor } from "@/components/StoryDecorFrameEditor";
+import { StoryDecorImageSearchPanel } from "@/components/StoryDecorImageSearchPanel";
 import { StoryOverlayPlacementEditor } from "@/components/StoryOverlayPlacementEditor";
 import { StoryLibraryManager } from "@/components/StoryLibraryManager";
 import { StoryLibraryNormalizePanel } from "@/components/StoryLibraryNormalizePanel";
+import { SectionNav, type SectionNavItem } from "@/components/section-nav";
 import { TopNav } from "@/components/top-nav";
 import {
   cornerToPlacement,
@@ -33,6 +35,7 @@ import {
   detectDecorFrame,
   getCtaOverlays,
   getDecorImages,
+  importDecorImage,
   getTVEffectStyles,
   getTVNoiseOverlayJob,
   getEffectPreviewJob,
@@ -44,6 +47,7 @@ import {
   renameDecorGroup,
   renderDecorFramePreview,
   renderEffectPreview,
+  resetDecorImagesUsed,
   saveCustomTVEffect,
   selectTVEffectStyle,
   updateCtaOverlay,
@@ -62,6 +66,7 @@ import type {
   EffectPreviewSource,
   SparklePreset,
   StoryDecorImage,
+  StoryProviderImage,
   TVEffectParams,
   TVEffectStyle,
   TVEffectTone,
@@ -352,8 +357,21 @@ function formFromNoiseOverlay(overlay?: TVNoiseOverlay): TVNoiseForm {
 const DECOR_UNGROUPED = "Chưa phân nhóm";
 // Gia tri sentinel trong <select>: chon no se mo o nhap ten nhom moi.
 const DECOR_NEW_GROUP = "__new_group__";
+// So anh Pexels/Pixabay tai song song khi import.
+const DECOR_IMPORT_CONCURRENCY = 4;
 
 const decorGroupOf = (item: StoryDecorImage) => (item.group ?? "").trim();
+
+const SETTINGS_SECTIONS: SectionNavItem[] = [
+  { id: "tv-effects", label: "Hieu ung TV 1990s" },
+  { id: "tv-noise", label: "TV Noise Overlays" },
+  { id: "effect-preview", label: "Preview hieu ung" },
+  { id: "waveforms", label: "Waveform" },
+  { id: "cta-overlay", label: "CTA overlay" },
+  { id: "clip-normalize", label: "Chuan hoa clip" },
+  { id: "decor-images", label: "Anh decor (khung TV)" },
+  { id: "clip-library", label: "Thu vien clip" },
+];
 
 export function StoryVideoSettingsPage() {
   const [overlays, setOverlays] = useState<WaveformOverlay[]>([]);
@@ -385,8 +403,14 @@ export function StoryVideoSettingsPage() {
   const [decorGroupEdit, setDecorGroupEdit] = useState<{ from: string; value: string } | null>(null);
   const [decorGroupInputFor, setDecorGroupInputFor] = useState<string | null>(null);
   const [decorGroupBusy, setDecorGroupBusy] = useState(false);
+  // Nhom tao moi nhung chua co anh: nhom chi ton tai tren record anh, nen giu
+  // tam o day toi khi anh dau tien duoc upload/import vao.
+  const [decorPendingGroups, setDecorPendingGroups] = useState<string[]>([]);
+  const [decorNewGroupName, setDecorNewGroupName] = useState<string | null>(null);
   // Upload nhieu anh mot luot: tien do tung file, roi hang doi duyet lan luot.
   const [decorUploadProgress, setDecorUploadProgress] = useState<{ done: number; total: number } | null>(null);
+  // Upload va import dung chung trang thai ban; cai nay chi de hien dung chu.
+  const [decorBusyKind, setDecorBusyKind] = useState<"upload" | "import">("upload");
   // Id cac anh vua upload, dung thu tu chon file. Rong = khong con duyet.
   const [decorReviewQueue, setDecorReviewQueue] = useState<string[]>([]);
   const [decorReviewIndex, setDecorReviewIndex] = useState(0);
@@ -463,9 +487,13 @@ export function StoryVideoSettingsPage() {
       const group = decorGroupOf(item);
       if (!seen.includes(group)) seen.push(group);
     }
+    // Nhom vua tao bang nut "Nhom moi" chua co anh nao, nen chua co trong record.
+    for (const group of decorPendingGroups) {
+      if (!seen.includes(group)) seen.push(group);
+    }
     // "Chua phan nhom" luon xuong cuoi du no xuat hien som.
     return seen.sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b, "vi")));
-  }, [decorImages]);
+  }, [decorImages, decorPendingGroups]);
 
   const decorByGroup = useMemo(
     () =>
@@ -698,37 +726,88 @@ export function StoryVideoSettingsPage() {
         }
         setDecorUploadProgress({ done: uploaded.length + failed.length, total: list.length });
       }
-
-      if (uploaded.length) {
-        await loadDecorImages();
-        // Hang doi duyet: cau hinh nen xanh lan luot cho tung anh vua upload.
-        setDecorReviewQueue(uploaded.map((image) => image.id));
-        setDecorReviewIndex(0);
-        setDecorReviewDone([]);
-        setSelectedDecorId(uploaded[0].id);
-        const group = uploaded[0].group ?? "";
-        // Neu dang loc theo mot nhom khac, anh vua upload se bi an di — keo bo loc
-        // sang nhom cua no de nguoi dung thay ngay ket qua.
-        setDecorGroupFilter((current) => (current === null || current === group ? current : group));
-        // Anh khong co nen xanh khong phai loi: backend da bat san che do tu ve
-        // va dat mot khung 16:9 giua anh cho nguoi dung keo.
-        const manual = uploaded.filter((image) => image.autoDetected === false).length;
-        setDecorNotice(
-          `Đã upload ${uploaded.length} ảnh. ` +
-            (manual
-              ? `${manual} ảnh chưa có nền xanh — đã bật chế độ “Tự tạo vùng nền xanh”, hãy kéo ` +
-                "khung 16:9 trùm khít mặt màn hình rồi bấm “Lưu khung”. "
-              : "Tất cả đều dò được vùng nền xanh. ") +
-            "Duyệt lần lượt từng ảnh ở thanh “Duyệt ảnh vừa upload”; lưu xong sẽ tự sang ảnh kế tiếp.",
-        );
-      }
-      if (failed.length) {
-        setErrorMessage(`Khong upload duoc ${failed.length}/${list.length} anh decor: ${failed.join("; ")}`);
-      }
+      await finishDecorBatch(uploaded, failed, list.length, "upload");
     } finally {
       setIsDecorUploading(false);
       setDecorUploadProgress(null);
     }
+  };
+
+  /** Sau mot luot upload/import: nap lai thu vien va mo hang doi duyet cho anh moi. */
+  const finishDecorBatch = async (
+    uploaded: StoryDecorImage[],
+    failed: string[],
+    total: number,
+    verb: "upload" | "import",
+  ) => {
+    if (uploaded.length) {
+      await loadDecorImages();
+      // Hang doi duyet: cau hinh nen xanh lan luot cho tung anh vua upload.
+      setDecorReviewQueue(uploaded.map((image) => image.id));
+      setDecorReviewIndex(0);
+      setDecorReviewDone([]);
+      setSelectedDecorId(uploaded[0].id);
+      const group = uploaded[0].group ?? "";
+      // Neu dang loc theo mot nhom khac, anh vua upload se bi an di — keo bo loc
+      // sang nhom cua no de nguoi dung thay ngay ket qua.
+      setDecorGroupFilter((current) => (current === null || current === group ? current : group));
+      // Anh khong co nen xanh khong phai loi: backend da bat san che do tu ve
+      // va dat mot khung 16:9 giua anh cho nguoi dung keo.
+      const manual = uploaded.filter((image) => image.autoDetected === false).length;
+      setDecorNotice(
+        `Đã ${verb} ${uploaded.length} ảnh. ` +
+          (verb === "import"
+            ? "Ảnh import luôn ở chế độ tự vẽ — hãy kéo khung 16:9 trùm khít mặt màn hình rồi bấm “Lưu khung”. "
+            : manual
+            ? `${manual} ảnh chưa có nền xanh — đã bật chế độ “Tự tạo vùng nền xanh”, hãy kéo ` +
+              "khung 16:9 trùm khít mặt màn hình rồi bấm “Lưu khung”. "
+            : "Tất cả đều dò được vùng nền xanh. ") +
+          "Duyệt lần lượt từng ảnh ở thanh “Duyệt ảnh vừa upload”; lưu xong sẽ tự sang ảnh kế tiếp.",
+      );
+    }
+    if (failed.length) {
+      setErrorMessage(`Khong ${verb} duoc ${failed.length}/${total} anh decor: ${failed.join("; ")}`);
+    }
+  };
+
+  /** Import anh tim duoc tren Pexels/Pixabay; tra ve key `provider:id` da import. */
+  const handleDecorImport = async (items: StoryProviderImage[]) => {
+    if (!items.length) return [];
+    setIsDecorUploading(true);
+    setErrorMessage(null);
+    setDecorNotice(null);
+    setDecorUploadProgress({ done: 0, total: items.length });
+    const uploaded: StoryDecorImage[] = [];
+    const failed: string[] = [];
+    const doneKeys: string[] = [];
+    setDecorBusyKind("import");
+    try {
+      // Anh import khong do nen xanh (luon tu ve), nen gan nhu toan bo thoi gian
+      // la tai tu CDN — 3s toi hon 1 phut moi anh. Chay song song vai anh.
+      const queue = [...items];
+      const worker = async () => {
+        for (let item = queue.shift(); item; item = queue.shift()) {
+          const key = `${item.provider}:${item.id}`;
+          try {
+            const res = await importDecorImage(item, decorUploadGroup);
+            uploaded.push(res.image);
+            doneKeys.push(key);
+          } catch (err) {
+            // 409 = da co trong thu vien: van tinh la xong de panel danh dau "Da co".
+            if (err instanceof ApiError && err.status === 409) doneKeys.push(key);
+            else failed.push(`${key} (${err instanceof ApiError ? err.message : "loi khong xac dinh"})`);
+          }
+          setDecorUploadProgress({ done: doneKeys.length + failed.length, total: items.length });
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(DECOR_IMPORT_CONCURRENCY, items.length) }, worker));
+      await finishDecorBatch(uploaded, failed, items.length, "import");
+    } finally {
+      setIsDecorUploading(false);
+      setDecorUploadProgress(null);
+      setDecorBusyKind("upload");
+    }
+    return doneKeys;
   };
 
   /** Mo mot anh trong hang doi duyet (index va o dang chon luon di cung nhau). */
@@ -797,6 +876,20 @@ export function StoryVideoSettingsPage() {
     }
   };
 
+  /** Tao nhom rong va chon lam nhom dich cho upload/import ke tiep. */
+  const handleDecorGroupCreate = () => {
+    const name = (decorNewGroupName ?? "").trim();
+    if (!name) return;
+    // Trung ten nhom da co (khong phan biet hoa thuong) thi chon lai nhom do.
+    const existing = decorGroups.find((group) => group.toLowerCase() === name.toLowerCase());
+    const group = existing ?? name;
+    if (!existing) setDecorPendingGroups((current) => [...current, group]);
+    setDecorUploadGroup(group);
+    setDecorGroupFilter(group);
+    setDecorNewGroupName(null);
+    setDecorNotice(`Đã chọn nhóm “${group}”. Ảnh upload hoặc import tiếp theo sẽ vào nhóm này.`);
+  };
+
   const handleDecorGroupRename = async (from: string, to: string) => {
     const next = to.trim();
     setDecorGroupEdit(null);
@@ -804,6 +897,7 @@ export function StoryVideoSettingsPage() {
     setErrorMessage(null);
     setDecorGroupBusy(true);
     try {
+      setDecorPendingGroups((current) => current.map((group) => (group === from ? next : group)));
       await renameDecorGroup(from, next);
       // Bo loc va o nhom mac dinh cua upload deu tro toi ten cu, keo ca hai sang
       // ten moi de man hinh khong bong dung rong.
@@ -831,6 +925,34 @@ export function StoryVideoSettingsPage() {
       }
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the doi trang thai ca nhom.");
+    } finally {
+      setDecorGroupBusy(false);
+    }
+  };
+
+  /**
+   * Bỏ dấu “đã dùng” cho 1 ảnh. Mỗi ảnh decor chỉ chia cho 1 video rồi bị
+   * đánh dấu, nên đây là đường quay lại khi muốn dùng ảnh thêm lần nữa (hoặc khi
+   * batch đã nhận ảnh bị hủy giữa chừng).
+   */
+  const handleDecorUsedReset = async (imageId: string) => {
+    setErrorMessage(null);
+    try {
+      const res = await updateDecorImage(imageId, { used: false });
+      setDecorImages((current) => current.map((item) => (item.id === imageId ? res.image : item)));
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the bo danh dau da dung.");
+    }
+  };
+
+  const handleDecorGroupUsedReset = async (group: string) => {
+    setErrorMessage(null);
+    setDecorGroupBusy(true);
+    try {
+      await resetDecorImagesUsed({ group });
+      await loadDecorImages();
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the bo danh dau ca nhom.");
     } finally {
       setDecorGroupBusy(false);
     }
@@ -1316,1449 +1438,1518 @@ export function StoryVideoSettingsPage() {
 
       {errorMessage ? <StatusAlert title="Co loi xay ra" message={errorMessage} variant="destructive" /> : null}
 
-      <PageSection>
-        <div className="mb-4 space-y-1">
-          <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
-            <Sparkles className="size-4 text-primary" />
-            Hieu ung TV 1990s
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Cac hieu ung dung filter co san cua FFmpeg (mau sac, chroma bleed, scanline, flicker, vignette) — render GPU
-            (NVDEC + NVENC) trong cung 1 pass voi overlay. Bam Preview de render thu 4 giay tu clip mau trong thu vien.
-          </p>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {tvEffectStyles.map((style) => {
-            const isSelected = style.id === selectedEffectId;
-            const isPreviewing = previewingEffectId === style.id;
-            const bust = effectPreviewBust[style.id];
-            const previewSrc = style.previewPath ? `/media/${style.previewPath}${bust ? `?t=${bust}` : ""}` : null;
-            return (
-              <div
-                key={style.id}
-                className={`flex flex-col gap-3 rounded-lg border p-4 transition-colors ${
-                  isSelected ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-sm font-semibold text-foreground">{style.name}</span>
-                  {isSelected ? (
-                    <Badge className="rounded-full">
-                      <Check className="mr-1 size-3" />
-                      Dang dung
-                    </Badge>
-                  ) : null}
-                </div>
-                <p className="min-h-10 text-xs text-muted-foreground">{style.description}</p>
-
-                {previewSrc ? (
-                  <video src={previewSrc} controls loop muted className="aspect-video w-full rounded-md bg-black object-contain" />
-                ) : (
-                  <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-border bg-background/50 text-xs text-muted-foreground">
-                    Chua co preview
-                  </div>
-                )}
-
-                <div className="mt-auto flex flex-wrap gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => void handleEffectPreview(style.id)}
-                    disabled={previewingEffectId !== null}
-                  >
-                    {isPreviewing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
-                    {isPreviewing ? "Dang render..." : "Preview 4s"}
-                  </Button>
-                  {!isSelected ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={() => void handleSelectEffect(style.id)}
-                      disabled={isSelectingEffect}
-                    >
-                      {isSelectingEffect ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Check className="mr-2 size-4" />}
-                      Dung hieu ung nay
-                    </Button>
-                  ) : null}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        <div
-          className={`mt-6 rounded-lg border p-4 ${
-            selectedEffectId === "custom" ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
-          }`}
-        >
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <div className="space-y-1">
-              <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-                Tuy chinh hieu ung
-                {selectedEffectId === "custom" ? (
-                  <Badge className="rounded-full">
-                    <Check className="mr-1 size-3" />
-                    Dang dung
-                  </Badge>
-                ) : null}
-              </h3>
-              <p className="text-xs text-muted-foreground">
-                Chinh tung thong so (do nhieu, vien toi, tan suat nhay...) roi render preview truoc khi ap dung. De nhay
-                de chiu: do nhay &le; 0.02 va toc do 2-5 Hz.
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <select
-                defaultValue=""
-                onChange={(event) => {
-                  if (event.target.value) handleLoadParamsFromPreset(event.target.value);
-                  event.target.value = "";
-                }}
-                className="h-9 rounded-md border border-input bg-background px-3 text-xs"
-              >
-                <option value="">Nap thong so tu preset...</option>
-                {tvEffectStyles
-                  .filter((style) => style.id !== "none")
-                  .map((style) => (
-                    <option key={style.id} value={style.id}>
-                      {style.name}
-                    </option>
-                  ))}
-              </select>
-            </div>
-          </div>
-
-          <div className="grid gap-5 lg:grid-cols-[1fr_minmax(280px,420px)]">
-            <div className="grid content-start gap-3 sm:grid-cols-3 md:grid-cols-4">
-              <div className="grid gap-1.5">
-                <Label className="text-xs">Tong mau</Label>
-                <select
-                  value={effectForm.tone}
-                  onChange={(event) => setEffectForm((current) => ({ ...current, tone: event.target.value as TVEffectTone }))}
-                  className="h-9 rounded-md border border-input bg-background px-2 text-sm"
-                >
-                  {TONE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {EFFECT_PARAM_FIELDS.map((field) => (
-                <div key={field.key} className="grid gap-1.5">
-                  <Label className="text-xs">
-                    {field.label} <span className="text-muted-foreground">({field.min}–{field.max})</span>
-                  </Label>
-                  <Input
-                    type="number"
-                    min={field.min}
-                    max={field.max}
-                    step={field.step}
-                    value={effectForm[field.key]}
-                    onChange={(event) =>
-                      setEffectForm((current) => ({ ...current, [field.key]: event.target.value }))
-                    }
-                    className="h-9"
-                  />
-                </div>
-              ))}
-              <div className="col-span-full flex flex-wrap gap-3 pt-1">
-                <Button type="button" variant="outline" onClick={() => void handleCustomPreview()} disabled={isCustomPreviewing}>
-                  {isCustomPreviewing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
-                  {isCustomPreviewing ? "Dang render..." : "Render preview 4s"}
-                </Button>
-                <Button type="button" onClick={() => void handleCustomSave()} disabled={isCustomSaving}>
-                  {isCustomSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
-                  Luu & dung cau hinh nay
-                </Button>
-              </div>
-            </div>
-
-            {customPreviewPath ? (
-              <video
-                src={`/media/${customPreviewPath}${customPreviewBust ? `?t=${customPreviewBust}` : ""}`}
-                controls
-                loop
-                muted
-                className="aspect-video w-full self-start rounded-md bg-black object-contain"
-              />
-            ) : (
-              <div className="flex aspect-video w-full items-center justify-center self-start rounded-md border border-dashed border-border bg-background/50 text-xs text-muted-foreground">
-                Chua co preview custom — chinh thong so roi bam Render preview
-              </div>
-            )}
-          </div>
-        </div>
-      </PageSection>
-
-      <PageSection>
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <h2 className="text-base font-semibold text-foreground">TV Noise Overlays</h2>
-            <p className="text-sm text-muted-foreground">Quan ly cac lop nhieu nen den, preprocess thanh alpha MOV va ap dung global cho Story Video.</p>
-          </div>
-          {noiseJobMessage ? <Badge variant="secondary" className="rounded-full">{noiseJobMessage}</Badge> : null}
-        </div>
-
-        {/* min-w-0 tren cot trai: mac dinh grid item la min-width:auto, nen mot ten
-            file dai (khong xuong dong duoc) keo cot rong hon track 380px va de len
-            panel cau hinh ben phai. */}
-        <div className="grid gap-5 lg:grid-cols-[minmax(280px,380px)_1fr]">
-          <div className="min-w-0 space-y-4">
-            <div className="grid gap-2">
-              <Label>Upload TV noise</Label>
-              <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
-                {isNoiseUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
-                <span>{isNoiseUploading ? "Dang tao alpha MOV..." : "Chon video noise nen den"}</span>
-                <Input
-                  type="file"
-                  accept=".mp4,.mov,.mkv,.webm"
-                  className="hidden"
-                  disabled={isNoiseUploading}
-                  onChange={(event) => void handleNoiseUpload(event.currentTarget.files?.[0] ?? null)}
-                />
-              </label>
-            </div>
-
-            <div className="grid gap-2">
-              <Label>YouTube TV noise URL</Label>
-              <div className="flex gap-2">
-                <Input
-                  value={youtubeNoiseUrl}
-                  onChange={(event) => setYoutubeNoiseUrl(event.target.value)}
-                  placeholder="https://www.youtube.com/watch?v=..."
-                  disabled={isNoiseImporting}
-                />
-                <Button type="button" variant="secondary" onClick={() => void handleNoiseYoutubeImport()} disabled={isNoiseImporting}>
-                  {isNoiseImporting ? <Loader2 className="mr-2 size-4 animate-spin" /> : <LinkIcon className="mr-2 size-4" />}
-                  Import
-                </Button>
-              </div>
-            </div>
-
-            {sparklePresets.length ? (
-              <div className="grid gap-2 rounded-lg border border-border/70 bg-background/70 p-3">
-                <Label>Tạo lớp lấp lánh</Label>
-                <select
-                  value={sparklePresetId}
-                  onChange={(event) => {
-                    const next = sparklePresets.find((item) => item.id === event.target.value);
-                    setSparklePresetId(event.target.value);
-                    if (next) setSparkleParams(paramsToForm(next));
-                  }}
-                  className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-                >
-                  {sparklePresets.map((preset) => (
-                    <option key={preset.id} value={preset.id}>
-                      {preset.name}
-                    </option>
-                  ))}
-                </select>
-                {selectedSparklePreset ? (
-                  <>
-                    <p className="text-xs text-muted-foreground">{selectedSparklePreset.description}</p>
-                    <div className="grid gap-1">
-                      <Label className="text-xs font-normal text-muted-foreground">
-                        Tên lớp (để phân biệt các mẫu)
-                      </Label>
-                      <Input
-                        value={sparkleName}
-                        placeholder={selectedSparklePreset.name}
-                        onChange={(event) => setSparkleName(event.target.value)}
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      {selectedSparklePreset.paramsUsed.map((key) => (
-                        <div key={key} className="grid gap-1">
-                          <Label className="text-xs font-normal text-muted-foreground">
-                            {SPARKLE_PARAM_LABELS[key] ?? key}
-                          </Label>
-                          <Input
-                            type="number"
-                            step="any"
-                            value={sparkleParams[key] ?? ""}
-                            onChange={(event) =>
-                              setSparkleParams((current) => ({ ...current, [key]: event.target.value }))
-                            }
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                ) : null}
-                <Button type="button" variant="secondary" onClick={() => void handleSparkleCreate()} disabled={isSparkleCreating}>
-                  {isSparkleCreating ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
-                  {isSparkleCreating ? "Dang dung lop lap lanh..." : "Tao lop lap lanh"}
-                </Button>
-                <p className="text-xs text-muted-foreground">
-                  Dung mot lan roi cache lai (25-90 giay). Lop tao ra nam trong danh sach ben duoi: bat/tat,
-                  chinh opacity va thu tu nhu moi overlay khac. Lớp vừa tạo sẽ tự thành lớp đang dùng.
-                </p>
-              </div>
-            ) : null}
-
-            {tvNoiseOverlays.length ? (
-              <p className="text-xs text-muted-foreground">
-                Mỗi lần render chỉ áp <span className="font-semibold text-foreground">một</span> lớp hiệu ứng. Bật một lớp
-                sẽ tự tắt các lớp còn lại — chúng vẫn nằm trong danh sách để bật lại sau.
-              </p>
-            ) : null}
-
-            {tvNoiseOverlays.length ? (
-              <div className="grid gap-2">
-                {tvNoiseOverlays.map((overlay) => (
-                  <button
-                    key={overlay.id}
-                    type="button"
-                    onClick={() => setSelectedNoiseId(overlay.id)}
-                    className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${
-                      selectedNoise?.id === overlay.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
-                    }`}
-                  >
-                    <div className="flex min-w-0 items-center justify-between gap-2">
-                      <span className="truncate text-sm font-semibold text-foreground">{overlay.name}</span>
-                      <Badge
-                        variant={overlay.status === "failed" ? "destructive" : overlay.status === "ready" ? "secondary" : "outline"}
-                        className="rounded-full"
-                      >
-                        {overlay.status}
-                      </Badge>
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      #{overlay.order} | opacity {Math.round((overlay.opacity ?? 0) * 100)}% |{" "}
-                      {overlay.enabled ? (
-                        <span className="font-semibold text-primary">đang dùng khi render</span>
-                      ) : (
-                        "tắt"
-                      )}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <EmptyCard title="Chua co TV noise" description="Upload hoac import video noise nen den de bat dau." />
-            )}
-          </div>
-
-          {selectedNoise ? (
-            <div className="grid min-w-0 gap-5">
-              {noiseDemoSrc || selectedNoise.relativePath ? (
-                <video
-                  src={noiseDemoSrc || `/media/${selectedNoise.relativePath}`}
-                  controls
-                  className="aspect-video w-full rounded-lg bg-black object-contain"
-                />
-              ) : null}
-
-              {selectedNoise.error ? (
-                <StatusAlert title="TV noise preprocess failed" message={selectedNoise.error} variant="destructive" />
-              ) : null}
-
-              {/* Thong so cua lop lap lanh da tao: khong hien thi thi hai bien the
-                  cung preset trong y het nhau va khong the dung lai de tinh chinh. */}
-              {selectedNoise.kind === "sparkle" && selectedNoise.meta?.params ? (
-                <div className="grid gap-2 rounded-lg border border-border/70 bg-background/70 p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <Label className="text-xs font-normal text-muted-foreground">
-                      Thông số đã lưu ·{" "}
-                      {sparklePresets.find((preset) => preset.id === selectedNoise.meta?.presetId)?.name ??
-                        selectedNoise.meta?.presetId ??
-                        "sparkle"}
-                    </Label>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        const presetId = selectedNoise.meta?.presetId ?? "";
-                        const preset = sparklePresets.find((item) => item.id === presetId);
-                        if (!preset) return;
-                        setSparklePresetId(presetId);
-                        setSparkleParams(
-                          Object.fromEntries(
-                            preset.paramsUsed.map((key) => [
-                              key,
-                              String(selectedNoise.meta?.params?.[key] ?? preset.params[key] ?? 0),
-                            ]),
-                          ),
-                        );
-                        setSparkleName(`${selectedNoise.name} (copy)`);
-                      }}
-                    >
-                      Nạp vào form tạo lớp
-                    </Button>
-                  </div>
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-3">
-                    {Object.entries(selectedNoise.meta.params).map(([key, value]) => (
-                      <div key={key} className="flex min-w-0 justify-between gap-2">
-                        <span className="truncate">{SPARKLE_PARAM_LABELS[key] ?? key}</span>
-                        <span className="font-medium text-foreground">{value}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                <div className="grid min-w-0 gap-2">
-                  <Label>Trang thai</Label>
-                  <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={noiseForm.enabled}
-                      onChange={(event) => setNoiseForm((current) => ({ ...current, enabled: event.target.checked }))}
-                    />
-                    Dùng lớp này khi render
-                  </label>
-                </div>
-
-                <div className="grid min-w-0 gap-2">
-                  <Label>Blend</Label>
-                  <select
-                    value={noiseForm.blendMode}
-                    onChange={(event) =>
-                      setNoiseForm((current) => ({ ...current, blendMode: event.target.value as TVNoiseForm["blendMode"] }))
-                    }
-                    className="h-10 w-full min-w-0 truncate rounded-md border border-input bg-background px-3 text-sm"
-                  >
-                    <option value="alpha">Alpha &mdash; key nen den</option>
-                    <option value="screen">Screen &mdash; cong sang</option>
-                    <option value="luma">Luma &mdash; lop lap lanh</option>
-                  </select>
-                </div>
-
-                <div className="grid min-w-0 gap-2">
-                  <Label>Opacity</Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    max="1"
-                    step="0.01"
-                    value={noiseForm.opacity}
-                    onChange={(event) => setNoiseForm((current) => ({ ...current, opacity: event.target.value }))}
-                  />
-                </div>
-
-                {/* Cac o duoi day chi co nghia voi dung mot blend mode, nen an han
-                    thay vi disable: form 7 cot truoc day bi vo o man hinh hep. */}
-                {noiseForm.blendMode === "luma" ? (
-                  <div className="grid min-w-0 gap-2">
-                    <Label>Luma gain</Label>
-                    <Input
-                      type="number"
-                      min="1"
-                      max="8"
-                      step="0.1"
-                      value={noiseForm.lumaGain}
-                      onChange={(event) => setNoiseForm((current) => ({ ...current, lumaGain: event.target.value }))}
-                    />
-                  </div>
-                ) : null}
-
-                {noiseForm.blendMode === "alpha" ? (
-                  <>
-                    <div className="grid min-w-0 gap-2">
-                      <Label>Tolerance</Label>
-                      <Input
-                        type="number"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        value={noiseForm.tolerance}
-                        onChange={(event) => setNoiseForm((current) => ({ ...current, tolerance: event.target.value }))}
-                      />
-                    </div>
-                    <div className="grid min-w-0 gap-2">
-                      <Label>Softness</Label>
-                      <Input
-                        type="number"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        value={noiseForm.softness}
-                        onChange={(event) => setNoiseForm((current) => ({ ...current, softness: event.target.value }))}
-                      />
-                    </div>
-                  </>
-                ) : null}
-
-                <div className="grid min-w-0 gap-2">
-                  <Label>Order</Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    step="1"
-                    value={noiseForm.order}
-                    onChange={(event) => setNoiseForm((current) => ({ ...current, order: event.target.value }))}
-                  />
-                </div>
-              </div>
-
-              <p className="text-xs text-muted-foreground">{BLEND_MODE_HINTS[noiseForm.blendMode]}</p>
-
-              <div className="flex flex-wrap gap-3">
-                <Button type="button" onClick={handleNoiseSave} disabled={isNoiseSaving}>
-                  {isNoiseSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
-                  Luu TV noise
-                </Button>
-                <Button type="button" variant="outline" onClick={() => void handleGenerateNoiseDemo()} disabled={isGeneratingNoiseDemo || selectedNoise.status !== "ready"}>
-                  {isGeneratingNoiseDemo ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
-                  Demo 3s
-                </Button>
-                <Button type="button" variant="destructive" onClick={() => void handleNoiseDelete(selectedNoise.id)}>
-                  <Trash2 className="mr-2 size-4" />
-                  Xoa
-                </Button>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      </PageSection>
-
-      <PageSection>
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <h2 className="text-base font-semibold text-foreground">Preview hieu ung tren video that</h2>
-            <p className="text-sm text-muted-foreground">
-              Tai len vai clip ngan 3-5s giong trong thu vien, roi render de xem ca chong hieu ung
-              (style + cac lop overlay dang bat + song am + CTA) tren dung loai canh ban se dung.
-            </p>
-          </div>
-          {previewMessage ? <Badge variant="secondary" className="rounded-full">{previewMessage}</Badge> : null}
-        </div>
-
-        {/* min-w-0 tren cot trai: mac dinh grid item la min-width:auto, nen mot ten
-            file dai (khong xuong dong duoc) keo cot rong hon track 380px va de len
-            panel cau hinh ben phai. */}
-        <div className="grid gap-5 lg:grid-cols-[minmax(280px,380px)_1fr]">
-          <div className="min-w-0 space-y-4">
-            <div className="grid gap-2">
-              <Label>Tai len bo clip</Label>
-              <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-center text-sm text-muted-foreground">
-                {isPreviewUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
-                <span>{isPreviewUploading ? "Dang chuan hoa va ghep..." : "Chon nhieu clip cung luc (toi da 24)"}</span>
-                <Input
-                  type="file"
-                  multiple
-                  accept=".mp4,.mov,.mkv,.webm"
-                  className="hidden"
-                  disabled={isPreviewUploading}
-                  onChange={(event) => void handlePreviewUpload(event.currentTarget.files)}
-                />
-              </label>
-              <p className="text-xs text-muted-foreground">
-                Clip duoc chuan hoa ve dung dinh dang thu vien roi ghep lai mot lan. Sau do doi thong so
-                bao nhieu lan cung duoc, chi phai render lai buoc hieu ung.
+      <div className="grid gap-6 lg:grid-cols-[200px_minmax(0,1fr)] lg:items-start">
+        <SectionNav items={SETTINGS_SECTIONS} />
+        <div className="flex min-w-0 flex-col gap-6">
+          <PageSection id="tv-effects">
+            <div className="mb-4 space-y-1">
+              <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+                <Sparkles className="size-4 text-primary" />
+                Hieu ung TV 1990s
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                Cac hieu ung dung filter co san cua FFmpeg (mau sac, chroma bleed, scanline, flicker, vignette) — render GPU
+                (NVDEC + NVENC) trong cung 1 pass voi overlay. Bam Preview de render thu 4 giay tu clip mau trong thu vien.
               </p>
             </div>
 
-            {previewSources.length ? (
-              <div className="grid gap-2">
-                {previewSources.map((source) => (
-                  <button
-                    key={source.id}
-                    type="button"
-                    onClick={() => setSelectedPreviewId(source.id)}
-                    className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${
-                      selectedPreviewSource?.id === source.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
-                    }`}
-                  >
-                    <div className="truncate text-sm font-semibold text-foreground">{source.name}</div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      {source.clipCount} clip | {source.durationSeconds}s
-                      {source.previewPath ? " | da co preview" : " | chua render"}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <EmptyCard title="Chua co bo clip nao" description="Tai len vai clip ngan de xem thu hieu ung." />
-            )}
-          </div>
-
-          {selectedPreviewSource ? (
-            <div className="grid gap-5">
-              {selectedPreviewSource.previewPath ? (
-                <video
-                  key={selectedPreviewSource.previewPath}
-                  src={`/media/${selectedPreviewSource.previewPath}`}
-                  controls
-                  className="aspect-video w-full rounded-lg bg-black object-contain"
-                />
-              ) : (
-                <div className="flex aspect-video w-full items-center justify-center rounded-lg border border-dashed border-border bg-background/70 text-sm text-muted-foreground">
-                  Chua render preview cho bo clip nay.
-                </div>
-              )}
-
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={previewOptions.includeStyle}
-                    onChange={(event) => setPreviewOptions((current) => ({ ...current, includeStyle: event.target.checked }))}
-                  />
-                  Ap style mau
-                </label>
-                <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={previewOptions.includeOverlays}
-                    onChange={(event) => setPreviewOptions((current) => ({ ...current, includeOverlays: event.target.checked }))}
-                  />
-                  Ap cac lop overlay
-                </label>
-                <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={previewOptions.compare}
-                    onChange={(event) => setPreviewOptions((current) => ({ ...current, compare: event.target.checked }))}
-                  />
-                  So sanh canh nhau
-                </label>
-                <div className="grid min-w-0 gap-2">
-                  <Label>Anh decor</Label>
-                  <select
-                    value={previewDecorId}
-                    onChange={(event) => setPreviewDecorId(event.target.value)}
-                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-                  >
-                    <option value="">Khong dung anh decor</option>
-                    {decorImages.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.group ? `[${item.group}] ${item.name}` : item.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="grid min-w-0 gap-2">
-                  <Label>Gioi han (giay)</Label>
-                  <Input
-                    type="number"
-                    min="1"
-                    max="90"
-                    step="1"
-                    value={previewOptions.maxSeconds}
-                    onChange={(event) => setPreviewOptions((current) => ({ ...current, maxSeconds: event.target.value }))}
-                  />
-                </div>
-              </div>
-
-              {selectedPreviewSource.appliedDecorName ? (
-                <p className="text-xs text-muted-foreground">
-                  Preview nay dang dung anh decor: <strong>{selectedPreviewSource.appliedDecorName}</strong>
-                </p>
-              ) : null}
-
-              {selectedPreviewSource.appliedLayers?.length ? (
-                <div className="flex flex-wrap gap-2">
-                  {selectedPreviewSource.appliedLayers.map((layer, index) => (
-                    <Badge key={layer.id ?? index} variant="outline" className="rounded-full">
-                      {layer.name} · {layer.blendMode}
-                    </Badge>
-                  ))}
-                </div>
-              ) : null}
-
-              <div className="flex flex-wrap gap-3">
-                <Button type="button" onClick={() => void handlePreviewRender()} disabled={isPreviewRendering}>
-                  {isPreviewRendering ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
-                  {isPreviewRendering ? "Dang render..." : "Render preview"}
-                </Button>
-                <Button type="button" variant="destructive" onClick={() => void handlePreviewDelete(selectedPreviewSource.id)}>
-                  <Trash2 className="mr-2 size-4" />
-                  Xoa bo clip
-                </Button>
-              </div>
-
-              <p className="text-xs text-muted-foreground">
-                Preview dung dung chuoi filter ma buoc render that dung, nen ket qua khop nhau. Chay tren CPU
-                va o 1080p, nen cho khoang 3-4 giay xu ly cho moi giay video.
-              </p>
-            </div>
-          ) : null}
-        </div>
-      </PageSection>
-
-
-      <PageSection>
-        <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
-          <div className="space-y-4">
-            <div className="grid gap-2">
-              <Label>Upload waveform</Label>
-              <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
-                {isUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
-                <span>{isUploading ? "Dang tao alpha MOV..." : "Chon video waveform"}</span>
-                <Input
-                  type="file"
-                  accept=".mp4,.mov,.mkv,.webm"
-                  className="hidden"
-                  disabled={isUploading}
-                  onChange={(event) => void handleUpload(event.currentTarget.files?.[0] ?? null)}
-                />
-              </label>
-            </div>
-
-            {overlays.length ? (
-              <div className="grid gap-2">
-                {overlays.map((overlay) => (
-                  <button
-                    key={overlay.id}
-                    type="button"
-                    onClick={() => setSelectedId(overlay.id)}
-                    className={`rounded-lg border p-3 text-left transition-colors ${
-                      selected?.id === overlay.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {tvEffectStyles.map((style) => {
+                const isSelected = style.id === selectedEffectId;
+                const isPreviewing = previewingEffectId === style.id;
+                const bust = effectPreviewBust[style.id];
+                const previewSrc = style.previewPath ? `/media/${style.previewPath}${bust ? `?t=${bust}` : ""}` : null;
+                return (
+                  <div
+                    key={style.id}
+                    className={`flex flex-col gap-3 rounded-lg border p-4 transition-colors ${
+                      isSelected ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-semibold text-foreground">{overlay.name}</span>
-                      {overlay.isDefault ? (
+                      <span className="truncate text-sm font-semibold text-foreground">{style.name}</span>
+                      {isSelected ? (
                         <Badge className="rounded-full">
-                          <Star className="mr-1 size-3" />
-                          Default
+                          <Check className="mr-1 size-3" />
+                          Dang dung
                         </Badge>
                       ) : null}
                     </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      {overlay.durationSeconds}s | {overlay.scaleWidth ?? 420}px | {placementLabel(overlay, "bottom_right")}
+                    <p className="min-h-10 text-xs text-muted-foreground">{style.description}</p>
+
+                    {previewSrc ? (
+                      <video src={previewSrc} controls loop muted className="aspect-video w-full rounded-md bg-black object-contain" />
+                    ) : (
+                      <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-border bg-background/50 text-xs text-muted-foreground">
+                        Chua co preview
+                      </div>
+                    )}
+
+                    <div className="mt-auto flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void handleEffectPreview(style.id)}
+                        disabled={previewingEffectId !== null}
+                      >
+                        {isPreviewing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
+                        {isPreviewing ? "Dang render..." : "Preview 4s"}
+                      </Button>
+                      {!isSelected ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={() => void handleSelectEffect(style.id)}
+                          disabled={isSelectingEffect}
+                        >
+                          {isSelectingEffect ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Check className="mr-2 size-4" />}
+                          Dung hieu ung nay
+                        </Button>
+                      ) : null}
                     </div>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <EmptyCard title="Chua co waveform" description="Upload video nen xanh de tao overlay alpha mac dinh." />
-            )}
-          </div>
+                  </div>
+                );
+              })}
+            </div>
 
-          {selected ? (
-            <div className="grid gap-5">
-              {selected.relativePath ? (
-                <video src={`/media/${selected.relativePath}`} controls className="aspect-video w-full rounded-lg bg-black object-contain" />
-              ) : null}
-
-              <StoryOverlayPlacementEditor
-                boxes={[waveformBox(true), ctaBox(false)]}
-                onMove={({ x, y }) => setForm((current) => ({ ...current, x: String(x), y: String(y) }))}
-              />
-
-              <div className="grid gap-4 md:grid-cols-3">
-                <div className="grid gap-2">
-                  <Label>Key color</Label>
-                  <Input value={form.keyColor} onChange={(event) => setForm((current) => ({ ...current, keyColor: event.target.value }))} />
+            <div
+              className={`mt-6 rounded-lg border p-4 ${
+                selectedEffectId === "custom" ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+              }`}
+            >
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                    Tuy chinh hieu ung
+                    {selectedEffectId === "custom" ? (
+                      <Badge className="rounded-full">
+                        <Check className="mr-1 size-3" />
+                        Dang dung
+                      </Badge>
+                    ) : null}
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Chinh tung thong so (do nhieu, vien toi, tan suat nhay...) roi render preview truoc khi ap dung. De nhay
+                    de chiu: do nhay &le; 0.02 va toc do 2-5 Hz.
+                  </p>
                 </div>
-                <div className="grid gap-2">
-                  <Label>Similarity</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={form.similarity} onChange={(event) => setForm((current) => ({ ...current, similarity: event.target.value }))} />
-                </div>
-                <div className="grid gap-2">
-                  <Label>Blend</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={form.blend} onChange={(event) => setForm((current) => ({ ...current, blend: event.target.value }))} />
-                </div>
-                <div className="grid gap-2">
-                  <Label>Width</Label>
-                  <Input type="number" min="64" step="2" value={form.scaleWidth} onChange={(event) => setForm((current) => ({ ...current, scaleWidth: event.target.value }))} />
-                </div>
-                <div className="grid gap-2">
-                  <Label>X (px)</Label>
-                  <Input
-                    type="number"
-                    step="2"
-                    placeholder="theo góc"
-                    value={form.x}
-                    onChange={(event) => setForm((current) => moveTo(current, waveformBox(true), "x", event.target.value))}
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label>Y (px)</Label>
-                  <Input
-                    type="number"
-                    step="2"
-                    placeholder="theo góc"
-                    value={form.y}
-                    onChange={(event) => setForm((current) => moveTo(current, waveformBox(true), "y", event.target.value))}
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label>Position (góc)</Label>
+                <div className="flex items-center gap-2">
                   <select
-                    value={form.position}
-                    onChange={(event) =>
-                      setForm((current) => ({ ...current, position: event.target.value as WaveformForm["position"], x: "", y: "" }))
-                    }
-                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                    defaultValue=""
+                    onChange={(event) => {
+                      if (event.target.value) handleLoadParamsFromPreset(event.target.value);
+                      event.target.value = "";
+                    }}
+                    className="h-9 rounded-md border border-input bg-background px-3 text-xs"
                   >
-                    <option value="bottom_right">Bottom right</option>
-                    <option value="bottom_left">Bottom left</option>
-                    <option value="top_right">Top right</option>
-                    <option value="top_left">Top left</option>
+                    <option value="">Nap thong so tu preset...</option>
+                    {tvEffectStyles
+                      .filter((style) => style.id !== "none")
+                      .map((style) => (
+                        <option key={style.id} value={style.id}>
+                          {style.name}
+                        </option>
+                      ))}
                   </select>
                 </div>
-                <div className="grid gap-2">
-                  <Label>Margin</Label>
-                  <Input type="number" min="0" step="1" value={form.margin} onChange={(event) => setForm((current) => ({ ...current, margin: event.target.value, x: "", y: "" }))} />
+              </div>
+
+              <div className="grid gap-5 lg:grid-cols-[1fr_minmax(280px,420px)]">
+                <div className="grid content-start gap-3 sm:grid-cols-3 md:grid-cols-4">
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs">Tong mau</Label>
+                    <select
+                      value={effectForm.tone}
+                      onChange={(event) => setEffectForm((current) => ({ ...current, tone: event.target.value as TVEffectTone }))}
+                      className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+                    >
+                      {TONE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {EFFECT_PARAM_FIELDS.map((field) => (
+                    <div key={field.key} className="grid gap-1.5">
+                      <Label className="text-xs">
+                        {field.label} <span className="text-muted-foreground">({field.min}–{field.max})</span>
+                      </Label>
+                      <Input
+                        type="number"
+                        min={field.min}
+                        max={field.max}
+                        step={field.step}
+                        value={effectForm[field.key]}
+                        onChange={(event) =>
+                          setEffectForm((current) => ({ ...current, [field.key]: event.target.value }))
+                        }
+                        className="h-9"
+                      />
+                    </div>
+                  ))}
+                  <div className="col-span-full flex flex-wrap gap-3 pt-1">
+                    <Button type="button" variant="outline" onClick={() => void handleCustomPreview()} disabled={isCustomPreviewing}>
+                      {isCustomPreviewing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
+                      {isCustomPreviewing ? "Dang render..." : "Render preview 4s"}
+                    </Button>
+                    <Button type="button" onClick={() => void handleCustomSave()} disabled={isCustomSaving}>
+                      {isCustomSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
+                      Luu & dung cau hinh nay
+                    </Button>
+                  </div>
                 </div>
-              </div>
 
-              <p className="text-xs text-muted-foreground">
-                Kéo overlay trong khung ở trên để đặt vào bất kỳ đâu — X/Y là toạ độ góc trên-trái của
-                sóng âm trong khung 1920×1080. Đổi Position hoặc Margin sẽ xoá toạ độ, quay về canh theo góc.
-              </p>
-
-              <div className="flex flex-wrap gap-3">
-                <Button type="button" onClick={handleSave} disabled={isSaving}>
-                  {isSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
-                  Luu va dat mac dinh
-                </Button>
-                <Button type="button" variant="destructive" onClick={() => void handleDelete(selected.id)}>
-                  <Trash2 className="mr-2 size-4" />
-                  Xoa
-                </Button>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      </PageSection>
-
-      <PageSection>
-        <div className="mb-4 space-y-1">
-          <h2 className="text-base font-semibold text-foreground">CTA overlay (Like / Subscribe / Thông báo)</h2>
-          <p className="text-sm text-muted-foreground">
-            Video nút kêu gọi được tách nền xanh và chèn vào một góc của mọi video Story Video. Mặc định bật sẵn ở góc trên-trái, loop hết thời lượng và không có tiếng.
-          </p>
-        </div>
-        <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
-          <div className="space-y-4">
-            <div className="grid gap-2">
-              <Label>Upload video CTA (nền xanh)</Label>
-              <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
-                {isCtaUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
-                <span>{isCtaUploading ? "Dang tao alpha MOV..." : "Chon video CTA"}</span>
-                <Input
-                  type="file"
-                  accept=".mp4,.mov,.mkv,.webm"
-                  className="hidden"
-                  disabled={isCtaUploading}
-                  onChange={(event) => void handleCtaUpload(event.currentTarget.files?.[0] ?? null)}
-                />
-              </label>
-            </div>
-
-            {ctaOverlays.length ? (
-              <div className="grid gap-2">
-                {ctaOverlays.map((overlay) => (
-                  <button
-                    key={overlay.id}
-                    type="button"
-                    onClick={() => setSelectedCtaId(overlay.id)}
-                    className={`rounded-lg border p-3 text-left transition-colors ${
-                      selectedCta?.id === overlay.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-semibold text-foreground">{overlay.name}</span>
-                      <div className="flex items-center gap-1">
-                        {overlay.enabled === false ? (
-                          <Badge variant="secondary" className="rounded-full">Tắt</Badge>
-                        ) : null}
-                        {overlay.isDefault ? (
-                          <Badge className="rounded-full">
-                            <Star className="mr-1 size-3" />
-                            Default
-                          </Badge>
-                        ) : null}
-                      </div>
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      {overlay.durationSeconds}s | {overlay.scaleWidth ?? 360}px | {placementLabel(overlay, "top_left")}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <EmptyCard title="Chua co CTA overlay" description="Upload video nut nen xanh de tao overlay alpha." />
-            )}
-          </div>
-
-          {selectedCta ? (
-            <div className="grid gap-5">
-              {selectedCta.processedRelativePath ? (
-                <div
-                  className="w-full overflow-hidden rounded-lg"
-                  style={{
-                    backgroundColor: "#3a3a3a",
-                    backgroundImage:
-                      "linear-gradient(45deg, #555 25%, transparent 25%), linear-gradient(-45deg, #555 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #555 75%), linear-gradient(-45deg, transparent 75%, #555 75%)",
-                    backgroundSize: "24px 24px",
-                    backgroundPosition: "0 0, 0 12px, 12px -12px, -12px 0",
-                  }}
-                >
+                {customPreviewPath ? (
                   <video
-                    key={ctaPreviewBust}
-                    src={`/media/${selectedCta.processedRelativePath}?t=${ctaPreviewBust}`}
-                    autoPlay
+                    src={`/media/${customPreviewPath}${customPreviewBust ? `?t=${customPreviewBust}` : ""}`}
+                    controls
                     loop
                     muted
-                    playsInline
-                    className="aspect-video w-full object-contain"
+                    className="aspect-video w-full self-start rounded-md bg-black object-contain"
                   />
-                </div>
-              ) : null}
-
-              <label className="flex items-center gap-2 text-sm text-foreground">
-                <input
-                  type="checkbox"
-                  checked={ctaForm.enabled}
-                  onChange={(event) => void handleCtaToggle(event.currentTarget.checked)}
-                  className="size-4"
-                />
-                Bật CTA overlay cho mọi video Story Video
-              </label>
-
-              <StoryOverlayPlacementEditor
-                boxes={[ctaBox(true), waveformBox(false)]}
-                onMove={({ x, y }) => setCtaForm((current) => ({ ...current, x: String(x), y: String(y) }))}
-              />
-
-              <div className="grid gap-4 md:grid-cols-3">
-                <div className="grid gap-2">
-                  <Label>Key color</Label>
-                  <Input value={ctaForm.keyColor} onChange={(event) => setCtaForm((current) => ({ ...current, keyColor: event.target.value }))} />
-                </div>
-                <div className="grid gap-2">
-                  <Label>Similarity</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={ctaForm.similarity} onChange={(event) => setCtaForm((current) => ({ ...current, similarity: event.target.value }))} />
-                </div>
-                <div className="grid gap-2">
-                  <Label>Blend</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={ctaForm.blend} onChange={(event) => setCtaForm((current) => ({ ...current, blend: event.target.value }))} />
-                </div>
-                <div className="grid gap-2">
-                  <Label>Width</Label>
-                  <Input type="number" min="64" step="2" value={ctaForm.scaleWidth} onChange={(event) => setCtaForm((current) => ({ ...current, scaleWidth: event.target.value }))} />
-                </div>
-                <div className="grid gap-2">
-                  <Label>X (px)</Label>
-                  <Input
-                    type="number"
-                    step="2"
-                    placeholder="theo góc"
-                    value={ctaForm.x}
-                    onChange={(event) => setCtaForm((current) => moveTo(current, ctaBox(true), "x", event.target.value))}
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label>Y (px)</Label>
-                  <Input
-                    type="number"
-                    step="2"
-                    placeholder="theo góc"
-                    value={ctaForm.y}
-                    onChange={(event) => setCtaForm((current) => moveTo(current, ctaBox(true), "y", event.target.value))}
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label>Position (góc)</Label>
-                  <select
-                    value={ctaForm.position}
-                    onChange={(event) =>
-                      setCtaForm((current) => ({ ...current, position: event.target.value as CtaForm["position"], x: "", y: "" }))
-                    }
-                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-                  >
-                    <option value="top_left">Top left</option>
-                    <option value="top_right">Top right</option>
-                    <option value="bottom_left">Bottom left</option>
-                    <option value="bottom_right">Bottom right</option>
-                  </select>
-                </div>
-                <div className="grid gap-2">
-                  <Label>Margin</Label>
-                  <Input type="number" min="0" step="1" value={ctaForm.margin} onChange={(event) => setCtaForm((current) => ({ ...current, margin: event.target.value, x: "", y: "" }))} />
-                </div>
-              </div>
-
-              <p className="text-xs text-muted-foreground">
-                Kéo overlay trong khung ở trên để đặt vào bất kỳ đâu — X/Y là toạ độ góc trên-trái của
-                CTA trong khung 1920×1080. Đổi Position hoặc Margin sẽ xoá toạ độ, quay về canh theo góc.
-              </p>
-
-              <div className="flex flex-wrap gap-3">
-                <Button type="button" onClick={handleCtaSave} disabled={isCtaSaving}>
-                  {isCtaSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
-                  Luu va dat mac dinh
-                </Button>
-                <Button type="button" variant="destructive" onClick={() => void handleCtaDelete(selectedCta.id)}>
-                  <Trash2 className="mr-2 size-4" />
-                  Xoa
-                </Button>
+                ) : (
+                  <div className="flex aspect-video w-full items-center justify-center self-start rounded-md border border-dashed border-border bg-background/50 text-xs text-muted-foreground">
+                    Chua co preview custom — chinh thong so roi bam Render preview
+                  </div>
+                )}
               </div>
             </div>
-          ) : null}
-        </div>
-      </PageSection>
+          </PageSection>
 
-      <PageSection>
-        <StoryLibraryNormalizePanel onNormalized={() => setLibraryRefreshKey((current) => current + 1)} />
-      </PageSection>
-
-      <PageSection>
-        <div className="mb-4 space-y-1">
-          <h2 className="text-base font-semibold text-foreground">Ảnh decor (khung TV)</h2>
-          <p className="text-sm text-muted-foreground">
-            Ảnh chụp phủ kín khung hình, video nền chỉ chạy bên trong vùng màu xanh của ảnh.
-            Ảnh chưa có nền xanh cũng dùng được: chuyển sang chế độ “Tự tạo vùng nền xanh” rồi
-            kéo một khung 16:9 lên đúng mặt màn hình. Phần không phải vùng xanh luôn đè lên trên
-            video. Hiệu ứng TV và TV noise được áp vào video <em>trước</em> khi thu nhỏ vào khung,
-            còn sóng âm / CTA / phụ đề nằm trên ảnh decor. Chọn ảnh nào tham gia xoay vòng ở
-            trang render.
-          </p>
-        </div>
-        {decorNotice ? (
-          <div className="mb-4">
-            <StatusAlert title="Ảnh decor" message={decorNotice} />
-          </div>
-        ) : null}
-        <div className="mb-5 rounded-lg border border-input bg-muted/30 p-4">
-          <Label htmlFor="decor-blur-default" className="flex items-center justify-between gap-2">
-            <span>Làm mờ ảnh nền — mặc định chung</span>
-            <span className="font-mono text-xs text-muted-foreground">{decorBlurDraft}px</span>
-          </Label>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <input
-              id="decor-blur-default-range"
-              type="range"
-              className="h-10 min-w-[160px] flex-1 cursor-pointer"
-              min={0}
-              max={40}
-              step={1}
-              value={Number(decorBlurDraft) || 0}
-              onChange={(event) => setDecorBlurDraft(event.currentTarget.value)}
-            />
-            <Input
-              id="decor-blur-default"
-              type="number"
-              className="w-24"
-              min={0}
-              max={40}
-              value={decorBlurDraft}
-              onChange={(event) => setDecorBlurDraft(event.currentTarget.value)}
-            />
-            <Button
-              type="button"
-              onClick={() => void handleDecorBlurApply()}
-              disabled={isDecorBlurSaving || Number(decorBlurDraft) === decorBlur}
-            >
-              {isDecorBlurSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
-              Áp dụng
-            </Button>
-          </div>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Chỉ áp cho ảnh ở chế độ “Tự tạo vùng nền xanh”. Nền mờ làm cửa sổ video sắc nét nổi
-            hẳn lên — cùng ý tưởng với kiểu dựng “Hai lớp cùng nguồn”. 0 = tắt. Độ mờ được nướng
-            sẵn vào ảnh nên <em>không</em> tốn thêm thời gian render. Bấm “Áp dụng” sẽ vẽ lại ảnh
-            của mọi khung đang theo mặc định chung; khung nào tự đặt riêng thì giữ nguyên.
-          </p>
-        </div>
-        <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
-          <div className="space-y-4">
-            <div className="grid gap-2">
-              <Label htmlFor="decor-upload-group">Nhóm chủ đề</Label>
-              <Input
-                id="decor-upload-group"
-                list="decor-group-options"
-                value={decorUploadGroup}
-                onChange={(event) => setDecorUploadGroup(event.currentTarget.value)}
-                placeholder="VD: Đền chùa, Làng quê, Điều tra phá án"
-              />
-              <datalist id="decor-group-options">
-                {decorGroups.filter(Boolean).map((group) => (
-                  <option key={group} value={group} />
-                ))}
-              </datalist>
-              <p className="text-xs text-muted-foreground">
-                Ảnh upload dưới đây sẽ vào nhóm này. Gõ tên mới để tạo nhóm, để trống nếu chưa
-                muốn phân loại — đổi nhóm sau lúc nào cũng được.
-              </p>
-
-              <Label className="mt-2">Upload ảnh decor (có sẵn nền xanh, hoặc tự vẽ vùng)</Label>
-              <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
-                {isDecorUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
-                <span>
-                  {isDecorUploading
-                    ? decorUploadProgress
-                      ? `Đang tách nền xanh ${decorUploadProgress.done}/${decorUploadProgress.total}...`
-                      : "Đang tách nền xanh..."
-                    : "Chọn một hoặc nhiều ảnh PNG / JPG / WEBP"}
-                </span>
-                <Input
-                  type="file"
-                  accept=".png,.jpg,.jpeg,.webp,.bmp"
-                  multiple
-                  className="hidden"
-                  disabled={isDecorUploading}
-                  onChange={(event) => {
-                    void handleDecorUpload(event.currentTarget.files);
-                    event.currentTarget.value = "";
-                  }}
-                />
-              </label>
-              <p className="text-xs text-muted-foreground">
-                Chọn được nhiều ảnh cùng lúc — cả loạt vào chung nhóm ở trên, upload lần lượt từng
-                ảnh. Ảnh sẽ được kéo về đúng 1920x1080, nên dùng ảnh 16:9. Nếu ảnh có sẵn nền xanh,
-                vùng xanh được dò tự động ngay khi upload. Nếu không, chế độ “Tự tạo vùng nền
-                xanh” tự bật để bạn kéo khung 16:9 lên đúng mặt màn hình.
-              </p>
+          <PageSection id="tv-noise">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="space-y-1">
+                <h2 className="text-base font-semibold text-foreground">TV Noise Overlays</h2>
+                <p className="text-sm text-muted-foreground">Quan ly cac lop nhieu nen den, preprocess thanh alpha MOV va ap dung global cho Story Video.</p>
+              </div>
+              {noiseJobMessage ? <Badge variant="secondary" className="rounded-full">{noiseJobMessage}</Badge> : null}
             </div>
 
-            {decorImages.length ? (
-              <div className="flex flex-wrap gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setDecorGroupFilter(null)}
-                  className={`rounded-full border px-3 py-1 text-xs transition-colors ${
-                    decorGroupFilter === null
-                      ? "border-primary bg-primary/15 text-foreground"
-                      : "border-border/70 text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  Tất cả ({decorImages.length})
-                </button>
-                {decorByGroup.map(({ group, items }) => (
-                  <button
-                    key={group || "__none__"}
-                    type="button"
-                    onClick={() => {
-                      setDecorGroupFilter(group);
-                      // Nhom dang xem cung la nhom mac dinh cho anh upload tiep theo.
-                      setDecorUploadGroup(group);
-                      if (!selectedDecor || decorGroupOf(selectedDecor) !== group) {
-                        setSelectedDecorId(items[0]?.id ?? "");
-                      }
-                    }}
-                    className={`rounded-full border px-3 py-1 text-xs transition-colors ${
-                      decorGroupFilter === group
-                        ? "border-primary bg-primary/15 text-foreground"
-                        : "border-border/70 text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    {group || DECOR_UNGROUPED} ({items.length})
-                  </button>
-                ))}
-              </div>
-            ) : null}
+            {/* min-w-0 tren cot trai: mac dinh grid item la min-width:auto, nen mot ten
+                file dai (khong xuong dong duoc) keo cot rong hon track 380px va de len
+                panel cau hinh ben phai. */}
+            <div className="grid gap-5 lg:grid-cols-[minmax(280px,380px)_1fr]">
+              <div className="min-w-0 space-y-4">
+                <div className="grid gap-2">
+                  <Label>Upload TV noise</Label>
+                  <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
+                    {isNoiseUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
+                    <span>{isNoiseUploading ? "Dang tao alpha MOV..." : "Chon video noise nen den"}</span>
+                    <Input
+                      type="file"
+                      accept=".mp4,.mov,.mkv,.webm"
+                      className="hidden"
+                      disabled={isNoiseUploading}
+                      onChange={(event) => void handleNoiseUpload(event.currentTarget.files?.[0] ?? null)}
+                    />
+                  </label>
+                </div>
 
-            {decorImages.length ? (
-              <div className="grid gap-4">
-                {visibleDecorGroups.map(({ group, items }) => {
-                  const enabledCount = items.filter((item) => item.enabled !== false).length;
-                  const isRenaming = decorGroupEdit?.from === group;
-                  return (
-                    <div key={group || "__none__"} className="grid gap-2">
-                      <div className="flex items-center gap-1.5 border-b border-border/60 pb-1">
-                        {isRenaming ? (
-                          <>
-                            <Input
-                              autoFocus
-                              value={decorGroupEdit.value}
-                              onChange={(event) =>
-                                setDecorGroupEdit({ from: group, value: event.currentTarget.value })
-                              }
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter") {
-                                  void handleDecorGroupRename(group, event.currentTarget.value);
-                                } else if (event.key === "Escape") {
-                                  setDecorGroupEdit(null);
-                                }
-                              }}
-                              className="h-7 text-sm"
-                            />
-                            <Button
-                              type="button"
-                              size="icon"
-                              variant="ghost"
-                              className="size-7 shrink-0"
-                              disabled={decorGroupBusy}
-                              onClick={() => void handleDecorGroupRename(group, decorGroupEdit.value)}
-                            >
-                              <Check className="size-3.5" />
-                            </Button>
-                            <Button
-                              type="button"
-                              size="icon"
-                              variant="ghost"
-                              className="size-7 shrink-0"
-                              onClick={() => setDecorGroupEdit(null)}
-                            >
-                              <X className="size-3.5" />
-                            </Button>
-                          </>
-                        ) : (
-                          <>
-                            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
-                              {group || DECOR_UNGROUPED}
-                            </span>
-                            <span className="shrink-0 text-xs text-muted-foreground">
-                              {enabledCount}/{items.length} bật
-                            </span>
-                            {group ? (
-                              <Button
-                                type="button"
-                                size="icon"
-                                variant="ghost"
-                                className="size-7 shrink-0"
-                                title="Đổi tên nhóm"
-                                onClick={() => setDecorGroupEdit({ from: group, value: group })}
-                              >
-                                <Pencil className="size-3.5" />
-                              </Button>
-                            ) : null}
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="ghost"
-                              className="h-7 shrink-0 px-2 text-xs"
-                              disabled={decorGroupBusy || enabledCount === items.length}
-                              onClick={() => void handleDecorGroupEnable(group, true)}
-                            >
-                              Bật cả nhóm
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="ghost"
-                              className="h-7 shrink-0 px-2 text-xs"
-                              disabled={decorGroupBusy || enabledCount === 0}
-                              onClick={() => void handleDecorGroupEnable(group, false)}
-                            >
-                              Tắt
-                            </Button>
-                          </>
-                        )}
-                      </div>
+                <div className="grid gap-2">
+                  <Label>YouTube TV noise URL</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      value={youtubeNoiseUrl}
+                      onChange={(event) => setYoutubeNoiseUrl(event.target.value)}
+                      placeholder="https://www.youtube.com/watch?v=..."
+                      disabled={isNoiseImporting}
+                    />
+                    <Button type="button" variant="secondary" onClick={() => void handleNoiseYoutubeImport()} disabled={isNoiseImporting}>
+                      {isNoiseImporting ? <Loader2 className="mr-2 size-4 animate-spin" /> : <LinkIcon className="mr-2 size-4" />}
+                      Import
+                    </Button>
+                  </div>
+                </div>
 
-                      <div className="grid gap-2 max-h-96 overflow-y-auto">
-                        {items.map((item) => (
-                          <div
-                            key={item.id}
-                            className={`min-w-0 rounded-lg border p-2 transition-colors ${
-                              selectedDecor?.id === item.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedDecorId(item.id);
-                                // Chon tu danh sach ben canh cung phai keo thanh
-                                // duyet theo, khong de hai cho tro vao hai anh.
-                                const queueIndex = decorReviewItems.findIndex((entry) => entry.id === item.id);
-                                if (queueIndex !== -1) setDecorReviewIndex(queueIndex);
-                              }}
-                              className="flex w-full min-w-0 items-center gap-3 text-left"
-                            >
-                              <img
-                                src={`/media/${item.processedRelativePath ?? item.relativePath}?t=${encodeURIComponent(item.updatedAt ?? "")}`}
-                                alt={item.name}
-                                className="h-12 w-20 shrink-0 rounded border border-border/50 object-cover"
-                              />
-                              <span className="min-w-0 flex-1">
-                                <span className="block truncate text-sm font-semibold text-foreground">{item.name}</span>
-                                <span className="block text-xs text-muted-foreground">
-                                  Khung {item.frame.w}x{item.frame.h} @ {item.frame.x},{item.frame.y}
-                                  {item.maskMode === "manual" ? (
-                                    <span className="ml-1.5 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
-                                      Tự vẽ
-                                    </span>
-                                  ) : null}
-                                </span>
-                              </span>
-                              {item.enabled === false ? (
-                                <Badge variant="secondary" className="rounded-full">Tắt</Badge>
-                              ) : null}
-                            </button>
-                            <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-                              <input
-                                type="checkbox"
-                                checked={item.enabled !== false}
-                                onChange={(event) => void handleDecorToggle(item.id, event.currentTarget.checked)}
-                                className="size-3.5"
-                              />
-                              Cho phép dùng khi render
-                            </label>
-                            {decorGroupInputFor === item.id ? (
+                {sparklePresets.length ? (
+                  <div className="grid gap-2 rounded-lg border border-border/70 bg-background/70 p-3">
+                    <Label>Tạo lớp lấp lánh</Label>
+                    <select
+                      value={sparklePresetId}
+                      onChange={(event) => {
+                        const next = sparklePresets.find((item) => item.id === event.target.value);
+                        setSparklePresetId(event.target.value);
+                        if (next) setSparkleParams(paramsToForm(next));
+                      }}
+                      className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                    >
+                      {sparklePresets.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.name}
+                        </option>
+                      ))}
+                    </select>
+                    {selectedSparklePreset ? (
+                      <>
+                        <p className="text-xs text-muted-foreground">{selectedSparklePreset.description}</p>
+                        <div className="grid gap-1">
+                          <Label className="text-xs font-normal text-muted-foreground">
+                            Tên lớp (để phân biệt các mẫu)
+                          </Label>
+                          <Input
+                            value={sparkleName}
+                            placeholder={selectedSparklePreset.name}
+                            onChange={(event) => setSparkleName(event.target.value)}
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {selectedSparklePreset.paramsUsed.map((key) => (
+                            <div key={key} className="grid gap-1">
+                              <Label className="text-xs font-normal text-muted-foreground">
+                                {SPARKLE_PARAM_LABELS[key] ?? key}
+                              </Label>
                               <Input
-                                autoFocus
-                                placeholder="Tên nhóm mới"
-                                className="mt-2 h-7 text-xs"
-                                onKeyDown={(event) => {
-                                  if (event.key === "Enter") {
-                                    void handleDecorGroupAssign(item.id, event.currentTarget.value);
-                                  } else if (event.key === "Escape") {
-                                    setDecorGroupInputFor(null);
-                                  }
-                                }}
-                                onBlur={(event) => {
-                                  const value = event.currentTarget.value.trim();
-                                  if (value) void handleDecorGroupAssign(item.id, value);
-                                  else setDecorGroupInputFor(null);
-                                }}
+                                type="number"
+                                step="any"
+                                value={sparkleParams[key] ?? ""}
+                                onChange={(event) =>
+                                  setSparkleParams((current) => ({ ...current, [key]: event.target.value }))
+                                }
                               />
-                            ) : (
-                              <select
-                                value={decorGroupOf(item)}
-                                onChange={(event) => {
-                                  const value = event.currentTarget.value;
-                                  if (value === DECOR_NEW_GROUP) setDecorGroupInputFor(item.id);
-                                  else void handleDecorGroupAssign(item.id, value);
-                                }}
-                                className="mt-2 h-7 w-full rounded-md border border-input bg-background px-2 text-xs text-muted-foreground"
-                              >
-                                <option value="">{DECOR_UNGROUPED}</option>
-                                {decorGroups.filter(Boolean).map((name) => (
-                                  <option key={name} value={name}>
-                                    {name}
-                                  </option>
-                                ))}
-                                <option value={DECOR_NEW_GROUP}>+ Nhóm mới...</option>
-                              </select>
-                            )}
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    ) : null}
+                    <Button type="button" variant="secondary" onClick={() => void handleSparkleCreate()} disabled={isSparkleCreating}>
+                      {isSparkleCreating ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                      {isSparkleCreating ? "Dang dung lop lap lanh..." : "Tao lop lap lanh"}
+                    </Button>
+                    <p className="text-xs text-muted-foreground">
+                      Dung mot lan roi cache lai (25-90 giay). Lop tao ra nam trong danh sach ben duoi: bat/tat,
+                      chinh opacity va thu tu nhu moi overlay khac. Lớp vừa tạo sẽ tự thành lớp đang dùng.
+                    </p>
+                  </div>
+                ) : null}
+
+                {tvNoiseOverlays.length ? (
+                  <p className="text-xs text-muted-foreground">
+                    Mỗi lần render chỉ áp <span className="font-semibold text-foreground">một</span> lớp hiệu ứng. Bật một lớp
+                    sẽ tự tắt các lớp còn lại — chúng vẫn nằm trong danh sách để bật lại sau.
+                  </p>
+                ) : null}
+
+                {tvNoiseOverlays.length ? (
+                  <div className="grid gap-2">
+                    {tvNoiseOverlays.map((overlay) => (
+                      <button
+                        key={overlay.id}
+                        type="button"
+                        onClick={() => setSelectedNoiseId(overlay.id)}
+                        className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${
+                          selectedNoise?.id === overlay.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+                        }`}
+                      >
+                        <div className="flex min-w-0 items-center justify-between gap-2">
+                          <span className="truncate text-sm font-semibold text-foreground">{overlay.name}</span>
+                          <Badge
+                            variant={overlay.status === "failed" ? "destructive" : overlay.status === "ready" ? "secondary" : "outline"}
+                            className="rounded-full"
+                          >
+                            {overlay.status}
+                          </Badge>
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          #{overlay.order} | opacity {Math.round((overlay.opacity ?? 0) * 100)}% |{" "}
+                          {overlay.enabled ? (
+                            <span className="font-semibold text-primary">đang dùng khi render</span>
+                          ) : (
+                            "tắt"
+                          )}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyCard title="Chua co TV noise" description="Upload hoac import video noise nen den de bat dau." />
+                )}
+              </div>
+
+              {selectedNoise ? (
+                <div className="grid min-w-0 gap-5">
+                  {noiseDemoSrc || selectedNoise.relativePath ? (
+                    <video
+                      src={noiseDemoSrc || `/media/${selectedNoise.relativePath}`}
+                      controls
+                      className="aspect-video w-full rounded-lg bg-black object-contain"
+                    />
+                  ) : null}
+
+                  {selectedNoise.error ? (
+                    <StatusAlert title="TV noise preprocess failed" message={selectedNoise.error} variant="destructive" />
+                  ) : null}
+
+                  {/* Thong so cua lop lap lanh da tao: khong hien thi thi hai bien the
+                      cung preset trong y het nhau va khong the dung lai de tinh chinh. */}
+                  {selectedNoise.kind === "sparkle" && selectedNoise.meta?.params ? (
+                    <div className="grid gap-2 rounded-lg border border-border/70 bg-background/70 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <Label className="text-xs font-normal text-muted-foreground">
+                          Thông số đã lưu ·{" "}
+                          {sparklePresets.find((preset) => preset.id === selectedNoise.meta?.presetId)?.name ??
+                            selectedNoise.meta?.presetId ??
+                            "sparkle"}
+                        </Label>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            const presetId = selectedNoise.meta?.presetId ?? "";
+                            const preset = sparklePresets.find((item) => item.id === presetId);
+                            if (!preset) return;
+                            setSparklePresetId(presetId);
+                            setSparkleParams(
+                              Object.fromEntries(
+                                preset.paramsUsed.map((key) => [
+                                  key,
+                                  String(selectedNoise.meta?.params?.[key] ?? preset.params[key] ?? 0),
+                                ]),
+                              ),
+                            );
+                            setSparkleName(`${selectedNoise.name} (copy)`);
+                          }}
+                        >
+                          Nạp vào form tạo lớp
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-3">
+                        {Object.entries(selectedNoise.meta.params).map(([key, value]) => (
+                          <div key={key} className="flex min-w-0 justify-between gap-2">
+                            <span className="truncate">{SPARKLE_PARAM_LABELS[key] ?? key}</span>
+                            <span className="font-medium text-foreground">{value}</span>
                           </div>
                         ))}
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <EmptyCard
-                title="Chưa có ảnh decor"
-                description="Upload ảnh có vùng nền xanh (ví dụ phòng khách với TV màn hình xanh) để bắt đầu."
-              />
-            )}
-          </div>
+                  ) : null}
 
-          {selectedDecor ? (
-            <div className="grid gap-4">
-              {decorReviewItems.length ? (
-                <div className="rounded-lg border border-primary/40 bg-primary/5 p-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-semibold text-foreground">
-                      Duyệt ảnh vừa upload — ảnh {decorReviewAt + 1}/{decorReviewItems.length}
-                    </span>
-                    <Badge variant="secondary" className="rounded-full">
-                      {decorReviewDone.length}/{decorReviewItems.length} đã lưu khung
-                    </Badge>
-                    <div className="ml-auto flex items-center gap-1.5">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-7 px-2 text-xs"
-                        disabled={decorReviewAt === 0}
-                        onClick={() => goToDecorReview(decorReviewAt - 1)}
+                  <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                    <div className="grid min-w-0 gap-2">
+                      <Label>Trang thai</Label>
+                      <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={noiseForm.enabled}
+                          onChange={(event) => setNoiseForm((current) => ({ ...current, enabled: event.target.checked }))}
+                        />
+                        Dùng lớp này khi render
+                      </label>
+                    </div>
+
+                    <div className="grid min-w-0 gap-2">
+                      <Label>Blend</Label>
+                      <select
+                        value={noiseForm.blendMode}
+                        onChange={(event) =>
+                          setNoiseForm((current) => ({ ...current, blendMode: event.target.value as TVNoiseForm["blendMode"] }))
+                        }
+                        className="h-10 w-full min-w-0 truncate rounded-md border border-input bg-background px-3 text-sm"
                       >
-                        Ảnh trước
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-7 px-2 text-xs"
-                        disabled={decorReviewAt >= decorReviewItems.length - 1}
-                        onClick={() => goToDecorReview(decorReviewAt + 1)}
-                      >
-                        Ảnh sau
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 px-2 text-xs"
-                        title="Đóng thanh duyệt"
-                        onClick={closeDecorReview}
-                      >
-                        <X className="mr-1 size-3.5" />
-                        Xong
-                      </Button>
+                        <option value="alpha">Alpha &mdash; key nen den</option>
+                        <option value="screen">Screen &mdash; cong sang</option>
+                        <option value="luma">Luma &mdash; lop lap lanh</option>
+                      </select>
+                    </div>
+
+                    <div className="grid min-w-0 gap-2">
+                      <Label>Opacity</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={noiseForm.opacity}
+                        onChange={(event) => setNoiseForm((current) => ({ ...current, opacity: event.target.value }))}
+                      />
+                    </div>
+
+                    {/* Cac o duoi day chi co nghia voi dung mot blend mode, nen an han
+                        thay vi disable: form 7 cot truoc day bi vo o man hinh hep. */}
+                    {noiseForm.blendMode === "luma" ? (
+                      <div className="grid min-w-0 gap-2">
+                        <Label>Luma gain</Label>
+                        <Input
+                          type="number"
+                          min="1"
+                          max="8"
+                          step="0.1"
+                          value={noiseForm.lumaGain}
+                          onChange={(event) => setNoiseForm((current) => ({ ...current, lumaGain: event.target.value }))}
+                        />
+                      </div>
+                    ) : null}
+
+                    {noiseForm.blendMode === "alpha" ? (
+                      <>
+                        <div className="grid min-w-0 gap-2">
+                          <Label>Tolerance</Label>
+                          <Input
+                            type="number"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value={noiseForm.tolerance}
+                            onChange={(event) => setNoiseForm((current) => ({ ...current, tolerance: event.target.value }))}
+                          />
+                        </div>
+                        <div className="grid min-w-0 gap-2">
+                          <Label>Softness</Label>
+                          <Input
+                            type="number"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value={noiseForm.softness}
+                            onChange={(event) => setNoiseForm((current) => ({ ...current, softness: event.target.value }))}
+                          />
+                        </div>
+                      </>
+                    ) : null}
+
+                    <div className="grid min-w-0 gap-2">
+                      <Label>Order</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={noiseForm.order}
+                        onChange={(event) => setNoiseForm((current) => ({ ...current, order: event.target.value }))}
+                      />
                     </div>
                   </div>
-                  <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
-                    {decorReviewItems.map((item, index) => {
-                      const isDone = decorReviewDone.includes(item.id);
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          title={item.name}
-                          onClick={() => goToDecorReview(index)}
-                          className={`relative shrink-0 overflow-hidden rounded border-2 transition-colors ${
-                            index === decorReviewAt ? "border-primary" : "border-transparent hover:border-border"
-                          }`}
-                        >
-                          <img
-                            src={`/media/${item.processedRelativePath ?? item.relativePath}?t=${encodeURIComponent(item.updatedAt ?? "")}`}
-                            alt={item.name}
-                            className="h-11 w-[74px] object-cover"
-                          />
-                          <span
-                            className={`absolute inset-x-0 bottom-0 truncate px-1 text-center text-[9px] font-semibold ${
-                              isDone
-                                ? "bg-primary/85 text-primary-foreground"
-                                : item.autoDetected === false
-                                  ? "bg-amber-500/85 text-black"
-                                  : "bg-black/65 text-white"
-                            }`}
-                          >
-                            {isDone ? "Đã lưu" : item.autoDetected === false ? "Tự vẽ" : "Auto"}
-                          </span>
-                        </button>
-                      );
-                    })}
+
+                  <p className="text-xs text-muted-foreground">{BLEND_MODE_HINTS[noiseForm.blendMode]}</p>
+
+                  <div className="flex flex-wrap gap-3">
+                    <Button type="button" onClick={handleNoiseSave} disabled={isNoiseSaving}>
+                      {isNoiseSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
+                      Luu TV noise
+                    </Button>
+                    <Button type="button" variant="outline" onClick={() => void handleGenerateNoiseDemo()} disabled={isGeneratingNoiseDemo || selectedNoise.status !== "ready"}>
+                      {isGeneratingNoiseDemo ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
+                      Demo 3s
+                    </Button>
+                    <Button type="button" variant="destructive" onClick={() => void handleNoiseDelete(selectedNoise.id)}>
+                      <Trash2 className="mr-2 size-4" />
+                      Xoa
+                    </Button>
                   </div>
-                  <p className="mt-1.5 text-xs text-muted-foreground">
-                    Kiểm tra (hoặc kéo lại) vùng nền xanh cho từng ảnh rồi bấm “Lưu khung” — lưu xong
-                    tự sang ảnh chưa duyệt kế tiếp. Ảnh gắn nhãn “Tự vẽ” là ảnh không có nền xanh,
-                    bắt buộc phải kéo khung trước khi dùng để render.
+                </div>
+              ) : null}
+            </div>
+          </PageSection>
+
+          <PageSection id="effect-preview">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="space-y-1">
+                <h2 className="text-base font-semibold text-foreground">Preview hieu ung tren video that</h2>
+                <p className="text-sm text-muted-foreground">
+                  Tai len vai clip ngan 3-5s giong trong thu vien, roi render de xem ca chong hieu ung
+                  (style + cac lop overlay dang bat + song am + CTA) tren dung loai canh ban se dung.
+                </p>
+              </div>
+              {previewMessage ? <Badge variant="secondary" className="rounded-full">{previewMessage}</Badge> : null}
+            </div>
+
+            {/* min-w-0 tren cot trai: mac dinh grid item la min-width:auto, nen mot ten
+                file dai (khong xuong dong duoc) keo cot rong hon track 380px va de len
+                panel cau hinh ben phai. */}
+            <div className="grid gap-5 lg:grid-cols-[minmax(280px,380px)_1fr]">
+              <div className="min-w-0 space-y-4">
+                <div className="grid gap-2">
+                  <Label>Tai len bo clip</Label>
+                  <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-center text-sm text-muted-foreground">
+                    {isPreviewUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
+                    <span>{isPreviewUploading ? "Dang chuan hoa va ghep..." : "Chon nhieu clip cung luc (toi da 24)"}</span>
+                    <Input
+                      type="file"
+                      multiple
+                      accept=".mp4,.mov,.mkv,.webm"
+                      className="hidden"
+                      disabled={isPreviewUploading}
+                      onChange={(event) => void handlePreviewUpload(event.currentTarget.files)}
+                    />
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    Clip duoc chuan hoa ve dung dinh dang thu vien roi ghep lai mot lan. Sau do doi thong so
+                    bao nhieu lan cung duoc, chi phai render lai buoc hieu ung.
+                  </p>
+                </div>
+
+                {previewSources.length ? (
+                  <div className="grid gap-2">
+                    {previewSources.map((source) => (
+                      <button
+                        key={source.id}
+                        type="button"
+                        onClick={() => setSelectedPreviewId(source.id)}
+                        className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${
+                          selectedPreviewSource?.id === source.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+                        }`}
+                      >
+                        <div className="truncate text-sm font-semibold text-foreground">{source.name}</div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {source.clipCount} clip | {source.durationSeconds}s
+                          {source.previewPath ? " | da co preview" : " | chua render"}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyCard title="Chua co bo clip nao" description="Tai len vai clip ngan de xem thu hieu ung." />
+                )}
+              </div>
+
+              {selectedPreviewSource ? (
+                <div className="grid gap-5">
+                  {selectedPreviewSource.previewPath ? (
+                    <video
+                      key={selectedPreviewSource.previewPath}
+                      src={`/media/${selectedPreviewSource.previewPath}`}
+                      controls
+                      className="aspect-video w-full rounded-lg bg-black object-contain"
+                    />
+                  ) : (
+                    <div className="flex aspect-video w-full items-center justify-center rounded-lg border border-dashed border-border bg-background/70 text-sm text-muted-foreground">
+                      Chua render preview cho bo clip nay.
+                    </div>
+                  )}
+
+                  <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                    <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={previewOptions.includeStyle}
+                        onChange={(event) => setPreviewOptions((current) => ({ ...current, includeStyle: event.target.checked }))}
+                      />
+                      Ap style mau
+                    </label>
+                    <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={previewOptions.includeOverlays}
+                        onChange={(event) => setPreviewOptions((current) => ({ ...current, includeOverlays: event.target.checked }))}
+                      />
+                      Ap cac lop overlay
+                    </label>
+                    <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={previewOptions.compare}
+                        onChange={(event) => setPreviewOptions((current) => ({ ...current, compare: event.target.checked }))}
+                      />
+                      So sanh canh nhau
+                    </label>
+                    <div className="grid min-w-0 gap-2">
+                      <Label>Anh decor</Label>
+                      <select
+                        value={previewDecorId}
+                        onChange={(event) => setPreviewDecorId(event.target.value)}
+                        className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                      >
+                        <option value="">Khong dung anh decor</option>
+                        {decorImages.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.group ? `[${item.group}] ${item.name}` : item.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="grid min-w-0 gap-2">
+                      <Label>Gioi han (giay)</Label>
+                      <Input
+                        type="number"
+                        min="1"
+                        max="90"
+                        step="1"
+                        value={previewOptions.maxSeconds}
+                        onChange={(event) => setPreviewOptions((current) => ({ ...current, maxSeconds: event.target.value }))}
+                      />
+                    </div>
+                  </div>
+
+                  {selectedPreviewSource.appliedDecorName ? (
+                    <p className="text-xs text-muted-foreground">
+                      Preview nay dang dung anh decor: <strong>{selectedPreviewSource.appliedDecorName}</strong>
+                    </p>
+                  ) : null}
+
+                  {selectedPreviewSource.appliedLayers?.length ? (
+                    <div className="flex flex-wrap gap-2">
+                      {selectedPreviewSource.appliedLayers.map((layer, index) => (
+                        <Badge key={layer.id ?? index} variant="outline" className="rounded-full">
+                          {layer.name} · {layer.blendMode}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  <div className="flex flex-wrap gap-3">
+                    <Button type="button" onClick={() => void handlePreviewRender()} disabled={isPreviewRendering}>
+                      {isPreviewRendering ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Eye className="mr-2 size-4" />}
+                      {isPreviewRendering ? "Dang render..." : "Render preview"}
+                    </Button>
+                    <Button type="button" variant="destructive" onClick={() => void handlePreviewDelete(selectedPreviewSource.id)}>
+                      <Trash2 className="mr-2 size-4" />
+                      Xoa bo clip
+                    </Button>
+                  </div>
+
+                  <p className="text-xs text-muted-foreground">
+                    Preview dung dung chuoi filter ma buoc render that dung, nen ket qua khop nhau. Chay tren CPU
+                    va o 1080p, nen cho khoang 3-4 giay xu ly cho moi giay video.
                   </p>
                 </div>
               ) : null}
-              <StoryDecorFrameEditor
-                key={selectedDecor.id}
-                image={selectedDecor}
-                previewPath={decorPreviewPath}
-                defaultBlur={decorBlur}
-                isPreviewLoading={isDecorPreviewLoading}
-                isSaving={isDecorSaving}
-                onRequestPreview={() => void handleDecorFramePreview()}
-                onDetectFrame={handleDecorDetect}
-                onSave={handleDecorSave}
+            </div>
+          </PageSection>
+
+
+          <PageSection id="waveforms">
+            <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
+              <div className="space-y-4">
+                <div className="grid gap-2">
+                  <Label>Upload waveform</Label>
+                  <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
+                    {isUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
+                    <span>{isUploading ? "Dang tao alpha MOV..." : "Chon video waveform"}</span>
+                    <Input
+                      type="file"
+                      accept=".mp4,.mov,.mkv,.webm"
+                      className="hidden"
+                      disabled={isUploading}
+                      onChange={(event) => void handleUpload(event.currentTarget.files?.[0] ?? null)}
+                    />
+                  </label>
+                </div>
+
+                {overlays.length ? (
+                  <div className="grid gap-2">
+                    {overlays.map((overlay) => (
+                      <button
+                        key={overlay.id}
+                        type="button"
+                        onClick={() => setSelectedId(overlay.id)}
+                        className={`rounded-lg border p-3 text-left transition-colors ${
+                          selected?.id === overlay.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate text-sm font-semibold text-foreground">{overlay.name}</span>
+                          {overlay.isDefault ? (
+                            <Badge className="rounded-full">
+                              <Star className="mr-1 size-3" />
+                              Default
+                            </Badge>
+                          ) : null}
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {overlay.durationSeconds}s | {overlay.scaleWidth ?? 420}px | {placementLabel(overlay, "bottom_right")}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyCard title="Chua co waveform" description="Upload video nen xanh de tao overlay alpha mac dinh." />
+                )}
+              </div>
+
+              {selected ? (
+                <div className="grid gap-5">
+                  {selected.relativePath ? (
+                    <video src={`/media/${selected.relativePath}`} controls className="aspect-video w-full rounded-lg bg-black object-contain" />
+                  ) : null}
+
+                  <StoryOverlayPlacementEditor
+                    boxes={[waveformBox(true), ctaBox(false)]}
+                    onMove={({ x, y }) => setForm((current) => ({ ...current, x: String(x), y: String(y) }))}
+                  />
+
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="grid gap-2">
+                      <Label>Key color</Label>
+                      <Input value={form.keyColor} onChange={(event) => setForm((current) => ({ ...current, keyColor: event.target.value }))} />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Similarity</Label>
+                      <Input type="number" min="0" max="1" step="0.01" value={form.similarity} onChange={(event) => setForm((current) => ({ ...current, similarity: event.target.value }))} />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Blend</Label>
+                      <Input type="number" min="0" max="1" step="0.01" value={form.blend} onChange={(event) => setForm((current) => ({ ...current, blend: event.target.value }))} />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Width</Label>
+                      <Input type="number" min="64" step="2" value={form.scaleWidth} onChange={(event) => setForm((current) => ({ ...current, scaleWidth: event.target.value }))} />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>X (px)</Label>
+                      <Input
+                        type="number"
+                        step="2"
+                        placeholder="theo góc"
+                        value={form.x}
+                        onChange={(event) => setForm((current) => moveTo(current, waveformBox(true), "x", event.target.value))}
+                      />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Y (px)</Label>
+                      <Input
+                        type="number"
+                        step="2"
+                        placeholder="theo góc"
+                        value={form.y}
+                        onChange={(event) => setForm((current) => moveTo(current, waveformBox(true), "y", event.target.value))}
+                      />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Position (góc)</Label>
+                      <select
+                        value={form.position}
+                        onChange={(event) =>
+                          setForm((current) => ({ ...current, position: event.target.value as WaveformForm["position"], x: "", y: "" }))
+                        }
+                        className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                      >
+                        <option value="bottom_right">Bottom right</option>
+                        <option value="bottom_left">Bottom left</option>
+                        <option value="top_right">Top right</option>
+                        <option value="top_left">Top left</option>
+                      </select>
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Margin</Label>
+                      <Input type="number" min="0" step="1" value={form.margin} onChange={(event) => setForm((current) => ({ ...current, margin: event.target.value, x: "", y: "" }))} />
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-muted-foreground">
+                    Kéo overlay trong khung ở trên để đặt vào bất kỳ đâu — X/Y là toạ độ góc trên-trái của
+                    sóng âm trong khung 1920×1080. Đổi Position hoặc Margin sẽ xoá toạ độ, quay về canh theo góc.
+                  </p>
+
+                  <div className="flex flex-wrap gap-3">
+                    <Button type="button" onClick={handleSave} disabled={isSaving}>
+                      {isSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
+                      Luu va dat mac dinh
+                    </Button>
+                    <Button type="button" variant="destructive" onClick={() => void handleDelete(selected.id)}>
+                      <Trash2 className="mr-2 size-4" />
+                      Xoa
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </PageSection>
+
+          <PageSection id="cta-overlay">
+            <div className="mb-4 space-y-1">
+              <h2 className="text-base font-semibold text-foreground">CTA overlay (Like / Subscribe / Thông báo)</h2>
+              <p className="text-sm text-muted-foreground">
+                Video nút kêu gọi được tách nền xanh và chèn vào một góc của mọi video Story Video. Mặc định bật sẵn ở góc trên-trái, loop hết thời lượng và không có tiếng.
+              </p>
+            </div>
+            <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
+              <div className="space-y-4">
+                <div className="grid gap-2">
+                  <Label>Upload video CTA (nền xanh)</Label>
+                  <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
+                    {isCtaUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
+                    <span>{isCtaUploading ? "Dang tao alpha MOV..." : "Chon video CTA"}</span>
+                    <Input
+                      type="file"
+                      accept=".mp4,.mov,.mkv,.webm"
+                      className="hidden"
+                      disabled={isCtaUploading}
+                      onChange={(event) => void handleCtaUpload(event.currentTarget.files?.[0] ?? null)}
+                    />
+                  </label>
+                </div>
+
+                {ctaOverlays.length ? (
+                  <div className="grid gap-2">
+                    {ctaOverlays.map((overlay) => (
+                      <button
+                        key={overlay.id}
+                        type="button"
+                        onClick={() => setSelectedCtaId(overlay.id)}
+                        className={`rounded-lg border p-3 text-left transition-colors ${
+                          selectedCta?.id === overlay.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate text-sm font-semibold text-foreground">{overlay.name}</span>
+                          <div className="flex items-center gap-1">
+                            {overlay.enabled === false ? (
+                              <Badge variant="secondary" className="rounded-full">Tắt</Badge>
+                            ) : null}
+                            {overlay.isDefault ? (
+                              <Badge className="rounded-full">
+                                <Star className="mr-1 size-3" />
+                                Default
+                              </Badge>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {overlay.durationSeconds}s | {overlay.scaleWidth ?? 360}px | {placementLabel(overlay, "top_left")}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyCard title="Chua co CTA overlay" description="Upload video nut nen xanh de tao overlay alpha." />
+                )}
+              </div>
+
+              {selectedCta ? (
+                <div className="grid gap-5">
+                  {selectedCta.processedRelativePath ? (
+                    <div
+                      className="w-full overflow-hidden rounded-lg"
+                      style={{
+                        backgroundColor: "#3a3a3a",
+                        backgroundImage:
+                          "linear-gradient(45deg, #555 25%, transparent 25%), linear-gradient(-45deg, #555 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #555 75%), linear-gradient(-45deg, transparent 75%, #555 75%)",
+                        backgroundSize: "24px 24px",
+                        backgroundPosition: "0 0, 0 12px, 12px -12px, -12px 0",
+                      }}
+                    >
+                      <video
+                        key={ctaPreviewBust}
+                        src={`/media/${selectedCta.processedRelativePath}?t=${ctaPreviewBust}`}
+                        autoPlay
+                        loop
+                        muted
+                        playsInline
+                        className="aspect-video w-full object-contain"
+                      />
+                    </div>
+                  ) : null}
+
+                  <label className="flex items-center gap-2 text-sm text-foreground">
+                    <input
+                      type="checkbox"
+                      checked={ctaForm.enabled}
+                      onChange={(event) => void handleCtaToggle(event.currentTarget.checked)}
+                      className="size-4"
+                    />
+                    Bật CTA overlay cho mọi video Story Video
+                  </label>
+
+                  <StoryOverlayPlacementEditor
+                    boxes={[ctaBox(true), waveformBox(false)]}
+                    onMove={({ x, y }) => setCtaForm((current) => ({ ...current, x: String(x), y: String(y) }))}
+                  />
+
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="grid gap-2">
+                      <Label>Key color</Label>
+                      <Input value={ctaForm.keyColor} onChange={(event) => setCtaForm((current) => ({ ...current, keyColor: event.target.value }))} />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Similarity</Label>
+                      <Input type="number" min="0" max="1" step="0.01" value={ctaForm.similarity} onChange={(event) => setCtaForm((current) => ({ ...current, similarity: event.target.value }))} />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Blend</Label>
+                      <Input type="number" min="0" max="1" step="0.01" value={ctaForm.blend} onChange={(event) => setCtaForm((current) => ({ ...current, blend: event.target.value }))} />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Width</Label>
+                      <Input type="number" min="64" step="2" value={ctaForm.scaleWidth} onChange={(event) => setCtaForm((current) => ({ ...current, scaleWidth: event.target.value }))} />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>X (px)</Label>
+                      <Input
+                        type="number"
+                        step="2"
+                        placeholder="theo góc"
+                        value={ctaForm.x}
+                        onChange={(event) => setCtaForm((current) => moveTo(current, ctaBox(true), "x", event.target.value))}
+                      />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Y (px)</Label>
+                      <Input
+                        type="number"
+                        step="2"
+                        placeholder="theo góc"
+                        value={ctaForm.y}
+                        onChange={(event) => setCtaForm((current) => moveTo(current, ctaBox(true), "y", event.target.value))}
+                      />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Position (góc)</Label>
+                      <select
+                        value={ctaForm.position}
+                        onChange={(event) =>
+                          setCtaForm((current) => ({ ...current, position: event.target.value as CtaForm["position"], x: "", y: "" }))
+                        }
+                        className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                      >
+                        <option value="top_left">Top left</option>
+                        <option value="top_right">Top right</option>
+                        <option value="bottom_left">Bottom left</option>
+                        <option value="bottom_right">Bottom right</option>
+                      </select>
+                    </div>
+                    <div className="grid gap-2">
+                      <Label>Margin</Label>
+                      <Input type="number" min="0" step="1" value={ctaForm.margin} onChange={(event) => setCtaForm((current) => ({ ...current, margin: event.target.value, x: "", y: "" }))} />
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-muted-foreground">
+                    Kéo overlay trong khung ở trên để đặt vào bất kỳ đâu — X/Y là toạ độ góc trên-trái của
+                    CTA trong khung 1920×1080. Đổi Position hoặc Margin sẽ xoá toạ độ, quay về canh theo góc.
+                  </p>
+
+                  <div className="flex flex-wrap gap-3">
+                    <Button type="button" onClick={handleCtaSave} disabled={isCtaSaving}>
+                      {isCtaSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
+                      Luu va dat mac dinh
+                    </Button>
+                    <Button type="button" variant="destructive" onClick={() => void handleCtaDelete(selectedCta.id)}>
+                      <Trash2 className="mr-2 size-4" />
+                      Xoa
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </PageSection>
+
+          <PageSection id="clip-normalize">
+            <StoryLibraryNormalizePanel onNormalized={() => setLibraryRefreshKey((current) => current + 1)} />
+          </PageSection>
+
+          <PageSection id="decor-images">
+            <div className="mb-4 space-y-1">
+              <h2 className="text-base font-semibold text-foreground">Ảnh decor (khung TV)</h2>
+              <p className="text-sm text-muted-foreground">
+                Ảnh chụp phủ kín khung hình, video nền chỉ chạy bên trong vùng màu xanh của ảnh.
+                Ảnh chưa có nền xanh cũng dùng được: chuyển sang chế độ “Tự tạo vùng nền xanh” rồi
+                kéo một khung 16:9 lên đúng mặt màn hình. Phần không phải vùng xanh luôn đè lên trên
+                video. Hiệu ứng TV và TV noise được áp vào video <em>trước</em> khi thu nhỏ vào khung,
+                còn sóng âm / CTA / phụ đề nằm trên ảnh decor. Chọn ảnh nào tham gia xoay vòng ở
+                trang render. <strong>Mỗi ảnh chỉ dùng cho 1 video</strong>: chia xong là bị đánh dấu
+                “đã dùng” và ra khỏi vòng xoay — video nào không còn ảnh thì tự chuyển sang bố cục
+                không dùng ảnh decor. Bấm “Dùng lại” nếu muốn cho ảnh quay lại vòng xoay.
+              </p>
+            </div>
+            {decorNotice ? (
+              <div className="mb-4">
+                <StatusAlert title="Ảnh decor" message={decorNotice} />
+              </div>
+            ) : null}
+            <div className="mb-5">
+              <StoryDecorImageSearchPanel
+                group={decorUploadGroup}
+                isImporting={isDecorUploading}
+                progress={decorUploadProgress}
+                onImport={handleDecorImport}
               />
-              <div className="flex flex-wrap gap-2 border-t border-border/60 pt-4">
+            </div>
+            <div className="mb-5 rounded-lg border border-input bg-muted/30 p-4">
+              <Label htmlFor="decor-blur-default" className="flex items-center justify-between gap-2">
+                <span>Làm mờ ảnh nền — mặc định chung</span>
+                <span className="font-mono text-xs text-muted-foreground">{decorBlurDraft}px</span>
+              </Label>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <input
+                  id="decor-blur-default-range"
+                  type="range"
+                  className="h-10 min-w-[160px] flex-1 cursor-pointer"
+                  min={0}
+                  max={40}
+                  step={1}
+                  value={Number(decorBlurDraft) || 0}
+                  onChange={(event) => setDecorBlurDraft(event.currentTarget.value)}
+                />
+                <Input
+                  id="decor-blur-default"
+                  type="number"
+                  className="w-24"
+                  min={0}
+                  max={40}
+                  value={decorBlurDraft}
+                  onChange={(event) => setDecorBlurDraft(event.currentTarget.value)}
+                />
                 <Button
                   type="button"
-                  variant="destructive"
-                  onClick={() => void handleDecorDelete(selectedDecor.id)}
+                  onClick={() => void handleDecorBlurApply()}
+                  disabled={isDecorBlurSaving || Number(decorBlurDraft) === decorBlur}
                 >
-                  <Trash2 className="mr-2 size-4" />
-                  Xoá ảnh decor
+                  {isDecorBlurSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                  Áp dụng
                 </Button>
               </div>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Chỉ áp cho ảnh ở chế độ “Tự tạo vùng nền xanh”. Nền mờ làm cửa sổ video sắc nét nổi
+                hẳn lên — cùng ý tưởng với kiểu dựng “Hai lớp cùng nguồn”. 0 = tắt. Độ mờ được nướng
+                sẵn vào ảnh nên <em>không</em> tốn thêm thời gian render. Bấm “Áp dụng” sẽ vẽ lại ảnh
+                của mọi khung đang theo mặc định chung; khung nào tự đặt riêng thì giữ nguyên.
+              </p>
             </div>
-          ) : null}
-        </div>
-      </PageSection>
+            <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
+              <div className="space-y-4">
+                <div className="grid gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label htmlFor="decor-upload-group">Nhóm chủ đề</Label>
+                    {decorNewGroupName === null ? (
+                      <Button type="button" variant="outline" size="sm" onClick={() => setDecorNewGroupName("")}>
+                        <Plus className="mr-1 size-4" />
+                        Tạo nhóm mới
+                      </Button>
+                    ) : null}
+                  </div>
+                  {decorNewGroupName !== null ? (
+                    <div className="flex gap-2">
+                      <Input
+                        autoFocus
+                        value={decorNewGroupName}
+                        onChange={(event) => setDecorNewGroupName(event.currentTarget.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") handleDecorGroupCreate();
+                          if (event.key === "Escape") setDecorNewGroupName(null);
+                        }}
+                        placeholder="Tên nhóm mới"
+                      />
+                      <Button type="button" size="sm" className="h-9" onClick={handleDecorGroupCreate} disabled={!decorNewGroupName.trim()}>
+                        Tạo
+                      </Button>
+                      <Button type="button" variant="ghost" size="sm" className="h-9" onClick={() => setDecorNewGroupName(null)}>
+                        Huỷ
+                      </Button>
+                    </div>
+                  ) : null}
+                  <Input
+                    id="decor-upload-group"
+                    list="decor-group-options"
+                    value={decorUploadGroup}
+                    onChange={(event) => setDecorUploadGroup(event.currentTarget.value)}
+                    placeholder="VD: Đền chùa, Làng quê, Điều tra phá án"
+                  />
+                  <datalist id="decor-group-options">
+                    {decorGroups.filter(Boolean).map((group) => (
+                      <option key={group} value={group} />
+                    ))}
+                  </datalist>
+                  <p className="text-xs text-muted-foreground">
+                    Ảnh upload dưới đây sẽ vào nhóm này. Gõ tên mới để tạo nhóm, để trống nếu chưa
+                    muốn phân loại — đổi nhóm sau lúc nào cũng được.
+                  </p>
 
-      <PageSection>
-        <div className="mb-4 space-y-1">
-          <h2 className="text-base font-semibold text-foreground">Thu vien clip</h2>
-          <p className="text-sm text-muted-foreground">
-            Upload video nguon hoac nhap link Pixabay/Pexels de he thong tai ve, cat thanh clip ngan va chuan hoa ve
-            dung dinh dang render dung chung cho Story Video.
-          </p>
+                  <Label className="mt-2">Upload ảnh decor (có sẵn nền xanh, hoặc tự vẽ vùng)</Label>
+                  <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-background/70 p-4 text-sm text-muted-foreground">
+                    {isDecorUploading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Upload className="size-5 text-primary" />}
+                    <span>
+                      {isDecorUploading && decorBusyKind === "import"
+                        ? `Đang tải ảnh từ Pexels/Pixabay ${decorUploadProgress?.done ?? 0}/${decorUploadProgress?.total ?? 0}...`
+                        : isDecorUploading
+                        ? decorUploadProgress
+                          ? `Đang tách nền xanh ${decorUploadProgress.done}/${decorUploadProgress.total}...`
+                          : "Đang tách nền xanh..."
+                        : "Chọn một hoặc nhiều ảnh PNG / JPG / WEBP"}
+                    </span>
+                    <Input
+                      type="file"
+                      accept=".png,.jpg,.jpeg,.webp,.bmp"
+                      multiple
+                      className="hidden"
+                      disabled={isDecorUploading}
+                      onChange={(event) => {
+                        void handleDecorUpload(event.currentTarget.files);
+                        event.currentTarget.value = "";
+                      }}
+                    />
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    Chọn được nhiều ảnh cùng lúc — cả loạt vào chung nhóm ở trên, upload lần lượt từng
+                    ảnh. Ảnh sẽ được kéo về đúng 1920x1080, nên dùng ảnh 16:9. Nếu ảnh có sẵn nền xanh,
+                    vùng xanh được dò tự động ngay khi upload. Nếu không, chế độ “Tự tạo vùng nền
+                    xanh” tự bật để bạn kéo khung 16:9 lên đúng mặt màn hình.
+                  </p>
+                </div>
+
+                {decorImages.length ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setDecorGroupFilter(null)}
+                      className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                        decorGroupFilter === null
+                          ? "border-primary bg-primary/15 text-foreground"
+                          : "border-border/70 text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      Tất cả ({decorImages.length})
+                    </button>
+                    {decorByGroup.map(({ group, items }) => (
+                      <button
+                        key={group || "__none__"}
+                        type="button"
+                        onClick={() => {
+                          setDecorGroupFilter(group);
+                          // Nhom dang xem cung la nhom mac dinh cho anh upload tiep theo.
+                          setDecorUploadGroup(group);
+                          if (!selectedDecor || decorGroupOf(selectedDecor) !== group) {
+                            setSelectedDecorId(items[0]?.id ?? "");
+                          }
+                        }}
+                        className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                          decorGroupFilter === group
+                            ? "border-primary bg-primary/15 text-foreground"
+                            : "border-border/70 text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        {group || DECOR_UNGROUPED} ({items.length})
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+
+                {decorImages.length ? (
+                  <div className="grid gap-4">
+                    {visibleDecorGroups.map(({ group, items }) => {
+                      const enabledCount = items.filter((item) => item.enabled !== false).length;
+                      const usedCount = items.filter((item) => item.used === true).length;
+                      const isRenaming = decorGroupEdit?.from === group;
+                      return (
+                        <div key={group || "__none__"} className="grid gap-2">
+                          <div className="flex items-center gap-1.5 border-b border-border/60 pb-1">
+                            {isRenaming ? (
+                              <>
+                                <Input
+                                  autoFocus
+                                  value={decorGroupEdit.value}
+                                  onChange={(event) =>
+                                    setDecorGroupEdit({ from: group, value: event.currentTarget.value })
+                                  }
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      void handleDecorGroupRename(group, event.currentTarget.value);
+                                    } else if (event.key === "Escape") {
+                                      setDecorGroupEdit(null);
+                                    }
+                                  }}
+                                  className="h-7 text-sm"
+                                />
+                                <Button
+                                  type="button"
+                                  size="icon"
+                                  variant="ghost"
+                                  className="size-7 shrink-0"
+                                  disabled={decorGroupBusy}
+                                  onClick={() => void handleDecorGroupRename(group, decorGroupEdit.value)}
+                                >
+                                  <Check className="size-3.5" />
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="icon"
+                                  variant="ghost"
+                                  className="size-7 shrink-0"
+                                  onClick={() => setDecorGroupEdit(null)}
+                                >
+                                  <X className="size-3.5" />
+                                </Button>
+                              </>
+                            ) : (
+                              <>
+                                <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+                                  {group || DECOR_UNGROUPED}
+                                </span>
+                                <span className="shrink-0 text-xs text-muted-foreground">
+                                  {enabledCount}/{items.length} bật
+                                </span>
+                                {group ? (
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="ghost"
+                                    className="size-7 shrink-0"
+                                    title="Đổi tên nhóm"
+                                    onClick={() => setDecorGroupEdit({ from: group, value: group })}
+                                  >
+                                    <Pencil className="size-3.5" />
+                                  </Button>
+                                ) : null}
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 shrink-0 px-2 text-xs"
+                                  disabled={decorGroupBusy || enabledCount === items.length}
+                                  onClick={() => void handleDecorGroupEnable(group, true)}
+                                >
+                                  Bật cả nhóm
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 shrink-0 px-2 text-xs"
+                                  disabled={decorGroupBusy || enabledCount === 0}
+                                  onClick={() => void handleDecorGroupEnable(group, false)}
+                                >
+                                  Tắt
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 shrink-0 px-2 text-xs"
+                                  disabled={decorGroupBusy || usedCount === 0}
+                                  title="Cho cả nhóm quay lại vòng xoay"
+                                  onClick={() => void handleDecorGroupUsedReset(group)}
+                                >
+                                  Dùng lại ({usedCount})
+                                </Button>
+                              </>
+                            )}
+                          </div>
+
+                          <div className="grid gap-2 max-h-96 overflow-y-auto">
+                            {items.map((item) => (
+                              <div
+                                key={item.id}
+                                className={`min-w-0 rounded-lg border p-2 transition-colors ${
+                                  selectedDecor?.id === item.id ? "border-primary bg-primary/10" : "border-border/70 bg-background/70"
+                                }`}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedDecorId(item.id);
+                                    // Chon tu danh sach ben canh cung phai keo thanh
+                                    // duyet theo, khong de hai cho tro vao hai anh.
+                                    const queueIndex = decorReviewItems.findIndex((entry) => entry.id === item.id);
+                                    if (queueIndex !== -1) setDecorReviewIndex(queueIndex);
+                                  }}
+                                  className="flex w-full min-w-0 items-center gap-3 text-left"
+                                >
+                                  <img
+                                    src={`/media/${item.processedRelativePath ?? item.relativePath}?t=${encodeURIComponent(item.updatedAt ?? "")}`}
+                                    alt={item.name}
+                                    className="h-12 w-20 shrink-0 rounded border border-border/50 object-cover"
+                                  />
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block truncate text-sm font-semibold text-foreground">{item.name}</span>
+                                    <span className="block text-xs text-muted-foreground">
+                                      Khung {item.frame.w}x{item.frame.h} @ {item.frame.x},{item.frame.y}
+                                      {item.maskMode === "manual" ? (
+                                        <span className="ml-1.5 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                                          Tự vẽ
+                                        </span>
+                                      ) : null}
+                                    </span>
+                                  </span>
+                                  {item.used === true ? (
+                                    <Badge variant="secondary" className="rounded-full">Đã dùng</Badge>
+                                  ) : null}
+                                  {item.enabled === false ? (
+                                    <Badge variant="secondary" className="rounded-full">Tắt</Badge>
+                                  ) : null}
+                                </button>
+                                <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                                  <input
+                                    type="checkbox"
+                                    checked={item.enabled !== false}
+                                    onChange={(event) => void handleDecorToggle(item.id, event.currentTarget.checked)}
+                                    className="size-3.5"
+                                  />
+                                  Cho phép dùng khi render
+                                </label>
+                                {item.used === true ? (
+                                  <button
+                                    type="button"
+                                    className="mt-1 text-xs text-primary underline underline-offset-2"
+                                    onClick={() => void handleDecorUsedReset(item.id)}
+                                  >
+                                    Dùng lại ảnh này
+                                  </button>
+                                ) : null}
+                                {decorGroupInputFor === item.id ? (
+                                  <Input
+                                    autoFocus
+                                    placeholder="Tên nhóm mới"
+                                    className="mt-2 h-7 text-xs"
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter") {
+                                        void handleDecorGroupAssign(item.id, event.currentTarget.value);
+                                      } else if (event.key === "Escape") {
+                                        setDecorGroupInputFor(null);
+                                      }
+                                    }}
+                                    onBlur={(event) => {
+                                      const value = event.currentTarget.value.trim();
+                                      if (value) void handleDecorGroupAssign(item.id, value);
+                                      else setDecorGroupInputFor(null);
+                                    }}
+                                  />
+                                ) : (
+                                  <select
+                                    value={decorGroupOf(item)}
+                                    onChange={(event) => {
+                                      const value = event.currentTarget.value;
+                                      if (value === DECOR_NEW_GROUP) setDecorGroupInputFor(item.id);
+                                      else void handleDecorGroupAssign(item.id, value);
+                                    }}
+                                    className="mt-2 h-7 w-full rounded-md border border-input bg-background px-2 text-xs text-muted-foreground"
+                                  >
+                                    <option value="">{DECOR_UNGROUPED}</option>
+                                    {decorGroups.filter(Boolean).map((name) => (
+                                      <option key={name} value={name}>
+                                        {name}
+                                      </option>
+                                    ))}
+                                    <option value={DECOR_NEW_GROUP}>+ Nhóm mới...</option>
+                                  </select>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <EmptyCard
+                    title="Chưa có ảnh decor"
+                    description="Upload ảnh có vùng nền xanh (ví dụ phòng khách với TV màn hình xanh) để bắt đầu."
+                  />
+                )}
+              </div>
+
+              {selectedDecor ? (
+                <div className="grid gap-4">
+                  {decorReviewItems.length ? (
+                    <div className="rounded-lg border border-primary/40 bg-primary/5 p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-semibold text-foreground">
+                          Duyệt ảnh vừa upload — ảnh {decorReviewAt + 1}/{decorReviewItems.length}
+                        </span>
+                        <Badge variant="secondary" className="rounded-full">
+                          {decorReviewDone.length}/{decorReviewItems.length} đã lưu khung
+                        </Badge>
+                        <div className="ml-auto flex items-center gap-1.5">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2 text-xs"
+                            disabled={decorReviewAt === 0}
+                            onClick={() => goToDecorReview(decorReviewAt - 1)}
+                          >
+                            Ảnh trước
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2 text-xs"
+                            disabled={decorReviewAt >= decorReviewItems.length - 1}
+                            onClick={() => goToDecorReview(decorReviewAt + 1)}
+                          >
+                            Ảnh sau
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 px-2 text-xs"
+                            title="Đóng thanh duyệt"
+                            onClick={closeDecorReview}
+                          >
+                            <X className="mr-1 size-3.5" />
+                            Xong
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+                        {decorReviewItems.map((item, index) => {
+                          const isDone = decorReviewDone.includes(item.id);
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              title={item.name}
+                              onClick={() => goToDecorReview(index)}
+                              className={`relative shrink-0 overflow-hidden rounded border-2 transition-colors ${
+                                index === decorReviewAt ? "border-primary" : "border-transparent hover:border-border"
+                              }`}
+                            >
+                              <img
+                                src={`/media/${item.processedRelativePath ?? item.relativePath}?t=${encodeURIComponent(item.updatedAt ?? "")}`}
+                                alt={item.name}
+                                className="h-11 w-[74px] object-cover"
+                              />
+                              <span
+                                className={`absolute inset-x-0 bottom-0 truncate px-1 text-center text-[9px] font-semibold ${
+                                  isDone
+                                    ? "bg-primary/85 text-primary-foreground"
+                                    : item.autoDetected === false
+                                      ? "bg-amber-500/85 text-black"
+                                      : "bg-black/65 text-white"
+                                }`}
+                              >
+                                {isDone ? "Đã lưu" : item.autoDetected === false ? "Tự vẽ" : "Auto"}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <p className="mt-1.5 text-xs text-muted-foreground">
+                        Kiểm tra (hoặc kéo lại) vùng nền xanh cho từng ảnh rồi bấm “Lưu khung” — lưu xong
+                        tự sang ảnh chưa duyệt kế tiếp. Ảnh gắn nhãn “Tự vẽ” là ảnh không có nền xanh,
+                        bắt buộc phải kéo khung trước khi dùng để render.
+                      </p>
+                    </div>
+                  ) : null}
+                  <StoryDecorFrameEditor
+                    key={selectedDecor.id}
+                    image={selectedDecor}
+                    previewPath={decorPreviewPath}
+                    defaultBlur={decorBlur}
+                    isPreviewLoading={isDecorPreviewLoading}
+                    isSaving={isDecorSaving}
+                    onRequestPreview={() => void handleDecorFramePreview()}
+                    onDetectFrame={handleDecorDetect}
+                    onSave={handleDecorSave}
+                  />
+                  <div className="flex flex-wrap gap-2 border-t border-border/60 pt-4">
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      onClick={() => void handleDecorDelete(selectedDecor.id)}
+                    >
+                      <Trash2 className="mr-2 size-4" />
+                      Xoá ảnh decor
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </PageSection>
+
+          <PageSection id="clip-library">
+            <div className="mb-4 space-y-1">
+              <h2 className="text-base font-semibold text-foreground">Thu vien clip</h2>
+              <p className="text-sm text-muted-foreground">
+                Upload video nguon hoac nhap link Pixabay/Pexels de he thong tai ve, cat thanh clip ngan va chuan hoa ve
+                dung dinh dang render dung chung cho Story Video.
+              </p>
+            </div>
+            <StoryLibraryManager key={libraryRefreshKey} showBulkDeleteActions />
+          </PageSection>
         </div>
-        <StoryLibraryManager key={libraryRefreshKey} showBulkDeleteActions />
-      </PageSection>
+      </div>
     </AppShell>
   );
 }

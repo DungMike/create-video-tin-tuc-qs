@@ -1872,8 +1872,13 @@ def _resolve_decor_selection(image_ids, library_ids, count):
     the TV screen instead of on top of the photo — so that combination is refused
     here rather than silently rendering something wrong. One fully-baked library
     anywhere in the selection is enough: its clips land in the same pool.
+
+    Decor images are one-shot (see ``story_decor_images.claim_decor_images``), so
+    a selection smaller than ``count`` is padded with ``""``: those videos render
+    with no decor frame at all, which on this path — no layout chosen — is
+    exactly the plain edit they would have had before decor existed.
     """
-    from src.utils.story_decor_images import build_decor_rotation
+    from src.utils.story_decor_images import claim_decor_images
     from src.utils.story_library import any_fully_baked_library
 
     wanted = [str(item or "").strip() for item in (image_ids or []) if str(item or "").strip()]
@@ -1887,12 +1892,18 @@ def _resolve_decor_selection(image_ids, library_ids, count):
             code="decor_baked_library_conflict",
         )
 
-    assignments = build_decor_rotation(wanted, count)
-    if not assignments:
+    assignments, usable_total = claim_decor_images(wanted, count)
+    if not usable_total:
         return None, _error(
             "Khong co anh decor nao dung duoc (chua tach nen hoac da bi xoa).",
             code="decor_unusable",
         )
+    if len(assignments) < count:
+        logger.info(
+            f"[StoryVideo] Decor images ran out: {len(assignments)}/{count} video(s) get a TV "
+            f"frame, the rest render without one."
+        )
+        assignments = assignments + ["" for _ in range(count - len(assignments))]
     return assignments, None
 
 
@@ -1900,6 +1911,34 @@ def _clean_ids(values) -> list[str]:
     if not isinstance(values, list):
         return []
     return [str(item).strip() for item in values if str(item or "").strip()]
+
+
+def _abandon_batch_dir(batch_dir: str, decor_assignments=()):
+    """Undo a half-built batch: drop its directory and un-spend its decor images.
+
+    Decor images are marked used the moment they are dealt, so a batch that
+    never makes it to the queue has to hand them back — otherwise a failed
+    create burns a photo on a video that will never exist.
+    """
+    from src.utils.story_decor_images import release_decor_images
+
+    shutil.rmtree(batch_dir, ignore_errors=True)
+    release_decor_images(decor_assignments)
+
+
+def _decor_free_layouts(layout_ids: list[str], count: int) -> list[str]:
+    """``count`` layouts drawn from the same selection that need no decor image.
+
+    Where a video drew a TV-frame layout but the decor library ran dry, this is
+    what it falls back to. ``""`` = no layout at all (clip fills the frame): the
+    user picked nothing but TV-frame layouts, so a plain frame is all that is
+    left — still better than refusing the whole batch over a spent photo.
+    """
+    from src.utils.edit_styles import store
+
+    free = [lid for lid in layout_ids if not store.type_flag(lid, "requiresDecor")]
+    dealt = store.build_layout_rotation(free, count) if free else []
+    return dealt + ["" for _ in range(count - len(dealt))]
 
 
 def _resolve_edit_selection(shared_config: dict, library_ids, count: int):
@@ -1913,9 +1952,14 @@ def _resolve_edit_selection(shared_config: dict, library_ids, count: int):
     - With ``layoutIds``: one enabled layout per video, dealt from a shuffled deck.
       Decor images are dealt only to the videos that drew a layout needing one.
     - ``modifierIds`` apply to every video (one record per modifier type).
+
+    Each decor image is spent on one video and never dealt again, so a batch can
+    ask for more TV frames than the library still holds. The videos left over
+    are moved onto a decor-free layout rather than rendered with an empty TV
+    frame or refused outright.
     """
     from src.utils.edit_styles import store
-    from src.utils.story_decor_images import build_decor_rotation
+    from src.utils.story_decor_images import claim_decor_images
     from src.utils.story_library import any_fully_baked_library
 
     layout_ids = _clean_ids(shared_config.get("layoutIds"))
@@ -1951,12 +1995,23 @@ def _resolve_edit_selection(shared_config: dict, library_ids, count: int):
         if not decor_ids:
             return None, _error("Bo cuc khung TV can it nhat 1 anh decor. Hay chon anh decor.",
                                 code="layout_needs_decor")
-        dealt = build_decor_rotation(decor_ids, len(decor_slots))
-        if not dealt:
+        dealt, usable_total = claim_decor_images(decor_ids, len(decor_slots))
+        # Nothing usable at all is a broken selection (deleted, or never keyed)
+        # and worth stopping for; merely running out of *unused* images is not.
+        if not usable_total:
             return None, _error("Khong co anh decor nao dung duoc (chua tach nen hoac da bi xoa).",
                                 code="decor_unusable")
         for slot, image_id in zip(decor_slots, dealt):
             decor_per_item[slot] = image_id
+
+        starved = decor_slots[len(dealt):]
+        if starved:
+            for slot, layout_id in zip(starved, _decor_free_layouts(layout_ids, len(starved))):
+                layouts[slot] = layout_id
+            logger.info(
+                f"[StoryVideo] Decor images ran out: {len(dealt)}/{len(decor_slots)} TV-frame "
+                f"video(s) got an image; {len(starved)} moved to a decor-free layout."
+            )
     return (layouts, decor_per_item, modifier_out), None
 
 
@@ -2552,6 +2607,9 @@ def create_story_batch():
     batch_id = f"sb-{str(uuid.uuid4())[:8]}"
     batch_dir = os.path.join(Config.STORY_VIDEO_DIR, "batches", batch_id)
     os.makedirs(batch_dir, exist_ok=True)
+    # Filled in by _resolve_edit_selection below; empty until then, so the abort
+    # paths above that point release nothing.
+    decor_assignments: list[str] = []
 
     # Handle uploaded audio files
     audio_files = request.files.getlist("audio_files")
@@ -2574,7 +2632,7 @@ def create_story_batch():
         if sf.filename:
             sub_ext = sf.filename.rsplit(".", 1)[-1].lower() if "." in sf.filename else ""
             if sub_ext != "srt":
-                shutil.rmtree(batch_dir, ignore_errors=True)
+                _abandon_batch_dir(batch_dir, decor_assignments)
                 return _error("File subtitle phải có định dạng .srt.", code="invalid_subtitle_format")
             safe_name = secure_filename(sf.filename)
             if not safe_name.lower().endswith(".srt"):
@@ -2606,7 +2664,7 @@ def create_story_batch():
     if intro_id:
         intro_video_path = resolve_intro_path(intro_id)
         if not intro_video_path:
-            shutil.rmtree(batch_dir, ignore_errors=True)
+            _abandon_batch_dir(batch_dir, decor_assignments)
             return _error("Intro không tồn tại.", code="intro_not_found", status=404)
 
     # Layouts ("bo cuc") rotate across the batch: one shuffled deck dealt out so
@@ -2615,7 +2673,7 @@ def create_story_batch():
     # payload has decor ids and no layouts: the old "use decor" behaviour).
     edit_selection, edit_error = _resolve_edit_selection(shared_config, library_ids, len(items))
     if edit_error is not None:
-        shutil.rmtree(batch_dir, ignore_errors=True)
+        _abandon_batch_dir(batch_dir, decor_assignments)
         return edit_error
     layout_assignments, decor_assignments, modifier_ids = edit_selection
 
@@ -2633,7 +2691,7 @@ def create_story_batch():
         "waveform_unusable",
     )
     if waveform_error is not None:
-        shutil.rmtree(batch_dir, ignore_errors=True)
+        _abandon_batch_dir(batch_dir, decor_assignments)
         return waveform_error
 
     cta_assignments, cta_error = _resolve_overlay_rotation(
@@ -2644,7 +2702,7 @@ def create_story_batch():
         "cta_unusable",
     )
     if cta_error is not None:
-        shutil.rmtree(batch_dir, ignore_errors=True)
+        _abandon_batch_dir(batch_dir, decor_assignments)
         return cta_error
 
     # Cau hinh phu de cung xoay vong nhu vay. Khong chon = ca batch dung chung
@@ -2659,7 +2717,7 @@ def create_story_batch():
         "subtitle_style_unusable",
     )
     if style_error is not None:
-        shutil.rmtree(batch_dir, ignore_errors=True)
+        _abandon_batch_dir(batch_dir, decor_assignments)
         return style_error
     # Moi cau hinh chi giai mot lan, du no roi vao bao nhieu video.
     style_subtitle_configs = {
@@ -2688,7 +2746,7 @@ def create_story_batch():
                 input_value = audio_name_map[secure_filename(input_value)]
             elif os.path.isabs(input_value):
                 if not os.path.isfile(input_value):
-                    shutil.rmtree(batch_dir, ignore_errors=True)
+                    _abandon_batch_dir(batch_dir, decor_assignments)
                     return _error(
                         f"Khong tim thay file audio local: {input_value}",
                         code="local_audio_not_found",
@@ -2699,7 +2757,7 @@ def create_story_batch():
                 input_value, _original_name = copy_staged_audio_to_batch(input_value, batch_dir, idx)
                 input_type = "audio_file"
             except DriveAudioImportError as exc:
-                shutil.rmtree(batch_dir, ignore_errors=True)
+                _abandon_batch_dir(batch_dir, decor_assignments)
                 return _error(str(exc), code=exc.code)
 
         # Map subtitle upload indexes or filenames to durable batch files.
@@ -2716,10 +2774,10 @@ def create_story_batch():
                 subtitle_path = subtitle_name_map[secure_filename(subtitle_ref)]
             elif os.path.isabs(subtitle_ref):
                 if not subtitle_ref.lower().endswith(".srt"):
-                    shutil.rmtree(batch_dir, ignore_errors=True)
+                    _abandon_batch_dir(batch_dir, decor_assignments)
                     return _error("File subtitle phải có định dạng .srt.", code="invalid_subtitle_format")
                 if not os.path.isfile(subtitle_ref):
-                    shutil.rmtree(batch_dir, ignore_errors=True)
+                    _abandon_batch_dir(batch_dir, decor_assignments)
                     return _error(
                         f"Khong tim thay file subtitle local: {subtitle_ref}",
                         code="local_subtitle_not_found",
@@ -3418,13 +3476,81 @@ def upload_decor_image():
     return jsonify({"image": record}), 201
 
 
+@story_video_bp.route("/api/story-video/decor-image-search/<provider>", methods=["GET"])
+def search_decor_provider_images(provider: str):
+    """Proxy Pexels/Pixabay photo search, pre-filtered to >=1920x1080 and ~16:9."""
+    from requests import HTTPError, RequestException
+
+    from src.utils.decor_image_search import search_provider_images
+    from src.utils.pexels_key_pool import PexelsQuotaExhausted
+    from src.utils.story_decor_images import imported_source_keys
+
+    provider = provider.strip().lower()
+    if provider not in {"pixabay", "pexels"}:
+        return _error("Provider khong hop le.", code="invalid_provider", status=404)
+
+    query = request.args.get("q", "").strip()
+    if not query:
+        return _error("Can nhap keyword de search anh.", code="missing_query")
+
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except ValueError:
+        return _error("page khong hop le.", code="invalid_pagination")
+
+    try:
+        result = search_provider_images(provider, query, page)
+    except ValueError as exc:
+        return _error(str(exc), code="provider_api_key_missing", status=400)
+    except PexelsQuotaExhausted as exc:
+        return _error(str(exc), code="provider_quota_exhausted", status=429)
+    except HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else 502
+        logger.error(f"[StoryVideo] {provider} image search HTTP error: {exc}")
+        return _error(
+            f"{provider} search API error.",
+            code="provider_search_failed",
+            status=502 if status_code >= 500 else 400,
+        )
+    except RequestException as exc:
+        logger.error(f"[StoryVideo] {provider} image search request error: {exc}")
+        return _error(f"Khong the goi {provider} API.", code="provider_search_failed", status=502)
+
+    result["importedKeys"] = imported_source_keys()
+    return jsonify(result)
+
+
+@story_video_bp.route("/api/story-video/decor-images/import", methods=["POST"])
+def import_decor_provider_image():
+    """Import one searched photo as a decor image (one per request, like upload)."""
+    from src.utils.story_decor_images import import_decor_image
+
+    data = request.get_json(silent=True) or {}
+    item = data.get("item")
+    if not isinstance(item, dict):
+        return _error("Thieu thong tin anh can import.", code="no_item")
+
+    try:
+        record = import_decor_image(item, group=str(data.get("group") or ""))
+    except FileExistsError as exc:
+        return _error(str(exc), code="decor_already_imported", status=409)
+    except ValueError as exc:
+        return _error(str(exc), code="invalid_decor_image")
+    except Exception as exc:
+        logger.error(f"[StoryVideo] Decor image import failed: {exc}", exc_info=True)
+        return _error(f"Khong the import anh decor: {exc}", code="decor_import_failed", status=500)
+
+    logger.info(f"[StoryVideo] Decor image imported from {item.get('provider')} {item.get('id')}: {record['id']}")
+    return jsonify({"image": record}), 201
+
+
 @story_video_bp.route("/api/story-video/decor-images/<image_id>", methods=["PATCH"])
 def patch_decor_image(image_id: str):
     from src.utils.story_decor_images import update_decor_image
 
     payload = request.get_json(silent=True) or {}
     updates = {}
-    for key in ("name", "keyColor", "enabled", "frame", "group", "maskMode"):
+    for key in ("name", "keyColor", "enabled", "frame", "group", "maskMode", "used"):
         if key in payload:
             updates[key] = payload[key]
     for key in ("similarity", "blend", "overscan"):
@@ -3518,6 +3644,28 @@ def rename_decor_image_group():
 
     logger.info(f"[StoryVideo] Decor group renamed: '{old_group}' -> '{new_group}' ({moved} anh)")
     return jsonify({"moved": moved, "groups": list_decor_groups()})
+
+
+@story_video_bp.route("/api/story-video/decor-images/reset-used", methods=["POST"])
+def reset_decor_images_used():
+    """Un-spend decor images so they can be dealt again.
+
+    Each image is used by exactly one video, so a themed set runs out after N
+    videos. This is how the user starts that set over: by ``imageIds``, by
+    ``group``, or — with neither — across the whole library.
+    """
+    from src.utils.story_decor_images import reset_decor_used
+
+    payload = request.get_json(silent=True) or {}
+    image_ids = payload.get("imageIds")
+    group = payload.get("group")
+
+    cleared = reset_decor_used(
+        group=None if group is None else str(group),
+        image_ids=image_ids if isinstance(image_ids, list) else None,
+    )
+    logger.info(f"[StoryVideo] Decor used-mark reset: {cleared} anh (group={group!r})")
+    return jsonify({"cleared": cleared})
 
 
 @story_video_bp.route("/api/story-video/decor-images/<image_id>", methods=["DELETE"])
