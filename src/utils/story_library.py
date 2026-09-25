@@ -771,11 +771,10 @@ def any_fully_baked_library(library_ids=None) -> bool:
 
 
 def libraries_clip_duration(library_ids=None, default: int = 0) -> int:
-    """Smallest per-clip unit duration across the selected libraries.
+    """Smallest NOMINAL per-clip unit duration across the selected libraries.
 
-    The concat demuxer writes one ``outpoint`` for every segment, so a mixed
-    selection has to trim to the shortest unit — anything longer would overrun
-    the clips coming from the library built with the smaller unit.
+    Only a starting guess for the render (edit-plan clip period before the base is
+    measured): clips are no longer trimmed to it -- each plays its own full length.
     """
     durations = [
         library_clip_duration(lid, default) for lid in resolve_library_ids(library_ids)

@@ -95,6 +95,9 @@ class EditPlan:
         # anything synced to cuts must use these, not multiples of clip_seconds.
         self.clip_starts: list[float] = []
         self.clip_period = float(clip_seconds or 3)
+        # False once measured clips differ in length (render plays every clip full, so
+        # 8s video cuts and 3-5s photo clips mix): a mean period no longer hits the cuts.
+        self.clip_uniform = True
         self.run_starts: list[int] | None = None  # clip indices that open a shot (long takes)
         self.decor_png_override: str | None = None
         self.decor_record_override: dict | None = None
@@ -167,6 +170,9 @@ class EditPlan:
         self.clip_starts = [float(s) for s in starts]
         if len(self.clip_starts) > 1:
             self.clip_period = (self.clip_starts[-1] - self.clip_starts[0]) / (len(self.clip_starts) - 1)
+            gaps = [b - a for a, b in zip(self.clip_starts, self.clip_starts[1:])]
+            # Concat shaves a few frames off some clips (~2.983s for 3s): allow 15%.
+            self.clip_uniform = max(abs(gap - self.clip_period) for gap in gaps) <= 0.15 * self.clip_period
         indices = self.run_starts if self.run_starts is not None else range(len(self.clip_starts))
         self.cut_times = [self.clip_starts[i] for i in indices if 0 < i < len(self.clip_starts)]
 
@@ -342,8 +348,10 @@ class EditPlan:
             zw, zh = _even(W * zoom), _even(H * zoom)
             mx, my = (zw - W) / 2, (zh - H) / 2
             amp = float(p["amplitude"])
-            if lt == "drift" and p.get("redirectEachClip", True):
+            if lt == "drift" and p.get("redirectEachClip", True) and self.clip_uniform:
                 # Measured mean clip length: nominal 3s would drift off the real cuts.
+                # Clips of mixed length fall through to the smooth drift below instead
+                # of turning mid-shot.
                 per = f"{self.clip_period:.5f}"
                 k = f"floor({tx}/{per})"
                 prog = f"(2*mod({tx},{per})/{per}-1)"

@@ -1,4 +1,4 @@
-import { Check, Eye, Link as LinkIcon, Loader2, Pencil, Plus, Save, Sparkles, Star, Trash2, Upload, X } from "lucide-react";
+import { Check, Eye, Images, Link as LinkIcon, Loader2, Pencil, Plus, Save, Sparkles, Star, Trash2, Upload, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
@@ -7,6 +7,7 @@ import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
 import { StoryDecorFrameEditor } from "@/components/StoryDecorFrameEditor";
 import { StoryDecorImageSearchPanel } from "@/components/StoryDecorImageSearchPanel";
+import { StoryImageClipPanel } from "@/components/StoryImageClipPanel";
 import { StoryOverlayPlacementEditor } from "@/components/StoryOverlayPlacementEditor";
 import { StoryLibraryManager } from "@/components/StoryLibraryManager";
 import { StoryLibraryNormalizePanel } from "@/components/StoryLibraryNormalizePanel";
@@ -372,6 +373,7 @@ const SETTINGS_SECTIONS: SectionNavItem[] = [
   { id: "clip-normalize", label: "Chuan hoa clip" },
   { id: "decor-images", label: "Anh decor (khung TV)" },
   { id: "clip-library", label: "Thu vien clip" },
+  { id: "image-clip-library", label: "Thư viện clip từ ảnh" },
   { id: "search-keywords", label: "Tu khoa da tim" },
 ];
 
@@ -2949,6 +2951,24 @@ export function StoryVideoSettingsPage() {
               </p>
             </div>
             <StoryLibraryManager key={libraryRefreshKey} showBulkDeleteActions />
+          </PageSection>
+
+          <PageSection id="image-clip-library">
+            <div className="mb-4 space-y-1">
+              <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+                <Images className="size-4 text-primary" />
+                Thư viện clip từ ảnh
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                Tìm ảnh Pexels/Pixabay theo từ khóa, duyệt rồi biến mỗi ảnh thành 1 clip Ken Burns (zoom, lia trái/phải,
+                lên/xuống, chéo) đúng chuẩn clip render — thêm được nhiều clip hơn khi video theo từ khóa đã hết. Lần tìm
+                sau đi tiếp từ trang đã lưu của từng từ khóa (cần MongoDB).
+              </p>
+            </div>
+            <StoryImageClipPanel
+              refreshKey={libraryRefreshKey}
+              onCommitted={() => setLibraryRefreshKey((current) => current + 1)}
+            />
           </PageSection>
 
           <PageSection id="search-keywords">

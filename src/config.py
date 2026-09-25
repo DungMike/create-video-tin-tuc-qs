@@ -161,11 +161,15 @@ class Config:
     # Khi CA pool dang nghi: chi ngu toi da bay nhieu giay roi bao loi len caller.
     # Cho ca tieng dong ho trong mot job tai hang loat la treo, khong phai retry.
     PEXELS_POOL_MAX_WAIT_SECONDS = float(os.getenv("PEXELS_POOL_MAX_WAIT_SECONDS", "60"))
-    # Length of one library clip / one render segment. Downloads are cut into clips
-    # of exactly this length, and the render trims each clip to it (concat outpoint),
-    # so a library built at 3s and a render at 3s stay in lockstep. A library can
+    # Length videos are CUT to (Pixabay/Pexels/upload -> library clips). A library can
     # override it via its own `clipDuration` (see story_library.library_clip_duration).
+    # The render no longer trims to it: every clip plays its own full length, so a
+    # library can mix clips of different lengths (e.g. 8s video cuts + 3-5s photo clips).
     STORY_CLIP_DURATION = int(os.getenv("STORY_CLIP_DURATION", "3"))
+    # Thu vien clip tu anh: moi anh nhan mot do dai NGAU NHIEN trong [MIN, MAX] giay,
+    # doc lap voi STORY_CLIP_DURATION (luong cat video) -- render phat du do dai tung clip.
+    STORY_IMAGE_CLIP_DURATION_MIN = float(os.getenv("STORY_IMAGE_CLIP_DURATION_MIN", "3"))
+    STORY_IMAGE_CLIP_DURATION_MAX = float(os.getenv("STORY_IMAGE_CLIP_DURATION_MAX", "5"))
     # Root of the clip libraries (story_library/<library_id>/clips/). This is the
     # hottest read path of a render AND the biggest thing under STORAGE_DIR, so the
     # two pull in opposite directions: it wants the fast disk, it does not fit on it.
@@ -206,6 +210,10 @@ class Config:
     # under STORY_RAW_DIR has ever been cleaned up, and this flow downloads whole
     # result sets, so its own staging dirs must not accumulate forever.
     STORY_PREFETCH_TTL_SECONDS = int(os.getenv("STORY_PREFETCH_TTL_SECONDS", "172800"))
+    # Thu vien clip tu anh (src/utils/story_image_clips.py): so ffmpeg Ken Burns
+    # chay song song luc tao clip. Moi clip ~2-4s CPU + 1 phien NVENC; de thap vi
+    # buoc nay hay chay cung luc voi batch render.
+    STORY_IMAGE_CLIP_WORKERS = max(1, int(os.getenv("STORY_IMAGE_CLIP_WORKERS", "2")))
     STORY_LIBRARY_PAGE_SIZE = int(os.getenv("STORY_LIBRARY_PAGE_SIZE", "20"))
     # Multiple named clip libraries ("folders"). The Default library's root IS
     # STORY_LIBRARY_DIR itself (no file migration); other libraries live under

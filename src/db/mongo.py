@@ -21,6 +21,10 @@ SOURCE_VIDEOS = "source_videos"
 CLIPS = "clips"
 CLIP_USAGE_EVENTS = "clip_usage_events"
 SEARCH_KEYWORDS = "search_keywords"
+# Thu vien clip tu anh (src/db/image_repo.py). Index tao luoi ben do, KHONG qua
+# ensure_indexes: loi o day khong duoc lam hong cac luong khac.
+IMAGE_SEARCH_CURSORS = "image_search_cursors"
+SOURCE_IMAGES = "source_images"
 
 SCHEMA_VERSION = 1
 

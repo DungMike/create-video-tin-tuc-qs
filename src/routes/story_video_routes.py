@@ -1247,6 +1247,359 @@ def delete_story_harvest_job(job_id: str):
 
 
 # ---------------------------------------------------------------------------
+# 4g. Thu vien clip tu anh: tim anh Pexels/Pixabay -> duyet -> 1 anh = 1 clip Ken
+# Burns vao thu vien. Can MongoDB (con tro phan trang theo tu khoa + chong trung
+# anh). Xem src/utils/story_image_clips.py. Khong route nao o tren dung toi day.
+# ---------------------------------------------------------------------------
+def _image_clip_mongo_or_503():
+    from src.db import mongo
+
+    if not mongo.is_available(force=True):
+        return _error(mongo.unavailable_message(), code="mongo_unavailable", status=503)
+    return None
+
+
+def _image_clip_job_or_404(job_id: str):
+    from src.utils.story_image_clips import load_progress
+
+    progress = load_progress(job_id)
+    if not progress:
+        return None, _error("Job ảnh không tồn tại.", code="image_clip_not_found", status=404)
+    return progress, None
+
+
+def _is_mongo_error(exc: Exception) -> bool:
+    from src.db.mongo import MongoUnavailable
+
+    if isinstance(exc, MongoUnavailable):
+        return True
+    try:
+        from pymongo.errors import PyMongoError
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(exc, PyMongoError)
+
+
+@story_video_bp.route("/api/story-video/image-clips/effects", methods=["GET"])
+def list_image_clip_effects():
+    from src.utils import image_clip_effects as effects
+
+    duration_min, duration_max = effects.duration_range()
+    return jsonify({
+        "effects": effects.list_effects(),
+        "defaultZoom": effects.DEFAULT_ZOOM,
+        "zoomMin": effects.ZOOM_MIN,
+        "zoomMax": effects.ZOOM_MAX,
+        # STORY_IMAGE_CLIP_DURATION_MIN/MAX: moi anh dai ngau nhien trong khoang nay.
+        "durationMin": duration_min,
+        "durationMax": duration_max,
+    })
+
+
+@story_video_bp.route("/api/story-video/image-clips/jobs", methods=["POST"])
+def start_image_clip_job_route():
+    from src.utils.story_image_clips import (
+        ImageClipBusy,
+        ImageClipError,
+        LibraryHasMotion,
+        describe_job,
+        start_image_clip_job,
+    )
+
+    data = request.get_json(silent=True) or {}
+    library_id, err = _resolve_or_404(data.get("libraryId"))
+    if err:
+        return err
+
+    raw_keywords = data.get("keywords")
+    if isinstance(raw_keywords, str):
+        raw_keywords = raw_keywords.replace(",", "\n").split("\n")
+    if not isinstance(raw_keywords, list):
+        return _error("keywords phải là array hoặc chuỗi.", code="invalid_keywords")
+    providers = data.get("providers")
+    if not isinstance(providers, list):
+        return _error("providers phải là array.", code="invalid_providers")
+    tags = data.get("tags") or []
+    effects_enabled = data.get("effects") or []
+    if not isinstance(tags, list) or not isinstance(effects_enabled, list):
+        return _error("tags/effects phải là array.", code="invalid_image_clip_request")
+    try:
+        max_per_keyword = max(0, int(data.get("maxPerKeyword", 100) or 0))
+        zoom = float(data.get("zoom") or 0) or None
+    except (TypeError, ValueError):
+        return _error("maxPerKeyword/zoom không hợp lệ.", code="invalid_image_clip_request")
+
+    err = _image_clip_mongo_or_503()
+    if err is not None:
+        return err
+    try:
+        kwargs = {"zoom": zoom} if zoom else {}
+        progress = start_image_clip_job(
+            keywords=raw_keywords,
+            providers=providers,
+            library_id=library_id,
+            tags=tags,
+            max_per_keyword=max_per_keyword,
+            effects_enabled=effects_enabled,
+            rescan_exhausted=bool(data.get("rescanExhausted", False)),
+            **kwargs,
+        )
+    except ImageClipBusy as exc:
+        return _error(str(exc), code="image_clip_busy", status=409)
+    except LibraryHasMotion as exc:
+        return _error(str(exc), code="library_has_motion", status=409)
+    except ImageClipError as exc:
+        return _error(str(exc), code="invalid_image_clip_request")
+    except Exception as exc:
+        if _is_mongo_error(exc):
+            from src.db import mongo
+
+            return _error(mongo.unavailable_message(), code="mongo_unavailable", status=503)
+        raise
+    return jsonify(describe_job(progress)), 202
+
+
+@story_video_bp.route("/api/story-video/image-clips/jobs", methods=["GET"])
+def list_image_clip_jobs_route():
+    from src.utils.story_image_clips import list_jobs
+
+    return jsonify({"jobs": list_jobs()})
+
+
+@story_video_bp.route("/api/story-video/image-clips/jobs/<job_id>", methods=["GET"])
+def get_image_clip_job_route(job_id: str):
+    from src.utils.story_image_clips import describe_job
+
+    progress, err = _image_clip_job_or_404(job_id)
+    if err:
+        return err
+    return jsonify(describe_job(progress))
+
+
+@story_video_bp.route("/api/story-video/image-clips/jobs/<job_id>", methods=["DELETE"])
+def delete_image_clip_job_route(job_id: str):
+    from src.utils.story_image_clips import ImageClipBusy, delete_job
+
+    _progress, err = _image_clip_job_or_404(job_id)
+    if err:
+        return err
+    try:
+        delete_job(job_id)
+    except ImageClipBusy as exc:
+        return _error(str(exc), code="image_clip_busy", status=409)
+    return jsonify({"deleted": True, "jobId": job_id})
+
+
+@story_video_bp.route("/api/story-video/image-clips/jobs/<job_id>/items", methods=["GET"])
+def get_image_clip_items_route(job_id: str):
+    from src.utils.story_image_clips import load_manifest
+
+    _progress, err = _image_clip_job_or_404(job_id)
+    if err:
+        return err
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+        per_page = min(100, max(1, int(request.args.get("per_page", 24))))
+    except ValueError:
+        return _error("page/per_page không hợp lệ.", code="invalid_pagination")
+
+    all_items = [item for item in load_manifest(job_id)["items"] if item.get("status") == "kept"]
+    keywords = sorted({item.get("keyword") or "" for item in all_items if item.get("keyword")})
+    keyword = request.args.get("keyword", "").strip()
+    items = [item for item in all_items if item.get("keyword") == keyword] if keyword else all_items
+    total = len(items)
+    start = (page - 1) * per_page
+    return jsonify({
+        "items": items[start:start + per_page],
+        "total": total,
+        "page": page,
+        "perPage": per_page,
+        "totalPages": max(1, (total + per_page - 1) // per_page),
+        "keywords": keywords,
+        "keptTotal": len(all_items),
+        "failedTotal": sum(1 for item in all_items if item.get("lastError")),
+    })
+
+
+@story_video_bp.route("/api/story-video/image-clips/jobs/<job_id>/cancel", methods=["POST"])
+def cancel_image_clip_job_route(job_id: str):
+    from src.utils.story_image_clips import request_cancel
+
+    progress = request_cancel(job_id)
+    if not progress:
+        return _error("Job ảnh không tồn tại.", code="image_clip_not_found", status=404)
+    return jsonify(progress)
+
+
+@story_video_bp.route("/api/story-video/image-clips/jobs/<job_id>/items/delete", methods=["POST"])
+def delete_image_clip_items_route(job_id: str):
+    from src.utils.story_image_clips import ImageClipBusy, delete_items
+
+    _progress, err = _image_clip_job_or_404(job_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    scope = str(data.get("scope") or "ids").strip().lower()
+    try:
+        if scope == "all":
+            result = delete_items(job_id, delete_all=True)
+        elif scope == "keyword":
+            keyword = str(data.get("keyword") or "").strip()
+            if not keyword:
+                return _error("Cần truyền keyword khi scope='keyword'.", code="invalid_keyword")
+            result = delete_items(job_id, keyword=keyword)
+        elif scope == "ids":
+            raw_ids = data.get("itemIds")
+            if not isinstance(raw_ids, list):
+                return _error("itemIds phải là array.", code="invalid_item_ids")
+            item_ids = [str(value).strip() for value in raw_ids if str(value).strip()]
+            if not item_ids:
+                return _error("Cần ít nhất 1 itemId để xoá.", code="invalid_item_ids")
+            result = delete_items(job_id, item_ids)
+        else:
+            return _error("scope phải là 'ids', 'keyword' hoặc 'all'.", code="invalid_scope")
+    except ImageClipBusy as exc:
+        return _error(str(exc), code="image_clip_busy", status=409)
+    return jsonify({"scope": scope, **result})
+
+
+@story_video_bp.route("/api/story-video/image-clips/jobs/<job_id>/items/<item_id>", methods=["PATCH"])
+def update_image_clip_item_route(job_id: str, item_id: str):
+    from src.utils.story_image_clips import ImageClipBusy, ImageClipError, set_item_effect
+
+    _progress, err = _image_clip_job_or_404(job_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    try:
+        item = set_item_effect(job_id, item_id, str(data.get("effect") or "").strip())
+    except ImageClipBusy as exc:
+        return _error(str(exc), code="image_clip_busy", status=409)
+    except ImageClipError as exc:
+        return _error(str(exc), code="invalid_effect")
+    except KeyError:
+        return _error("Ảnh không tồn tại hoặc đã tạo clip.", code="image_clip_item_not_found", status=404)
+    return jsonify({"item": item})
+
+
+@story_video_bp.route("/api/story-video/image-clips/jobs/<job_id>/commit", methods=["POST"])
+def commit_image_clip_job_route(job_id: str):
+    from src.utils.story_image_clips import ImageClipBusy, ImageClipError, LibraryHasMotion, start_commit
+
+    progress, err = _image_clip_job_or_404(job_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    library_id, err = _resolve_or_404(data.get("libraryId") or progress.get("libraryId"))
+    if err:
+        return err
+    err = _image_clip_mongo_or_503()
+    if err is not None:
+        return err
+
+    session_id = f"icc-{uuid.uuid4().hex[:8]}"
+    # Dung chung _download_sessions + GET /library/download-progress/<id>: frontend
+    # poll bang getStoryDownloadProgress, va bake/xoa thu vien biet dang co ingest.
+    with _download_sessions_lock:
+        _download_sessions[session_id] = {
+            "sessionId": session_id,
+            "status": "rendering",
+            "current": 0,
+            "total": 0,
+            "message": "Bắt đầu tạo clip từ ảnh...",
+            "addedClips": 0,
+            "libraryId": library_id,
+            "jobId": job_id,
+        }
+
+    def progress_cb(progress_data):
+        with _download_sessions_lock:
+            if session_id in _download_sessions:
+                _download_sessions[session_id].update(progress_data)
+
+    try:
+        total = start_commit(
+            job_id,
+            library_id=library_id,
+            session_id=session_id,
+            progress_callback=progress_cb,
+            delete_staging=bool(data.get("deleteStaging", True)),
+        )
+    except (ImageClipBusy, LibraryHasMotion, ImageClipError) as exc:
+        with _download_sessions_lock:
+            _download_sessions.pop(session_id, None)
+        if isinstance(exc, ImageClipBusy):
+            return _error(str(exc), code="image_clip_busy", status=409)
+        if isinstance(exc, LibraryHasMotion):
+            return _error(str(exc), code="library_has_motion", status=409)
+        return _error(str(exc), code="no_image_clip_items")
+    with _download_sessions_lock:
+        if session_id in _download_sessions and not _download_sessions[session_id].get("total"):
+            _download_sessions[session_id]["total"] = total
+    return jsonify({"sessionId": session_id, "total": total}), 202
+
+
+@story_video_bp.route("/api/story-video/image-clips/jobs/<job_id>/commit/cancel", methods=["POST"])
+def cancel_image_clip_commit_route(job_id: str):
+    from src.utils.story_image_clips import request_commit_cancel
+
+    _progress, err = _image_clip_job_or_404(job_id)
+    if err:
+        return err
+    return jsonify({"cancelRequested": request_commit_cancel(job_id)})
+
+
+@story_video_bp.route("/api/story-video/image-clips/cursors", methods=["GET"])
+def list_image_search_cursors_route():
+    from src.db import image_repo
+    from src.utils.image_clip_search import QUERY_SIGNATURE
+
+    err = _mongo_or_503()
+    if err is not None:
+        return err
+    provider = str(request.args.get("provider") or "").strip().lower() or None
+    if provider and provider not in image_repo.PROVIDERS:
+        return _error("Provider không hợp lệ.", code="invalid_provider")
+    try:
+        limit = max(1, min(5000, int(request.args.get("limit", 500))))
+    except ValueError:
+        return _error("limit không hợp lệ.", code="invalid_limit")
+    try:
+        docs = image_repo.list_cursors(provider, request.args.get("q"), limit)
+        photo_counts = image_repo.photo_status_counts()
+    except Exception as exc:
+        if _is_mongo_error(exc):
+            from src.db import mongo
+
+            return _error(mongo.unavailable_message(), code="mongo_unavailable", status=503)
+        raise
+    return jsonify({
+        "items": [image_repo.serialize_cursor(doc, QUERY_SIGNATURE) for doc in docs],
+        "photoCounts": photo_counts,
+        "querySignature": QUERY_SIGNATURE,
+    })
+
+
+@story_video_bp.route("/api/story-video/image-clips/cursors/<provider>/reset", methods=["POST"])
+def reset_image_search_cursor_route(provider: str):
+    from src.db import image_repo
+    from src.utils.story_image_clips import active_search_job
+
+    provider = provider.strip().lower()
+    keyword = str(request.args.get("keyword") or (request.get_json(silent=True) or {}).get("keyword") or "").strip()
+    if provider not in image_repo.PROVIDERS or not keyword:
+        return _error("Cần provider (pixabay/pexels) và keyword.", code="invalid_keyword")
+    err = _mongo_or_503()
+    if err is not None:
+        return err
+    if active_search_job():
+        return _error("Đang có job tìm ảnh chạy. Hãy đợi xong rồi reset.", code="image_clip_busy", status=409)
+    if not image_repo.reset_cursor(provider, keyword):
+        return _error("Không tìm thấy từ khóa.", code="cursor_not_found", status=404)
+    return jsonify({"reset": True, "provider": provider, "keyword": keyword})
+
+
+# ---------------------------------------------------------------------------
 # 5. DELETE /api/story-video/library/<clip_id>
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/library/<clip_id>", methods=["DELETE"])

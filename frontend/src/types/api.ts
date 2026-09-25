@@ -144,7 +144,7 @@ export interface StoryLibraryDeleteResponse {
 
 export interface StoryClip {
   id: string;
-  sourceType: StoryVideoProvider | "local" | "local_upload" | "direct";
+  sourceType: StoryVideoProvider | "local" | "local_upload" | "direct" | "pexels-photo" | "pixabay-photo";
   sourceName: string;
   relativePath: string;
   duration: number;
@@ -281,6 +281,199 @@ export interface StoryHarvestDeleteResponse {
 export interface CommitStoryHarvestResponse {
   sessionId: string;
   total: number;
+}
+
+// === Thư viện clip từ ảnh: tìm ảnh → duyệt → 1 ảnh = 1 clip Ken Burns ===
+
+export interface StoryImageClipEffect {
+  id: string;
+  label: string;
+  /** true = đầu/cuối clip ở mức zoom của job; false = khung đầy đủ (zoom 1). */
+  startZoomed: boolean;
+  endZoomed: boolean;
+  /** Vị trí khung trong phần lề [x, y], 0 = trái/trên, 1 = phải/dưới. */
+  from: [number, number];
+  to: [number, number];
+}
+
+export interface StoryImageClipEffectsResponse {
+  effects: StoryImageClipEffect[];
+  defaultZoom: number;
+  zoomMin: number;
+  zoomMax: number;
+  /** STORY_IMAGE_CLIP_DURATION_MIN/MAX: mỗi ảnh dài ngẫu nhiên trong khoảng này (giây). */
+  durationMin: number;
+  durationMax: number;
+}
+
+export type StoryImageClipStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "stopped_disk";
+
+/** Kết quả quét một cặp (từ khóa, nguồn) trong một job. */
+export interface StoryImageClipKeywordStat {
+  keyword: string;
+  provider: StoryVideoProvider;
+  startPage: number;
+  endPage: number | null;
+  perPage: number;
+  total: number | null;
+  maxPage: number | null;
+  accepted: number;
+  rejected: number;
+  duplicates: number;
+  failed: number;
+  exhausted: boolean;
+  reason: string | null;
+  /** limit | quota | error | no_full_access | page_limit | disk */
+  stoppedBy: string | null;
+}
+
+export interface StoryImageClipCommitState {
+  sessionId: string;
+  libraryId: string;
+  status: "running" | "completed" | "failed";
+  added: number;
+  failed: number;
+  skipped: number;
+  cancelled: boolean;
+  stale?: boolean;
+}
+
+export interface StoryImageClipJob {
+  jobId: string;
+  status: StoryImageClipStatus;
+  libraryId: string;
+  keywords: string[];
+  providers: StoryVideoProvider[];
+  tags: string[];
+  maxPerKeyword: number;
+  effects: string[];
+  zoom: number;
+  rescanExhausted: boolean;
+  /** [min, max] giây của clip từ ảnh lúc tạo đợt. Đợt cũ có thể thiếu. */
+  durationRange?: [number, number];
+  exhaustedPairs: { keyword: string; provider: StoryVideoProvider; reason: string | null; totalResults: number | null }[];
+  resetPairs: { keyword: string; provider: StoryVideoProvider }[];
+  keywordIndex: number;
+  keywordTotal: number;
+  currentKeyword: string | null;
+  currentProvider: StoryVideoProvider | null;
+  currentPage: number | null;
+  currentMaxPage: number | null;
+  searchRequests: number;
+  downloaded: number;
+  rejected: number;
+  duplicates: number;
+  failed: number;
+  bytesDownloaded: number;
+  keywordStats: StoryImageClipKeywordStat[];
+  notices: Record<string, string>;
+  quotaStopped: Record<string, string>;
+  providerErrors: { provider: StoryVideoProvider; keyword: string; message: string }[];
+  message: string;
+  startedAt: string;
+  updatedAt: string;
+  error: string | null;
+  searchLive: boolean;
+  commitLive: boolean;
+  /** Ghi "running" nhưng không còn thread — web app đã khởi động lại giữa chừng. */
+  stale: boolean;
+  commit?: StoryImageClipCommitState;
+  /** Chỉ có ở endpoint list. */
+  keptItems?: number;
+  totalItems?: number;
+  committedItems?: number;
+}
+
+export interface StoryImageClipItem {
+  itemId: string;
+  key: string;
+  provider: StoryVideoProvider;
+  photoId: string;
+  keyword: string;
+  page: number;
+  title: string;
+  width: number;
+  height: number;
+  pageUrl: string;
+  author: string;
+  effect: string;
+  /** Độ dài clip sẽ tạo (giây), gán ngẫu nhiên lúc tải về. Ảnh của đợt cũ có thể thiếu. */
+  duration?: number;
+  status: "kept" | "deleted" | "committed" | "skipped";
+  filename: string;
+  thumbFilename: string;
+  previewPath?: string;
+  thumbPath?: string;
+  bytes: number;
+  /** Lần tạo clip trước bị lỗi (render/ingest) — ảnh vẫn giữ để thử lại. */
+  lastError?: string;
+  failedAttempts?: number;
+}
+
+export interface StoryImageClipItemsResponse {
+  items: StoryImageClipItem[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+  keywords: string[];
+  keptTotal: number;
+  failedTotal: number;
+}
+
+export interface StartStoryImageClipRequest {
+  libraryId: string;
+  keywords: string[];
+  providers: StoryVideoProvider[];
+  tags: string[];
+  maxPerKeyword: number;
+  effects: string[];
+  zoom: number;
+  rescanExhausted?: boolean;
+}
+
+export type StoryImageClipDeleteRequest =
+  | { scope: "ids"; itemIds: string[] }
+  | { scope: "keyword"; keyword: string }
+  | { scope: "all" };
+
+export interface StoryImageClipDeleteResponse {
+  scope: "ids" | "keyword" | "all";
+  deletedCount: number;
+  failedItemIds: string[];
+  remainingCount: number;
+  mongoSynced: boolean;
+}
+
+/** Con trỏ phân trang của một cặp (nguồn, từ khóa): lần tìm sau bắt đầu từ `nextPage` với `perPage` đã chốt. */
+export interface StoryImageSearchCursor {
+  provider: StoryVideoProvider;
+  keyword: string;
+  normalized: string;
+  perPage: number | null;
+  nextPage: number;
+  lastPageFetched: number | null;
+  totalResults: number | null;
+  maxPage: number | null;
+  exhausted: boolean;
+  exhaustedReason: string | null;
+  /** false = bộ lọc tìm kiếm đã đổi, lần sau tìm lại từ trang 1. */
+  signatureCurrent: boolean;
+  pagesFetched: number;
+  requests: number;
+  photosSeen: number;
+  photosAccepted: number;
+  photosRejected: number;
+  runs: number;
+  firstSearchedAt: string | null;
+  lastSearchedAt: string | null;
+  lastJobId: string | null;
+}
+
+export interface StoryImageSearchCursorsResponse {
+  items: StoryImageSearchCursor[];
+  photoCounts: Record<"staged" | "rejected" | "committed" | "discarded" | "failed", number>;
+  querySignature: string;
 }
 
 export interface StoryLibraryResponse {
@@ -445,11 +638,13 @@ export interface StoryLibraryBulkDeleteResponse {
 
 export interface DownloadProgress {
   sessionId: string;
-  status: "downloading" | "splitting" | "completed" | "failed";
+  status: "downloading" | "splitting" | "rendering" | "completed" | "failed";
   current: number;
   total: number;
   message: string;
   addedClips: number;
+  /** Chỉ có ở commit thư viện clip từ ảnh: người dùng đã huỷ giữa chừng. */
+  cancelled?: boolean;
 }
 
 export interface CRTSettings {

@@ -819,7 +819,16 @@ def add_clips_to_library(
     source_type: str,
     tags: list[str] | None = None,
     library_id=None,
+    tags_per_clip: list[list[str]] | None = None,
 ) -> list[dict]:
+    """Copy clip vao thu vien va ghi index MOT lan cho ca lo.
+
+    ``tags_per_clip`` (tuy chon, cung do dai ``clips``): tag rieng tung clip, de
+    luong clip tu anh them ca lo nhieu nguon ma chi ghi ``index.json`` mot lan.
+    Mac dinh None = moi clip nhan ``tags`` nhu cu.
+    """
+    if tags_per_clip is not None and len(tags_per_clip) != len(clips):
+        raise ValueError("tags_per_clip phai cung do dai voi clips")
     _ensure_dirs(library_id)
     clips_dir = _clips_dir(library_id)
     added = []
@@ -827,7 +836,7 @@ def add_clips_to_library(
     with _index_lock(library_id):
         index = load_story_library_index(library_id)
 
-        for clip_path in clips:
+        for position, clip_path in enumerate(clips):
             clip_id = str(uuid.uuid4())
             ext = os.path.splitext(clip_path)[1] or ".mp4"
             dest_name = f"{clip_id}{ext}"
@@ -848,7 +857,7 @@ def add_clips_to_library(
                 "source_name": source_name,
                 "relative_path": f"clips/{dest_name}",
                 "duration": round(duration, 3),
-                "tags": tags or [],
+                "tags": (list(tags_per_clip[position]) if tags_per_clip is not None else tags) or [],
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             index["assets"].append(asset)

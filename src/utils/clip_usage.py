@@ -78,12 +78,15 @@ class ClipUsageLedger:
         pool: list[tuple[str, float]],
         key_of,
         target_duration: float,
-        unit: float,
+        unit: float | None,
         *,
         run_length=None,
         successor=None,
     ) -> ClipSelection:
         """Chon clip cho mot video. Raise neu khong doc duoc so dem tu Mongo.
+
+        ``unit`` = do dai toi da tinh cho moi clip; ``None`` = tinh du do dai that
+        (render phat nguyen clip, khong cat ve mot do dai chung).
 
         ``run_length()`` + ``successor(path)`` bat che do long takes: moi lan lay mot
         clip "seed" theo thu tu tren roi noi them clip lien sau cua cung video goc,
@@ -151,7 +154,7 @@ class ClipUsageLedger:
                     taken.add(key)
                     picked_keys.add(key)
                     selection.paths.append(path)
-                    total += min(float(dur), float(unit))
+                    total += float(dur) if unit is None else min(float(dur), float(unit))
 
             self._leases[story_id] = picked_keys
             leased.update(picked_keys)

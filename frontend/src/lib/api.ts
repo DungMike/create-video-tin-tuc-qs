@@ -33,6 +33,14 @@ import type {
   StoryHarvestDeleteResponse,
   StoryHarvestItemsResponse,
   StoryHarvestJob,
+  StartStoryImageClipRequest,
+  StoryImageClipDeleteRequest,
+  StoryImageClipDeleteResponse,
+  StoryImageClipEffectsResponse,
+  StoryImageClipItem,
+  StoryImageClipItemsResponse,
+  StoryImageClipJob,
+  StoryImageSearchCursorsResponse,
   StoryIntroMutationResponse,
   StoryIntrosResponse,
   StoryLibrariesResponse,
@@ -343,6 +351,89 @@ export async function deleteStoryHarvestJob(jobId: string) {
     `/api/story-video/library/harvest/${jobId}`,
     { method: "DELETE" },
   );
+}
+
+// === Thư viện clip từ ảnh: tìm ảnh Pexels/Pixabay → duyệt → 1 ảnh = 1 clip Ken Burns ===
+// Cần MongoDB (con trỏ phân trang theo từ khóa + chống trùng ảnh): Mongo tắt → 503.
+
+export async function listStoryImageClipEffects() {
+  return requestJson<StoryImageClipEffectsResponse>("/api/story-video/image-clips/effects");
+}
+
+export async function startStoryImageClipJob(payload: StartStoryImageClipRequest) {
+  return requestJson<StoryImageClipJob>("/api/story-video/image-clips/jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listStoryImageClipJobs() {
+  return requestJson<{ jobs: StoryImageClipJob[] }>("/api/story-video/image-clips/jobs");
+}
+
+export async function getStoryImageClipJob(jobId: string) {
+  return requestJson<StoryImageClipJob>(`/api/story-video/image-clips/jobs/${jobId}`);
+}
+
+export async function getStoryImageClipItems(jobId: string, page = 1, perPage = 24, keyword?: string) {
+  const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
+  if (keyword) params.set("keyword", keyword);
+  return requestJson<StoryImageClipItemsResponse>(`/api/story-video/image-clips/jobs/${jobId}/items?${params}`);
+}
+
+export async function cancelStoryImageClipJob(jobId: string) {
+  return requestJson<StoryImageClipJob>(`/api/story-video/image-clips/jobs/${jobId}/cancel`, { method: "POST" });
+}
+
+export async function deleteStoryImageClipItems(jobId: string, payload: StoryImageClipDeleteRequest) {
+  return requestJson<StoryImageClipDeleteResponse>(`/api/story-video/image-clips/jobs/${jobId}/items/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function setStoryImageClipItemEffect(jobId: string, itemId: string, effect: string) {
+  return requestJson<{ item: StoryImageClipItem }>(`/api/story-video/image-clips/jobs/${jobId}/items/${itemId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ effect }),
+  });
+}
+
+export async function commitStoryImageClipJob(jobId: string, libraryId: string, deleteStaging = true) {
+  return requestJson<CommitStoryHarvestResponse>(`/api/story-video/image-clips/jobs/${jobId}/commit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ libraryId, deleteStaging }),
+  });
+}
+
+export async function cancelStoryImageClipCommit(jobId: string) {
+  return requestJson<{ cancelRequested: boolean }>(`/api/story-video/image-clips/jobs/${jobId}/commit/cancel`, {
+    method: "POST",
+  });
+}
+
+export async function deleteStoryImageClipJob(jobId: string) {
+  return requestJson<{ deleted: boolean; jobId: string }>(`/api/story-video/image-clips/jobs/${jobId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function listStoryImageSearchCursors(provider?: StoryVideoProvider, query?: string) {
+  const params = new URLSearchParams();
+  if (provider) params.set("provider", provider);
+  if (query) params.set("q", query);
+  return requestJson<StoryImageSearchCursorsResponse>(`/api/story-video/image-clips/cursors?${params}`);
+}
+
+export async function resetStoryImageSearchCursor(provider: StoryVideoProvider, keyword: string) {
+  const params = new URLSearchParams({ keyword });
+  return requestJson<{ reset: boolean }>(`/api/story-video/image-clips/cursors/${provider}/reset?${params}`, {
+    method: "POST",
+  });
 }
 
 export async function deleteStoryClip(libraryId: string, clipId: string) {

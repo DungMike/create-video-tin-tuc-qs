@@ -207,6 +207,15 @@ def _fmt_ass_ts(seconds: float) -> str:
 
 _CLIP_NAME_RE = re.compile(r"^(.+)_clip_(\d+)\.mp4$", re.IGNORECASE)
 
+# Clips play their FULL length (no per-clip concat ``outpoint``): a library may mix
+# lengths (8s video cuts, 3-5s photo clips) and each keeps its own. Only fragments
+# too short to read as a shot are left out of the draw.
+_MIN_CLIP_SECONDS = 0.5
+
+
+def _usable_clip_pool(clips: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    return [item for item in clips if item[1] >= _MIN_CLIP_SECONDS] or clips
+
 
 def _clip_source(asset: dict) -> tuple[str, int] | None:
     """(source key, clip index) of a library clip, or None when it can't be told.
@@ -408,6 +417,9 @@ class StoryVideoPipelineRunner:
         self._seg_dur_cache: int | None = None
         # path -> (source, clip index) for the pool, used to chain consecutive clips.
         self._clip_meta: dict[str, tuple[str, int]] = {}
+        # path -> real clip length for the pool: clips play their full length, so the
+        # clip-start fallback (_probe_clip_starts) adds these up instead of k * unit.
+        self._clip_durations: dict[str, float] = {}
 
         self._lock = threading.Lock()
         self.progress = {
@@ -425,11 +437,11 @@ class StoryVideoPipelineRunner:
         self._save_progress()
 
     def _segment_duration(self) -> int:
-        """Per-clip/unit duration for the selected libraries (pre-baked 'full' ones use 10s units).
+        """NOMINAL clip length of the selected libraries (pre-baked 'full' ones use 10s units).
 
-        A multi-library selection trims to the smallest unit: the concat demuxer
-        writes one ``outpoint`` for every segment, so a longer one would overrun
-        the clips coming from the library built with the shorter unit.
+        Only a starting guess now (edit-plan clip period before the base is measured,
+        log lines): the render no longer trims clips to it. Every clip plays its own
+        full length, so a library can mix 8s video cuts with 3-5s photo clips.
         """
         if self._seg_dur_cache is None:
             from src.utils.story_library import libraries_clip_duration
@@ -588,7 +600,9 @@ class StoryVideoPipelineRunner:
                 )
                 return None
             if self._edit and self._edit.needs_clip_timing:
-                self._edit.set_clip_starts(self._probe_clip_starts(rendered_video, len(clips)))
+                self._edit.set_clip_starts(self._probe_clip_starts(
+                    rendered_video, len(clips), [self._clip_durations.get(path, 0.0) for path in clips],
+                ))
             if self._edit:
                 self._edit.finish_clip_media()
 
@@ -762,6 +776,7 @@ class StoryVideoPipelineRunner:
                 duration = FFmpegHelper.probe_duration(clip_path)
             if duration > 0:
                 candidates.append((clip_path, duration))
+                self._clip_durations[clip_path] = duration
                 source = _clip_source(clip)
                 if source:
                     self._clip_meta[clip_path] = (f"{library_id}|{source[0]}", source[1])
@@ -816,15 +831,13 @@ class StoryVideoPipelineRunner:
                 f"total={len(valid_clips)}."
             )
 
-        segment_duration = self._segment_duration()
-        min_duration = max(0.5, segment_duration - 0.25)
-        pool = [item for item in valid_clips if item[1] >= min_duration] or valid_clips
+        pool = _usable_clip_pool(valid_clips)
         target_duration = audio_duration + 0.25
         selected: list[str] = []
         selected_duration = 0.0
 
         if self._edit and self._edit.long_takes:
-            return self._select_long_takes(pool, target_duration, float(segment_duration), audio_duration)
+            return self._select_long_takes(pool, target_duration, audio_duration)
 
         if self.clip_bag is not None:
             # Batch mode: draw without replacement from the deck shared by the
@@ -838,7 +851,7 @@ class StoryVideoPipelineRunner:
                 clip_path, duration = self.clip_bag.draw(key, pool, exclude=picked)
                 picked.add(clip_path)
                 selected.append(clip_path)
-                selected_duration += min(duration, float(segment_duration))
+                selected_duration += duration
         else:
             while selected_duration < target_duration:
                 self._raise_if_cancel_requested()
@@ -846,7 +859,7 @@ class StoryVideoPipelineRunner:
                 random.shuffle(shuffled)
                 for clip_path, duration in shuffled:
                     selected.append(clip_path)
-                    selected_duration += min(duration, float(segment_duration))
+                    selected_duration += duration
                     if selected_duration >= target_duration:
                         break
 
@@ -893,9 +906,7 @@ class StoryVideoPipelineRunner:
             )
             return []
 
-        segment_duration = self._segment_duration()
-        min_duration = max(0.5, segment_duration - 0.25)
-        pool = [item for item in valid_clips if item[1] >= min_duration] or valid_clips
+        pool = _usable_clip_pool(valid_clips)
         target_duration = audio_duration + 0.25
 
         run_length = successor = None
@@ -919,7 +930,7 @@ class StoryVideoPipelineRunner:
                 pool,
                 lambda path: clip_keys.get(path) or f"path:{path}",
                 target_duration,
-                float(segment_duration),
+                None,  # khong cat clip: tinh du do dai tung clip
                 run_length=run_length,
                 successor=successor,
             )
@@ -958,7 +969,7 @@ class StoryVideoPipelineRunner:
         except Exception as exc:  # pragma: no cover - commit() already swallows
             logger.warning(f"[StoryPipeline:{self.story_id}] Clip usage commit failed: {exc}")
 
-    def _select_long_takes(self, pool, target_duration: float, unit: float, audio_duration: float) -> list[str]:
+    def _select_long_takes(self, pool, target_duration: float, audio_duration: float) -> list[str]:
         """Runs of 1-3 consecutive clips of one source: seamless 3/6/9s shots.
 
         The segment muxer cuts a source into contiguous pieces (``..._clip_000``,
@@ -989,7 +1000,7 @@ class StoryVideoPipelineRunner:
                 for path, dur in run:
                     picked.add(path)
                     selected.append(path)
-                    total += min(dur, unit)
+                    total += dur
                 runs.append(len(run))
         else:
             deck = list(pool)
@@ -1011,7 +1022,7 @@ class StoryVideoPipelineRunner:
                 for path in run:
                     used.add(path)
                     selected.append(path)
-                    total += min(durations.get(path, unit), unit)
+                    total += durations.get(path, 0.0)
                 runs.append(len(run))
         # Visual cuts are only where a new shot starts; their real times are
         # measured on the base once it exists (_probe_clip_starts).
@@ -1022,13 +1033,14 @@ class StoryVideoPipelineRunner:
         )
         return selected
 
-    def _probe_clip_starts(self, base_video: str, clip_count: int) -> list[float]:
+    def _probe_clip_starts(self, base_video: str, clip_count: int, durations: list[float] | None = None) -> list[float]:
         """Real start time of each clip in the concatenated base.
 
         Every library clip opens on a keyframe, so the base's keyframe packets are
         the clip boundaries (read from the container, no decode: <1s for 10 min).
-        If the count doesn't match (a clip with inner keyframes), spread the clips
-        evenly over the measured video length instead.
+        If the count doesn't match (a clip with inner keyframes), fall back to the
+        running sum of the clips' own lengths (``durations``) -- clips differ in
+        length now -- or, without them, spread the clips evenly.
         """
         try:
             res = subprocess.run(
@@ -1046,17 +1058,25 @@ class StoryVideoPipelineRunner:
                         continue
             keys.sort()
             if len(keys) == clip_count:
+                expected = sum(durations[:-1]) if durations and len(durations) == clip_count else None
                 logger.info(
                     f"[StoryPipeline:{self.story_id}] Clip starts from {len(keys)} keyframes, "
-                    f"last at {keys[-1]:.2f}s (nominal {(clip_count - 1) * self._segment_duration()}s)"
+                    f"last at {keys[-1]:.2f}s"
+                    + (f" (sum of clip lengths {expected:.2f}s)" if expected is not None else "")
                 )
                 return keys
             logger.info(
                 f"[StoryPipeline:{self.story_id}] {len(keys)} keyframes for {clip_count} clips, "
-                "spreading clip starts evenly"
+                + ("using the clips' own lengths" if durations else "spreading clip starts evenly")
             )
         except (OSError, subprocess.SubprocessError) as exc:
             logger.warning(f"[StoryPipeline:{self.story_id}] Keyframe probe failed: {exc}")
+        if durations and len(durations) == clip_count and all(value > 0 for value in durations):
+            starts, position = [], 0.0
+            for value in durations:
+                starts.append(position)
+                position += float(value)
+            return starts
         duration = FFmpegHelper.probe_duration(base_video) or clip_count * float(self._segment_duration())
         period = duration / max(1, clip_count)
         return [i * period for i in range(clip_count)]
@@ -1100,19 +1120,23 @@ class StoryVideoPipelineRunner:
             return None
 
     def _render_simple_video(self, segments: list[str], audio_path: str, audio_duration: float) -> str | None:
-        """Concat prebuilt library clips and mux the main audio."""
+        """Concat prebuilt library clips and mux the main audio.
+
+        No per-clip ``outpoint``: every clip plays its full length (a library can mix
+        8s video cuts and 3-5s photo clips), and only the tail is cut by ``-t`` to the
+        audio. That also means a clip is never trimmed mid-GOP, which with B-frames
+        and stream copy used to drop frames at the trim point.
+        """
         temp = _temp_dir(self.story_id)
         output_dir = os.path.join(_story_dir(self.story_id), "renders")
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, f"video_{self.story_id}.mp4")
         concat_file = os.path.join(temp, "story_segments.txt")
-        segment_duration = self._segment_duration()
 
         with open(concat_file, "w", encoding="utf-8") as file_obj:
             for segment_path in segments:
                 clean_path = os.path.abspath(segment_path).replace("\\", "/").replace("'", "'\\''")
                 file_obj.write(f"file '{clean_path}'\n")
-                file_obj.write(f"outpoint {segment_duration:.3f}\n")
 
         cmd = [
             "ffmpeg",
