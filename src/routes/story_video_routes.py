@@ -61,6 +61,23 @@ def _error(message: str, code: str = "bad_request", status: int = 400):
     return jsonify({"error": {"code": code, "message": message}}), status
 
 
+def _clip_usage_mode_or_503(raw_mode):
+    """``clipUsageMode`` cua request -> (mode, error_response).
+
+    Mac dinh "reuse" (luong chon clip cu, khong can Mongo). Chi "once" moi kiem tra
+    Mongo truoc, de batch khong xep hang roi moi video deu failed vi thieu DB.
+    """
+    from src.utils.clip_usage import CLIP_USAGE_ONCE, normalize_clip_usage_mode
+
+    mode = normalize_clip_usage_mode(raw_mode)
+    if mode == CLIP_USAGE_ONCE:
+        from src.db import mongo
+
+        if not mongo.is_available(force=True):
+            return None, _error(mongo.unavailable_message(), code="mongo_unavailable", status=503)
+    return mode, None
+
+
 def _has_active_library_session(library_id=None) -> bool:
     """True if a download/upload/import session is still running.
 
@@ -482,6 +499,13 @@ def import_selected_story_videos():
     data = request.get_json(silent=True) or {}
     raw_items = data.get("items", [])
     tags = data.get("tags", [])
+    # Tu khoa da dung de tim cac video nay (tuy chon): chi de ghi DB tu khoa.
+    # ``queries`` = {provider: keyword} (moi tab search mot tu khoa); ``query`` = chung.
+    shared_query = str(data.get("query") or "").strip()
+    raw_queries = data.get("queries") if isinstance(data.get("queries"), dict) else {}
+    search_queries = {
+        name: str(raw_queries.get(name) or shared_query).strip() for name in ("pixabay", "pexels")
+    }
 
     library_id, err = _resolve_or_404(data.get("libraryId"))
     if err:
@@ -503,12 +527,19 @@ def import_selected_story_videos():
         # từng video — giảm mạnh số API call, tránh 429 rate limit.
         download_url = str(item.get("downloadUrl") or item.get("previewUrl") or "").strip()
         if provider in {"pixabay", "pexels"} and video_id:
-            items.append({
+            entry = {
                 "provider": provider,
                 "id": video_id,
                 "pageUrl": page_url,
                 "downloadUrl": download_url,
-            })
+            }
+            # Metadata cua ket qua search, chi de ghi DB video goc (src/db/).
+            for field in ("title", "tags", "author", "duration", "width", "height", "thumbnailUrl"):
+                if item.get(field) not in (None, ""):
+                    entry[field] = item.get(field)
+            if search_queries.get(provider):
+                entry["keyword"] = search_queries[provider]
+            items.append(entry)
 
     if not items:
         return _error("Khong co video hop le de import.", code="no_valid_items")
@@ -538,6 +569,15 @@ def import_selected_story_videos():
         try:
             result = download_from_provider_items(items, session_id, clean_tags, progress_cb, library_id=library_id)
             added_count = len(result) if isinstance(result, list) else 0
+            if added_count:
+                from src.db.keyword_repo import report_keyword_sweep
+
+                for provider_name in sorted({entry["provider"] for entry in items}):
+                    if search_queries.get(provider_name):
+                        report_keyword_sweep(
+                            provider_name, search_queries[provider_name], "manual", "manual",
+                            videos_downloaded=sum(1 for entry in items if entry["provider"] == provider_name),
+                        )
             with _download_sessions_lock:
                 _download_sessions[session_id].update({
                     "status": "completed",
@@ -601,6 +641,26 @@ def start_story_prefetch():
         min_height = int(data.get("minHeight") or 0) or None
     except (TypeError, ValueError):
         return _error("minWidth/minHeight khong hop le.", code="invalid_dimensions")
+
+    # Opt-in (mac dinh tat = luong cu): tu choi tu khoa DB ghi la da dung. Mongo
+    # tat/chua cau hinh thi khong chan -- chay nhu binh thuong.
+    if bool(data.get("skipUsedKeywords", False)):
+        from src.db.keyword_repo import find_used_keyword_pairs
+
+        used_pairs, _check = find_used_keyword_pairs([provider], [query])
+        if used_pairs:
+            used = used_pairs[0]
+            return jsonify({"error": {
+                "code": "keyword_used",
+                "message": (
+                    f"Tu khoa '{query}' da duoc dung tren {provider} "
+                    f"(trang thai: {used['status']}). Bo tick 'Bo qua tu khoa da dung' neu van muon tai lai."
+                ),
+                "keyword": query,
+                "provider": provider,
+                "status": used["status"],
+                "lastSearchedAt": used["lastSearchedAt"],
+            }}), 409
 
     # One sweep at a time per library: two concurrent sweeps would race on the
     # library index during their commits and make the progress UI meaningless.
@@ -857,11 +917,106 @@ def start_story_harvest():
             tags=tags,
             landscape_only=bool(data.get("landscapeOnly", True)),
             max_per_keyword=max_per_keyword,
+            skip_used_keywords=bool(data.get("skipUsedKeywords", False)),
         )
     except ValueError as exc:
         return _error(str(exc), code="invalid_harvest_request")
 
     return jsonify(progress), 202
+
+
+# ---------------------------------------------------------------------------
+# 4f. MongoDB: tu khoa da tim + luot dung clip (che do "moi clip 1 lan").
+# Chi doc/ghi Mongo; khong route nao o tren phu thuoc vao cac route nay.
+# ---------------------------------------------------------------------------
+def _mongo_or_503():
+    from src.db import mongo
+
+    if not mongo.is_available():
+        return _error(mongo.unavailable_message(), code="mongo_unavailable", status=503)
+    return None
+
+
+@story_video_bp.route("/api/story-video/search-keywords", methods=["GET"])
+def list_search_keywords():
+    from src.db.keyword_repo import list_keywords
+
+    err = _mongo_or_503()
+    if err is not None:
+        return err
+    provider = str(request.args.get("provider") or "").strip().lower() or None
+    if provider and provider not in {"pixabay", "pexels"}:
+        return _error("Provider khong hop le.", code="invalid_provider")
+    try:
+        limit = max(1, min(20000, int(request.args.get("limit", 5000))))
+    except ValueError:
+        return _error("limit khong hop le.", code="invalid_limit")
+    return jsonify({"items": list_keywords(provider, limit)})
+
+
+@story_video_bp.route("/api/story-video/search-keywords/lookup", methods=["GET"])
+def lookup_search_keyword():
+    """Lich su mot tu khoa tren mot provider -> ``{record|null}``. Mongo tat -> null."""
+    from src.db import mongo
+    from src.db.keyword_repo import get_keyword_records, normalize_keyword, serialize_keyword
+
+    provider = str(request.args.get("provider") or "").strip().lower()
+    query = str(request.args.get("q") or "").strip()
+    if provider not in {"pixabay", "pexels"} or not query:
+        return _error("Can provider (pixabay/pexels) va q.", code="invalid_lookup")
+    if not mongo.is_available():
+        return jsonify({"record": None, "mongoAvailable": False})
+    try:
+        doc = get_keyword_records(provider, [query]).get(normalize_keyword(query))
+    except Exception as exc:
+        logger.warning(f"[Keywords] lookup {provider}:{query!r} failed: {exc}")
+        return jsonify({"record": None, "mongoAvailable": False})
+    return jsonify({"record": serialize_keyword(doc), "mongoAvailable": True})
+
+
+@story_video_bp.route("/api/story-video/search-keywords/<provider>", methods=["DELETE"])
+def delete_search_keyword(provider: str):
+    """Xoa mot tu khoa (``?keyword=``) de tim/tai lai duoc."""
+    from src.db.keyword_repo import delete_keyword
+
+    provider = provider.strip().lower()
+    keyword = str(request.args.get("keyword") or "").strip()
+    if provider not in {"pixabay", "pexels"} or not keyword:
+        return _error("Can provider (pixabay/pexels) va keyword.", code="invalid_keyword")
+    err = _mongo_or_503()
+    if err is not None:
+        return err
+    if not delete_keyword(provider, keyword):
+        return _error("Khong tim thay tu khoa.", code="keyword_not_found", status=404)
+    return jsonify({"deleted": True, "provider": provider, "keyword": keyword})
+
+
+@story_video_bp.route("/api/story-video/clip-usage/summary", methods=["GET"])
+def clip_usage_summary():
+    """So clip chua dung / da dung N lan cua cac thu vien (``?libraryIds=a,b``)."""
+    from src.db.media_repo import usage_summary
+    from src.utils.clip_identity import clip_identity
+
+    raw_ids = [part.strip() for part in str(request.args.get("libraryIds") or "").split(",") if part.strip()]
+    library_ids, library_error = _resolve_library_ids_or_404(raw_ids, request.args.get("libraryId"))
+    if library_error is not None:
+        return library_error
+    err = _mongo_or_503()
+    if err is not None:
+        return err
+
+    keys: set[str] = set()
+    for library_id in library_ids:
+        for asset in _load_library_index(library_id).get("assets", []):
+            if asset.get("relative_path"):
+                keys.add(clip_identity(library_id, asset)[1])
+    try:
+        summary = usage_summary(keys)
+    except Exception as exc:
+        logger.warning(f"[ClipUsage] summary failed: {exc}")
+        return _error(f"Khong doc duoc luot dung clip: {exc}", code="mongo_unavailable", status=503)
+    summary["libraryIds"] = library_ids
+    return jsonify(summary)
 
 
 @story_video_bp.route("/api/story-video/library/harvest", methods=["GET"])
@@ -2299,6 +2454,10 @@ def create_story_video():
     if not output_name:
         return _error("outputName không được để trống.", code="missing_output_name")
 
+    clip_usage_mode, clip_usage_error = _clip_usage_mode_or_503(data.get("clipUsageMode"))
+    if clip_usage_error is not None:
+        return clip_usage_error
+
     if subtitle_file and subtitle_file.filename:
         sub_ext = subtitle_file.filename.rsplit(".", 1)[-1].lower() if "." in subtitle_file.filename else ""
         if sub_ext != "srt":
@@ -2368,6 +2527,7 @@ def create_story_video():
         "crt_settings": data.get("crtSettings", {}),
         "tv_effect_style_id": str(data.get("tvEffectStyleId", "")).strip(),
         "skip_tv_effect": bool(data.get("skipTvEffect", False)),
+        "clip_usage_mode": clip_usage_mode,
         "waveform_overlay_id": str(data.get("waveformOverlayId", "")).strip(),
         "decor_image_id": decor_image_id,
         "layout_id": layouts[0] if layouts else "",
@@ -2596,6 +2756,10 @@ def create_story_batch():
     if not items or not isinstance(items, list):
         return _error("Cần ít nhất 1 item.", code="empty_items")
 
+    clip_usage_mode, clip_usage_error = _clip_usage_mode_or_503(shared_config.get("clipUsageMode"))
+    if clip_usage_error is not None:
+        return clip_usage_error
+
     # Resolved once for the whole batch, before the batch dir exists, so a bad
     # selection fails without leaving files behind.
     library_ids, library_error = _resolve_library_ids_or_404(
@@ -2806,6 +2970,7 @@ def create_story_batch():
             "crt_settings": shared_config.get("crtSettings", {}),
             "tv_effect_style_id": str(shared_config.get("tvEffectStyleId", "")).strip(),
             "skip_tv_effect": bool(shared_config.get("skipTvEffect", False)),
+            "clip_usage_mode": clip_usage_mode,
             # `waveformOverlayId` (so it) van duoc doc cho client cu.
             "waveform_overlay_id": (
                 waveform_assignments[idx]
@@ -3017,6 +3182,8 @@ def retry_batch_failed(batch_id: str):
             # Batches rendered before multi-select only carry the singular key.
             "library_ids": s.get("library_ids") or [s.get("library_id", "")],
             "skip_tv_effect": bool(s.get("skip_tv_effect", False)),
+            # Item cu khong co key -> "reuse", dung nhu luc no chay lan dau.
+            "clip_usage_mode": s.get("clip_usage_mode", "reuse"),
             "decor_image_id": s.get("decor_image_id", ""),
             # Retry giu dung bo cuc / hieu ung bo tro ma item da boc o lan chay truoc.
             "layout_id": s.get("layout_id", ""),
@@ -3043,6 +3210,11 @@ def retry_batch_failed(batch_id: str):
             # if the style has since been deleted.
             "subtitle_style_id": s.get("subtitle_style_id", ""),
         })
+
+    for retry_config in retry_configs:
+        _mode, clip_usage_error = _clip_usage_mode_or_503(retry_config.get("clip_usage_mode"))
+        if clip_usage_error is not None:
+            return clip_usage_error
 
     retry_batch_id = f"{batch_id}-retry"
     if is_batch_queued_or_active(retry_batch_id):

@@ -21,6 +21,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { SKIP_USED_KEYWORDS_STORAGE_KEY, useStoredFlag } from "@/hooks/useStoredFlag";
 import {
   ApiError,
   cancelStoryHarvest,
@@ -87,6 +88,8 @@ export function StoryBulkHarvestPanel({ libraryId, disabled = false, onCommitted
   const [keywordsText, setKeywordsText] = useState("");
   const [providers, setProviders] = useState<StoryVideoProvider[]>(["pixabay"]);
   const [landscapeOnly, setLandscapeOnly] = useState(true);
+  // Opt-in, mac dinh tat = luong cu y nguyen: bo qua cap (tu khoa, provider) DB ghi la da dung.
+  const [skipUsedKeywords, setSkipUsedKeywords] = useStoredFlag(SKIP_USED_KEYWORDS_STORAGE_KEY, false);
   const [maxPerKeyword, setMaxPerKeyword] = useState("");
   const [tagsText, setTagsText] = useState("");
   const [isStarting, setIsStarting] = useState(false);
@@ -252,6 +255,7 @@ export function StoryBulkHarvestPanel({ libraryId, disabled = false, onCommitted
         tags: parseTags(tagsText),
         landscapeOnly,
         maxPerKeyword: Number(maxPerKeyword) || 0,
+        ...(skipUsedKeywords ? { skipUsedKeywords: true } : {}),
       });
       setJob(started);
       setItems([]);
@@ -416,6 +420,17 @@ export function StoryBulkHarvestPanel({ libraryId, disabled = false, onCommitted
               />
               Chi tai video landscape 16:9
             </label>
+            <label
+              className="flex cursor-pointer items-center gap-2 text-sm"
+              title="Bo qua cap (tu khoa, provider) da quet xong truoc day (luu o MongoDB). Quet do dang thi van tai lai."
+            >
+              <Checkbox
+                checked={skipUsedKeywords}
+                onCheckedChange={(checked) => setSkipUsedKeywords(Boolean(checked))}
+                disabled={isRunning || busy}
+              />
+              Bo qua tu khoa da dung
+            </label>
             <Button type="button" onClick={handleStart} disabled={isRunning || isStarting || busy}>
               {isStarting || isRunning ? (
                 <Loader2 className="mr-2 size-4 animate-spin" />
@@ -464,6 +479,18 @@ export function StoryBulkHarvestPanel({ libraryId, disabled = false, onCommitted
             </div>
 
             <p className="text-sm text-muted-foreground">{job.message}</p>
+
+            {job.skipUsedKeywords && job.keywordCheck === "unavailable" ? (
+              <p className="text-xs text-amber-500">
+                MongoDB khong ket noi duoc — dot nay khong bo qua tu khoa nao.
+              </p>
+            ) : null}
+            {job.skippedPairs?.length ? (
+              <p className="text-xs text-muted-foreground">
+                Da bo qua {job.skippedPairs.length} tu khoa da dung:{" "}
+                {job.skippedPairs.map((pair) => `"${pair.keyword}" (${pair.provider})`).join(", ")}
+              </p>
+            ) : null}
 
             <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted-foreground">
               <span>Da tai: <span className="font-semibold text-foreground">{job.downloaded}</span> video</span>

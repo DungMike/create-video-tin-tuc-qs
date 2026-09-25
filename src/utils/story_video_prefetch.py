@@ -479,6 +479,13 @@ def run_prefetch(session_id: str):
             f"[Prefetch] {session_id} {final_status}: queued={queued} "
             f"skippedImported={skipped_imported} skippedFiltered={skipped_filtered}"
         )
+        if final_status == "cancelled" or truncated:
+            sweep_status = "partial"
+        elif stop_reason:
+            sweep_status = "limited"
+        else:
+            sweep_status = "completed"
+        _report_keyword_sweep(session_id, provider, query, sweep_status)
     except Exception as exc:
         logger.error(f"[Prefetch] {session_id} failed: {exc}", exc_info=True)
         update_manifest(session_id, lambda m: m.update({
@@ -486,6 +493,25 @@ def run_prefetch(session_id: str):
             "message": f"Loi: {exc}",
             "error": str(exc),
         }))
+
+
+def _report_keyword_sweep(session_id: str, provider: str, query: str, status: str) -> None:
+    """Bao ket qua luot quet cho DB tu khoa (ghi nen; Mongo tat/chua cau hinh thi bo qua)."""
+    try:
+        from src.db import mongo
+
+        if not mongo.is_configured():
+            return
+        from src.db.keyword_repo import report_keyword_sweep
+
+        manifest = load_manifest(session_id) or {}
+        report_keyword_sweep(
+            provider, query, status, "prefetch",
+            results_total=manifest.get("providerTotal"),
+            videos_downloaded=int(manifest.get("current") or 0),
+        )
+    except Exception as exc:  # pragma: no cover - chi la bao cao
+        logger.warning(f"[Prefetch] {session_id}: khong bao duoc tu khoa cho DB: {exc}")
 
 
 # --------------------------------------------------------------------------- #
@@ -689,6 +715,7 @@ def run_commit(
     from src.utils.video_source_downloader import (
         _ingest_clips,
         _target_clip_duration,
+        provider_item_source_ref,
         split_into_clips,
     )
 
@@ -762,6 +789,9 @@ def run_commit(
                 progress_callback=progress_callback,
                 current=index + 1,
                 total=total,
+                source_ref=provider_item_source_ref(
+                    provider, video_id, record, "prefetch", keyword=manifest.get("query"),
+                ),
             )
             added_total += len(added)
             _remove_split_clips(clips)

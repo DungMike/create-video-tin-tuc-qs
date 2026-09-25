@@ -35,6 +35,7 @@ import {
   getStoryLibrary,
   getStoryLibraryStats,
   importSelectedStoryVideos,
+  lookupStorySearchKeyword,
   searchStoryProviderVideos,
   uploadStoryVideos,
 } from "@/lib/api";
@@ -43,6 +44,7 @@ import type {
   StoryClip,
   StoryLibraryStats,
   StoryProviderVideo,
+  StorySearchKeywordRecord,
   StoryVideoProvider,
 } from "@/types/api";
 
@@ -79,9 +81,22 @@ function parseTags(value: string) {
     .filter(Boolean);
 }
 
+const KEYWORD_STATUS_LABEL: Record<StorySearchKeywordRecord["status"], string> = {
+  completed: "da quet het",
+  limited: "da tai (co gioi han)",
+  manual: "da tim tay va import",
+  partial: "quet do dang",
+};
+
+function sameKeyword(a: string, b: string) {
+  const norm = (value: string) => value.normalize("NFC").toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+  return norm(a) === norm(b);
+}
+
 function ProviderSearchPanel({
   provider,
   query,
+  keywordHistory,
   results,
   page,
   totalPages,
@@ -95,6 +110,8 @@ function ProviderSearchPanel({
 }: {
   provider: StoryVideoProvider;
   query: string;
+  /** Lịch sử từ khóa vừa search (MongoDB); null = chưa từng dùng hoặc không tra được. */
+  keywordHistory?: StorySearchKeywordRecord | null;
   results: StoryProviderVideo[];
   page: number;
   totalPages: number;
@@ -129,6 +146,16 @@ function ProviderSearchPanel({
           Search
         </Button>
       </div>
+
+      {keywordHistory && sameKeyword(keywordHistory.keyword, query) ? (
+        <p className={`text-xs ${keywordHistory.used ? "text-amber-500" : "text-muted-foreground"}`}>
+          Tu khoa nay {KEYWORD_STATUS_LABEL[keywordHistory.status]} tren {providerLabel}
+          {keywordHistory.lastSearchedAt
+            ? ` ngay ${new Date(keywordHistory.lastSearchedAt).toLocaleDateString("vi-VN")}`
+            : ""}
+          {keywordHistory.videosDownloaded ? ` (${keywordHistory.videosDownloaded} video)` : ""}.
+        </p>
+      ) : null}
 
       {results.length ? (
         <>
@@ -246,6 +273,12 @@ export function StoryLibraryManager({
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
 
   const [providerQueries, setProviderQueries] = useState<Record<StoryVideoProvider, string>>({ pixabay: "", pexels: "" });
+  // Từ khóa đã search thật (không phải ô đang gõ) — gửi kèm khi import để ghi lịch sử từ khóa.
+  const [searchedQueries, setSearchedQueries] = useState<Record<StoryVideoProvider, string>>({ pixabay: "", pexels: "" });
+  const [keywordHistory, setKeywordHistory] = useState<Record<StoryVideoProvider, StorySearchKeywordRecord | null>>({
+    pixabay: null,
+    pexels: null,
+  });
   const [providerResults, setProviderResults] = useState<Record<StoryVideoProvider, StoryProviderVideo[]>>({ pixabay: [], pexels: [] });
   const [providerPages, setProviderPages] = useState<Record<StoryVideoProvider, number>>({ pixabay: 1, pexels: 1 });
   const [providerTotalPages, setProviderTotalPages] = useState<Record<StoryVideoProvider, number>>({ pixabay: 1, pexels: 1 });
@@ -388,6 +421,13 @@ export function StoryLibraryManager({
     setSearchingProvider(provider);
     try {
       const response = await searchStoryProviderVideos(provider, query, targetPage, PROVIDER_PAGE_SIZE[provider]);
+      setSearchedQueries((current) => ({ ...current, [provider]: query }));
+      if (targetPage === 1) {
+        // Chỉ để hiện nhắc "đã dùng"; lỗi/Mongo tắt thì im lặng bỏ qua.
+        void lookupStorySearchKeyword(provider, query)
+          .then((res) => setKeywordHistory((current) => ({ ...current, [provider]: res.record })))
+          .catch(() => setKeywordHistory((current) => ({ ...current, [provider]: null })));
+      }
       setProviderResults((current) => ({ ...current, [provider]: response.items }));
       setProviderPages((current) => ({ ...current, [provider]: response.page }));
       setProviderTotalPages((current) => ({
@@ -454,7 +494,12 @@ export function StoryLibraryManager({
     setIsImporting(true);
     setImportProgress(null);
     try {
-      const res = await importSelectedStoryVideos(activeLibraryId, selectedProviderList, parseTags(providerTags));
+      const res = await importSelectedStoryVideos(
+        activeLibraryId,
+        selectedProviderList,
+        parseTags(providerTags),
+        searchedQueries,
+      );
       setImportSessionId(res.sessionId);
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the import video da chon.");
@@ -713,6 +758,7 @@ export function StoryLibraryManager({
                 <ProviderSearchPanel
                   provider={provider}
                   query={providerQueries[provider]}
+                  keywordHistory={keywordHistory[provider]}
                   results={providerResults[provider]}
                   page={providerPages[provider]}
                   totalPages={providerTotalPages[provider]}

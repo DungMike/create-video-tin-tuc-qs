@@ -117,6 +117,15 @@ class Config:
     WEB_SECRET_KEY = os.getenv("WEB_SECRET_KEY", "local-dev-secret")
     MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "4096"))
 
+    # --- MongoDB (src/db/) ---
+    # Theo doi video goc Pexels/Pixabay, luot dung clip cua che do "moi clip 1 lan"
+    # va tu khoa da tim. Trong = tat han: moi ham trong src/db/ thanh no-op va luong
+    # render/tai mac dinh khong bao gio cham toi Mongo. Chay bang docker-compose.yml.
+    MONGODB_URI = os.getenv("MONGODB_URI", "").strip()
+    MONGODB_DB = os.getenv("MONGODB_DB", "story_video_studio").strip() or "story_video_studio"
+    # Ngan de Mongo tat khong treo request: mot lan ping hong chi ton chung nay.
+    MONGODB_TIMEOUT_MS = int(os.getenv("MONGODB_TIMEOUT_MS", "2000"))
+
     # TTS / Voice API
     TTS_API_BASE_URL = os.getenv("TTS_API_BASE_URL", "https://thangtm.info")
     TTS_API_KEY = os.getenv("TTS_API_KEY", "")

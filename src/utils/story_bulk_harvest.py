@@ -36,6 +36,7 @@ from src.utils.video_source_downloader import (
     _download_file,
     _ingest_clips,
     _target_clip_duration,
+    provider_item_source_ref,
     search_provider_videos,
     split_into_clips,
 )
@@ -68,6 +69,22 @@ _job_locks: dict[str, threading.RLock] = {}
 
 def _utc_now() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def _normalize_keyword(keyword) -> str:
+    from src.db.keyword_repo import normalize_keyword
+
+    return normalize_keyword(keyword)
+
+
+def _report_keyword_sweep(provider: str, keyword: str, status: str, total, taken: int) -> None:
+    """Bao cho DB tu khoa (ghi nen, khong chan, Mongo tat thi bo qua)."""
+    from src.db.keyword_repo import report_keyword_sweep
+
+    report_keyword_sweep(
+        provider, keyword, status, "harvest",
+        results_total=total, videos_downloaded=taken,
+    )
 
 
 def _job_lock(job_id: str) -> threading.RLock:
@@ -244,8 +261,13 @@ def start_harvest_job(
     landscape_only: bool = True,
     max_per_keyword: int = 0,
     min_free_gb: float = 10.0,
+    skip_used_keywords: bool = False,
 ) -> dict:
-    """Tao job va chay o daemon thread. Tra ve progress dict ban dau."""
+    """Tao job va chay o daemon thread. Tra ve progress dict ban dau.
+
+    ``skip_used_keywords`` (mac dinh tat = luong cu y nguyen): bo qua cac cap
+    (tu khoa, provider) ma DB tu khoa (src/db/keyword_repo.py) ghi la da dung.
+    """
     clean_keywords = []
     seen = set()
     for keyword in keywords:
@@ -260,6 +282,18 @@ def start_harvest_job(
     clean_providers = [name for name in SUPPORTED_PROVIDERS if name in requested]
     if not clean_providers:
         raise ValueError("Can chon it nhat 1 provider (pixabay/pexels).")
+
+    skipped_pairs: list[dict] = []
+    keyword_check = None
+    if skip_used_keywords:
+        from src.db.keyword_repo import find_used_keyword_pairs
+
+        skipped_pairs, keyword_check = find_used_keyword_pairs(clean_providers, clean_keywords)
+        if skipped_pairs and len(skipped_pairs) >= len(clean_keywords) * len(clean_providers):
+            raise ValueError(
+                "Tat ca tu khoa da duoc dung tren provider da chon. "
+                "Bo tick 'Bo qua tu khoa da dung' neu van muon tai lai."
+            )
 
     job_id = f"hv-{str(uuid.uuid4())[:8]}"
     staging_dir(job_id)
@@ -287,6 +321,10 @@ def start_harvest_job(
         "updatedAt": _utc_now(),
         "error": None,
     }
+    if skip_used_keywords:
+        progress["skipUsedKeywords"] = True
+        progress["skippedPairs"] = skipped_pairs
+        progress["keywordCheck"] = keyword_check
     _save_progress(job_id, progress)
     _save_manifest(job_id, {"jobId": job_id, "items": []})
 
@@ -357,6 +395,14 @@ def _run_harvest(job_id: str, min_free_gb: float, start_index: int = 0):
     # trong pham vi mot job: bo qua provider do o cac tu khoa con lai thay vi
     # dot mot request 429 cho moi trang cua moi tu khoa.
     quota_stopped: dict[str, str] = {}
+    # Chi co khi nguoi dung tick "Bo qua tu khoa da dung"; rong = luong cu y nguyen.
+    # Doc tu progress nen chay tiep (resume) van bo qua dung nhung cap do.
+    skip_pairs: set[tuple[str, str]] = set()
+    if progress.get("skipUsedKeywords"):
+        skip_pairs = {
+            (_normalize_keyword(pair.get("keyword")), str(pair.get("provider") or ""))
+            for pair in progress.get("skippedPairs") or []
+        }
 
     def flush(force: bool = False):
         nonlocal pending_writes
@@ -376,9 +422,15 @@ def _run_harvest(job_id: str, min_free_gb: float, start_index: int = 0):
             for provider in progress["providers"]:
                 if provider in quota_stopped:
                     continue
+                if skip_pairs and (_normalize_keyword(keyword), provider) in skip_pairs:
+                    continue
                 progress["currentProvider"] = provider
                 taken = 0
                 page = 1
+                # Ly do vong trang ket thuc, de ghi DB tu khoa: mac dinh la do dang
+                # (het quota / cham _MAX_PAGES_PER_QUERY).
+                sweep_status = "partial"
+                sweep_total = None
 
                 while page <= _MAX_PAGES_PER_QUERY:
                     if is_harvest_cancel_requested(job_id):
@@ -409,6 +461,7 @@ def _run_harvest(job_id: str, min_free_gb: float, start_index: int = 0):
                     results = response.get("items") or []
                     per_page = int(response.get("perPage") or len(results) or 1)
                     total = int(response.get("total") or 0)
+                    sweep_total = total
 
                     for item in results:
                         if is_harvest_cancel_requested(job_id):
@@ -487,12 +540,15 @@ def _run_harvest(job_id: str, min_free_gb: float, start_index: int = 0):
                         flush()
 
                     if progress["maxPerKeyword"] and taken >= progress["maxPerKeyword"]:
+                        sweep_status = "limited"
                         break
                     if not results or page * per_page >= total:
+                        sweep_status = "completed"
                         break
                     page += 1
 
                 flush(force=True)
+                _report_keyword_sweep(provider, keyword, sweep_status, sweep_total, taken)
 
         progress["keywordIndex"] = progress["keywordTotal"]
         progress["status"] = "completed"
@@ -595,6 +651,9 @@ def commit_harvest_job(
                 clips, provider, clip_tags, library_id=library_id,
                 session_id=session_id, progress_callback=progress_callback,
                 current=index + 1, total=total,
+                source_ref=provider_item_source_ref(
+                    provider, str(item.get("videoId") or ""), item, "harvest", keyword=keyword,
+                ),
             )
             all_added.extend(added)
 

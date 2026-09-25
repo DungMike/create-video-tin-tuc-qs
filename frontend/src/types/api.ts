@@ -211,6 +211,18 @@ export interface StoryHarvestJob {
   /** Chỉ có ở endpoint list. */
   keptItems?: number;
   totalItems?: number;
+  /** Chỉ có khi job được tạo với "Bỏ qua từ khóa đã dùng". */
+  skipUsedKeywords?: boolean;
+  skippedPairs?: StorySkippedKeywordPair[];
+  /** "ok" | "disabled" (chưa cấu hình MongoDB) | "unavailable" (MongoDB tắt → không bỏ qua gì). */
+  keywordCheck?: "ok" | "disabled" | "unavailable";
+}
+
+export interface StorySkippedKeywordPair {
+  keyword: string;
+  provider: StoryVideoProvider;
+  status: StorySearchKeywordStatus;
+  lastSearchedAt: string | null;
 }
 
 export interface StoryHarvestItem {
@@ -250,6 +262,8 @@ export interface StartStoryHarvestRequest {
   tags?: string[];
   landscapeOnly?: boolean;
   maxPerKeyword?: number;
+  /** Bỏ qua cặp (từ khóa, provider) đã dùng trong DB. Mặc định tắt = như cũ. */
+  skipUsedKeywords?: boolean;
 }
 
 export type StoryHarvestDeleteRequest =
@@ -357,6 +371,8 @@ export interface StoryPrefetchStartRequest {
   minWidth?: number | null;
   minHeight?: number | null;
   skipImported?: boolean;
+  /** Từ chối (409 `keyword_used`) nếu từ khóa đã dùng trên provider này. Mặc định tắt. */
+  skipUsedKeywords?: boolean;
 }
 
 export interface StoryPrefetchDiscardResponse {
@@ -638,6 +654,46 @@ export interface LocalAudioFolderScan {
   orphanSubtitles: number;
 }
 
+/**
+ * Cách chọn clip khi render. "reuse" = như cũ (bốc ngẫu nhiên). "once" = ưu tiên
+ * clip chưa dùng, hết thì clip dùng ít nhất; lượt dùng lưu ở MongoDB.
+ */
+export type ClipUsageMode = "reuse" | "once";
+
+export interface ClipUsageSummary {
+  libraryIds: string[];
+  /** Số clip (theo content key: bản bake / bản tải trùng tính là một). */
+  total: number;
+  unused: number;
+  /** Số clip theo số lần đã dùng, vd `{"1": 120, "2": 4}`. */
+  byCount: Record<string, number>;
+  maxCount: number;
+}
+
+/** Trạng thái từ khóa: `completed`/`limited`/`manual` = đã dùng; `partial` = quét dở, không chặn. */
+export type StorySearchKeywordStatus = "completed" | "limited" | "manual" | "partial";
+
+export interface StorySearchKeywordRecord {
+  provider: StoryVideoProvider;
+  keyword: string;
+  normalized: string;
+  status: StorySearchKeywordStatus;
+  lastStatus: StorySearchKeywordStatus;
+  used: boolean;
+  flows: string[];
+  sweepCount: number;
+  resultsTotal: number | null;
+  videosDownloaded: number;
+  firstSearchedAt: string | null;
+  lastSearchedAt: string | null;
+  backfilled: boolean;
+}
+
+export interface StorySearchKeywordLookupResponse {
+  record: StorySearchKeywordRecord | null;
+  mongoAvailable: boolean;
+}
+
 export interface CreateStoryVideoRequest {
   inputType: "audio_file" | "script_url";
   inputValue: string;
@@ -653,6 +709,8 @@ export interface CreateStoryVideoRequest {
   crtSettings?: CRTSettings;
   /** Bỏ qua bước hiệu ứng TV khi render (thư viện chưa bake hiệu ứng). */
   skipTvEffect?: boolean;
+  /** "once" = mỗi clip 1 lần (ưu tiên clip chưa dùng, cần MongoDB). Mặc định "reuse". */
+  clipUsageMode?: ClipUsageMode;
   waveformOverlayId?: string;
   /** Ảnh decor (khung TV) dùng cho render đơn. "" = tắt. */
   decorImageId?: string;
@@ -718,6 +776,8 @@ export interface CreateStoryBatchRequest {
     crtSettings?: CRTSettings;
     /** Bỏ qua bước hiệu ứng TV khi render (thư viện chưa bake hiệu ứng). */
     skipTvEffect?: boolean;
+    /** "once" = mỗi clip 1 lần cho cả batch (cần MongoDB). Mặc định "reuse". */
+    clipUsageMode?: ClipUsageMode;
     /** @deprecated Dùng `waveformOverlayIds`; backend vẫn nhận key này cho client cũ. */
     waveformOverlayId?: string;
     /**

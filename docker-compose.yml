@@ -1,0 +1,20 @@
+# MongoDB cho Story Video Studio (src/db/): video goc Pexels/Pixabay, luot dung clip
+# cua che do "moi clip 1 lan", tu khoa da tim.
+#
+#   docker compose up -d      # bat (tu bat lai cung Docker Desktop: restart unless-stopped)
+#   docker compose stop       # tat; luong render/tai mac dinh van chay binh thuong
+#
+# Chi mo cong tren 127.0.0.1 nen khong can tai khoan. Du lieu nam trong volume
+# `story-video-mongo-data`, khong mat khi xoa/tao lai container.
+services:
+  mongo:
+    image: mongo:7
+    container_name: story-video-mongo
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - story-video-mongo-data:/data/db
+
+volumes:
+  story-video-mongo-data:

@@ -734,12 +734,16 @@ def _ingest_clips(
     progress_callback=None,
     current: int = 0,
     total: int = 0,
+    source_ref: dict | None = None,
 ) -> list[dict]:
     """Route freshly split clips into the target library.
 
     Styled/baked libraries re-bake the clips (style + waveform + CTA) with the
     library's own stored metadata so new clips match existing baked units; normal
     libraries store the raw clips as-is.
+
+    ``source_ref`` (provider, provider_id, metadata, flow) is only reported to
+    MongoDB in the background afterwards (src/db/); the ingest never waits on it.
     """
     from src.utils.story_library import get_library
 
@@ -754,14 +758,60 @@ def _ingest_clips(
                 "total": total,
                 "message": f"Đang bake video {current}/{total} theo hiệu ứng thư viện...",
             })
-        return bake_and_append_clips(
+        added = bake_and_append_clips(
             library_id,
             clips,
             extra_tags=tags,
             source_type=source_type,
             session_id=session_id,
         )
-    return add_clips_to_library(clips, source_type, tags, library_id=library_id)
+    else:
+        added = add_clips_to_library(clips, source_type, tags, library_id=library_id)
+    _report_ingest(library_id, source_ref, added)
+    return added
+
+
+def _report_ingest(library_id, source_ref: dict | None, added: list[dict]) -> None:
+    """Queue the source video + its new clips for MongoDB. Never raises, never blocks."""
+    if not source_ref or not added:
+        return
+    try:
+        from src.db import background_writer, mongo
+
+        if not mongo.is_configured():
+            return
+        from src.db.media_repo import record_ingest
+        from src.utils.story_library import resolve_library_id
+
+        background_writer.submit(record_ingest, resolve_library_id(library_id), dict(source_ref), list(added))
+    except Exception as exc:  # pragma: no cover - reporting must never break an import
+        logger.warning(f"Could not queue source video record: {exc}")
+
+
+def _parse_provider_video_id(link: str, source_type: str) -> str | None:
+    """Provider video id of a pasted Pixabay/Pexels link (None for other links)."""
+    try:
+        if source_type == "pixabay":
+            return _extract_pixabay_id(link)
+        if source_type == "pexels":
+            return _extract_pexels_id(link)
+    except Exception:
+        return None
+    return None
+
+
+_SOURCE_REF_ITEM_FIELDS = ("title", "tags", "pageUrl", "author", "duration", "width", "height", "thumbnailUrl")
+
+
+def provider_item_source_ref(provider: str, video_id: str, item: dict | None, flow: str, **extra) -> dict:
+    """``source_ref`` for ``_ingest_clips`` from a provider search item / manifest record."""
+    ref = {"provider": provider, "provider_id": video_id, "flow": flow}
+    for field in _SOURCE_REF_ITEM_FIELDS:
+        value = (item or {}).get(field)
+        if value not in (None, "", 0):
+            ref[field] = value
+    ref.update({key: value for key, value in extra.items() if value not in (None, "")})
+    return ref
 
 
 def add_clips_to_library(
@@ -871,6 +921,12 @@ def download_from_links(
                 clips, source_type, clip_tags, library_id=library_id,
                 session_id=session_id, progress_callback=progress_callback,
                 current=idx + 1, total=total,
+                source_ref={
+                    "provider": source_type,
+                    "provider_id": _parse_provider_video_id(link, source_type),
+                    "pageUrl": link,
+                    "flow": "links",
+                },
             )
             all_added.extend(added)
 
@@ -943,6 +999,9 @@ def download_from_provider_items(
                 clips, provider, clip_tags, library_id=library_id,
                 session_id=session_id, progress_callback=progress_callback,
                 current=idx + 1, total=total,
+                source_ref=provider_item_source_ref(
+                    provider, video_id, item, "import", keyword=item.get("keyword"),
+                ),
             )
             all_added.extend(added)
 
@@ -1008,6 +1067,7 @@ def process_local_uploads(
                 clips, "local_upload", clip_tags, library_id=library_id,
                 session_id=session_id, progress_callback=progress_callback,
                 current=idx + 1, total=total,
+                source_ref={"provider": "local", "title": os.path.basename(src_path), "flow": "upload"},
             )
             all_added.extend(added)
 

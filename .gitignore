@@ -11,6 +11,11 @@ tests/*
 !tests/test_story_cta_overlay.py
 !tests/test_story_subtitles.py
 !tests/test_story_subtitle_segments.py
+!tests/conftest.py
+!tests/test_clip_identity.py
+!tests/test_clip_usage.py
+!tests/test_clip_usage_mode.py
+!tests/test_search_keywords.py
 !tests/test-transcript/
 tests/test-transcript/*
 !tests/test-transcript/test.srt

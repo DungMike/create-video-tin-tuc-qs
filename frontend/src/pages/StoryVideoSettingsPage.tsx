@@ -10,6 +10,7 @@ import { StoryDecorImageSearchPanel } from "@/components/StoryDecorImageSearchPa
 import { StoryOverlayPlacementEditor } from "@/components/StoryOverlayPlacementEditor";
 import { StoryLibraryManager } from "@/components/StoryLibraryManager";
 import { StoryLibraryNormalizePanel } from "@/components/StoryLibraryNormalizePanel";
+import { StorySearchKeywordsPanel } from "@/components/StorySearchKeywordsPanel";
 import { SectionNav, type SectionNavItem } from "@/components/section-nav";
 import { TopNav } from "@/components/top-nav";
 import {
@@ -371,6 +372,7 @@ const SETTINGS_SECTIONS: SectionNavItem[] = [
   { id: "clip-normalize", label: "Chuan hoa clip" },
   { id: "decor-images", label: "Anh decor (khung TV)" },
   { id: "clip-library", label: "Thu vien clip" },
+  { id: "search-keywords", label: "Tu khoa da tim" },
 ];
 
 export function StoryVideoSettingsPage() {
@@ -2947,6 +2949,17 @@ export function StoryVideoSettingsPage() {
               </p>
             </div>
             <StoryLibraryManager key={libraryRefreshKey} showBulkDeleteActions />
+          </PageSection>
+
+          <PageSection id="search-keywords">
+            <div className="mb-4 space-y-1">
+              <h2 className="text-base font-semibold text-foreground">Tu khoa da tim</h2>
+              <p className="text-sm text-muted-foreground">
+                Tu khoa da tim tren Pixabay/Pexels (luu o MongoDB). Harvest va tai truoc chi bo qua tu khoa da dung khi
+                tick "Bo qua tu khoa da dung". Xoa mot dong de tim lai tu khoa do.
+              </p>
+            </div>
+            <StorySearchKeywordsPanel />
           </PageSection>
         </div>
       </div>

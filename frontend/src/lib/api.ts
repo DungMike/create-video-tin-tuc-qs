@@ -1,6 +1,7 @@
 import type {
   ApiErrorPayload,
   BakeStoryLibraryRequest,
+  ClipUsageSummary,
   BakeStoryLibraryResponse,
   CRTDemoResponse,
   CommitStoryHarvestResponse,
@@ -51,6 +52,8 @@ import type {
   StoryProviderImageSearchResponse,
   StoryProviderVideo,
   StoryProviderVideoSearchResponse,
+  StorySearchKeywordLookupResponse,
+  StorySearchKeywordRecord,
   StoryVideoProgress,
   StoryVideoProvider,
   SubtitleFontInfo,
@@ -223,7 +226,12 @@ export async function importSelectedStoryVideos(
   libraryId: string,
   items: StoryProviderVideo[],
   tags: string[] = [],
+  /** Từ khóa đã search trên từng provider — chỉ để ghi lịch sử từ khóa (MongoDB). */
+  queries: Partial<Record<StoryVideoProvider, string>> = {},
 ) {
+  const searchQueries = Object.fromEntries(
+    Object.entries(queries).filter(([, value]) => typeof value === "string" && value.trim()),
+  );
   return requestJson<{ sessionId: string }>("/api/story-video/library/import-selected", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -236,10 +244,43 @@ export async function importSelectedStoryVideos(
         // Gửi kèm download URL từ search để backend không phải resolve lại
         // từng video (tránh 429 rate limit từ Pexels/Pixabay).
         previewUrl: item.previewUrl,
+        // Metadata chỉ để ghi DB video gốc; backend bỏ qua nếu thiếu.
+        title: item.title,
+        tags: item.tags,
+        author: item.author,
+        duration: item.duration,
+        width: item.width,
+        height: item.height,
+        thumbnailUrl: item.thumbnailUrl,
       })),
       tags,
+      ...(Object.keys(searchQueries).length ? { queries: searchQueries } : {}),
     }),
   });
+}
+
+// === MongoDB: lịch sử từ khóa + lượt dùng clip (chế độ "Mỗi clip 1 lần") ===
+
+export async function lookupStorySearchKeyword(provider: StoryVideoProvider, query: string) {
+  const params = new URLSearchParams({ provider, q: query });
+  return requestJson<StorySearchKeywordLookupResponse>(`/api/story-video/search-keywords/lookup?${params}`);
+}
+
+export async function listStorySearchKeywords(provider?: StoryVideoProvider) {
+  const params = new URLSearchParams(provider ? { provider } : {});
+  return requestJson<{ items: StorySearchKeywordRecord[] }>(`/api/story-video/search-keywords?${params}`);
+}
+
+export async function deleteStorySearchKeyword(provider: StoryVideoProvider, keyword: string) {
+  const params = new URLSearchParams({ keyword });
+  return requestJson<{ deleted: boolean }>(`/api/story-video/search-keywords/${provider}?${params}`, {
+    method: "DELETE",
+  });
+}
+
+export async function getClipUsageSummary(libraryIds: string[]) {
+  const params = new URLSearchParams({ libraryIds: libraryIds.join(",") });
+  return requestJson<ClipUsageSummary>(`/api/story-video/clip-usage/summary?${params}`);
 }
 
 // === Bulk harvest: tải hết theo từ khoá trước, chọn lọc sau ===

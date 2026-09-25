@@ -19,6 +19,11 @@ from pathlib import Path
 from src.config import Config
 from src.processors.audio_utils import get_audio_duration, validate_audio
 from src.utils.clip_spec_validation import filter_valid_clips
+from src.utils.clip_usage import (
+    CLIP_USAGE_ONCE,
+    get_clip_usage_ledger,
+    normalize_clip_usage_mode,
+)
 from src.utils.ffmpeg_helper import FFmpegHelper
 from src.utils.file_manager import storage_absolute_path, storage_relative_path
 from src.utils.logger import logger
@@ -367,6 +372,10 @@ class StoryVideoPipelineRunner:
         # render the clips as they are (overlays + subtitle only). This also unlocks
         # the GPU overlay path, which the CPU-only style filter would otherwise block.
         self.skip_tv_effect = bool(config_dict.get("skip_tv_effect", False))
+        # "once" = moi clip 1 lan (src/utils/clip_usage.py): uu tien clip chua dung,
+        # dem luot dung o Mongo. Thieu key (config cu, batch resume) = "reuse" =
+        # luong chon clip nhu cu, khong cham toi Mongo.
+        self.clip_usage_mode = normalize_clip_usage_mode(config_dict.get("clip_usage_mode"))
         self.subtitle_path = str(config_dict.get("subtitle_path", "") or "").strip()
         # Optional intro clip (already normalized to the canonical output spec on
         # upload) prepended to the front of the finished video. "" = no intro.
@@ -609,6 +618,8 @@ class StoryVideoPipelineRunner:
             self._raise_if_cancel_requested()
             final_path = self._finalize(output_video)
             final_rel_path = storage_relative_path(final_path)
+            if self.clip_usage_mode == CLIP_USAGE_ONCE:
+                self._commit_clip_usage(final_path)
 
             self._update_progress(
                 "completed",
@@ -641,6 +652,9 @@ class StoryVideoPipelineRunner:
             )
             return None
         finally:
+            if self.clip_usage_mode == CLIP_USAGE_ONCE:
+                # Failed/cancelled: hand the leased clips back without counting them.
+                get_clip_usage_ledger().release(self.story_id)
             if self._edit:
                 # Never purge under a still-running stills thread.
                 self._edit.finish_clip_media()
@@ -777,6 +791,9 @@ class StoryVideoPipelineRunner:
         below spreads picks across all of them and only repeats a clip after the
         whole merged pool has been used.
         """
+        if self.clip_usage_mode == CLIP_USAGE_ONCE:
+            return self._select_clips_once(audio_duration)
+
         valid_clips: list[tuple[str, float]] = []
         per_library_counts: list[str] = []
         for library_id in self.library_ids:
@@ -839,6 +856,107 @@ class StoryVideoPipelineRunner:
             f"selected_duration={selected_duration:.1f}s, audio={audio_duration:.1f}s"
         )
         return selected
+
+    def _library_clip_keys(self, library_id: str) -> dict[str, str]:
+        """``clip_path -> clip_key`` (src/utils/clip_identity.py) cho mot thu vien."""
+        from src.utils.clip_identity import clip_identity
+
+        library_root = story_library_root(library_id)
+        keys: dict[str, str] = {}
+        for asset in _load_story_library_index(library_id).get("assets", []):
+            rel_path = asset.get("relative_path", "")
+            if rel_path:
+                keys[os.path.join(library_root, rel_path)] = clip_identity(library_id, asset)[1]
+        return keys
+
+    def _select_clips_once(self, audio_duration: float) -> list[str]:
+        """Che do "moi clip 1 lan": clip chua dung truoc, roi toi clip dung it nhat.
+
+        Cung pool voi luong thuong (``_library_pool``, loc do dai y het), chi thu tu
+        chon lay tu so lan dung o Mongo (src/utils/clip_usage.py). Mongo loi thi
+        video failed voi thong bao ro -- khong lang le quay ve boc ngau nhien.
+        """
+        valid_clips: list[tuple[str, float]] = []
+        clip_keys: dict[str, str] = {}
+        for library_id in self.library_ids:
+            library_clips = self._library_pool(library_id)
+            valid_clips.extend(library_clips)
+            library_keys = self._library_clip_keys(library_id)
+            for clip_path, _duration in library_clips:
+                clip_keys[clip_path] = library_keys.get(clip_path) or f"path:{clip_path}"
+
+        if not valid_clips:
+            logger.error(
+                f"[StoryPipeline:{self.story_id}] No valid clips found in story "
+                f"librar{'ies' if len(self.library_ids) > 1 else 'y'} "
+                f"{', '.join(self.library_ids) or '(none)'}."
+            )
+            return []
+
+        segment_duration = self._segment_duration()
+        min_duration = max(0.5, segment_duration - 0.25)
+        pool = [item for item in valid_clips if item[1] >= min_duration] or valid_clips
+        target_duration = audio_duration + 0.25
+
+        run_length = successor = None
+        long_takes = bool(self._edit and self._edit.long_takes)
+        if long_takes:
+            rng = random.Random(self.story_id)
+            in_pool = {path for path, _dur in pool}
+            by_key = {meta: path for path, meta in self._clip_meta.items() if path in in_pool}
+
+            def run_length() -> int:
+                return self._edit.run_length(rng)
+
+            def successor(path: str) -> str | None:
+                meta = self._clip_meta.get(path)
+                return by_key.get((meta[0], meta[1] + 1)) if meta else None
+
+        self._raise_if_cancel_requested()
+        try:
+            selection = get_clip_usage_ledger().select(
+                self.story_id,
+                pool,
+                lambda path: clip_keys.get(path) or f"path:{path}",
+                target_duration,
+                float(segment_duration),
+                run_length=run_length,
+                successor=successor,
+            )
+        except Exception as exc:
+            from src.db import mongo
+
+            raise RuntimeError(
+                f"Che do moi clip 1 lan khong doc duoc so lan dung clip: {exc}. "
+                f"{mongo.unavailable_message()}"
+            ) from exc
+
+        if long_takes:
+            self._edit.run_starts = selection.run_starts
+        self.progress["clipUsage"] = selection.stats()
+        logger.info(
+            f"[StoryPipeline:{self.story_id}] Selected {len(selection.paths)} clips (once mode: "
+            f"{selection.fresh} fresh, {selection.reused} reused, max use {selection.max_count}"
+            f"{f', {len(selection.runs)} shots' if long_takes else ''}) from pool={len(pool)}, "
+            f"audio={audio_duration:.1f}s"
+        )
+        return selection.paths
+
+    def _commit_clip_usage(self, final_path: str) -> None:
+        """Chi goi o che do once, sau khi video da xong. Khong bao gio raise."""
+        try:
+            result = get_clip_usage_ledger().commit(self.story_id, {
+                "library_ids": list(self.library_ids),
+                "batch_id": self.output_subdir or None,
+                "output_path": storage_relative_path(final_path),
+            })
+            usage = self.progress.get("clipUsage")
+            if isinstance(usage, dict):
+                usage["committed"] = result.get("committed", 0)
+                if result.get("queued"):
+                    usage["queued"] = result["queued"]
+        except Exception as exc:  # pragma: no cover - commit() already swallows
+            logger.warning(f"[StoryPipeline:{self.story_id}] Clip usage commit failed: {exc}")
 
     def _select_long_takes(self, pool, target_duration: float, unit: float, audio_duration: float) -> list[str]:
         """Runs of 1-3 consecutive clips of one source: seamless 3/6/9s shots.

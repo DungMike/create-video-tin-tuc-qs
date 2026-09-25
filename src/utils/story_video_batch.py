@@ -462,6 +462,7 @@ class StoryVideoBatchRunner:
                     [config["library_id"]] if config.get("library_id") else []
                 ),
                 "skip_tv_effect": bool(config.get("skip_tv_effect", False)),
+                "clip_usage_mode": config.get("clip_usage_mode", "reuse"),
                 "decor_image_id": config.get("decor_image_id", ""),
                 "decor_image_name": self._decor_name(config.get("decor_image_id", "")),
                 "waveform_overlay_id": config.get("waveform_overlay_id", ""),

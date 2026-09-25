@@ -47,6 +47,22 @@ Thư viện là tập hợp clip 5 giây đã chuẩn hoá, dùng làm nguyên l
 Batch (`story_video_batch.py`) xếp hàng nhiều video, chạy song song có giới hạn
 (`STORY_BATCH_MAX_WORKERS`), có progress polling, cancel và retry-failed.
 
+### Chế độ "Mỗi clip 1 lần" + MongoDB (tuỳ chọn)
+
+Mặc định ("Tái sử dụng") mọi thứ chạy như trên và **không cần MongoDB**. MongoDB chỉ phục vụ:
+
+- **Chế độ dùng clip "Mỗi clip 1 lần"** (chọn trên trang render, mỗi lần render/batch):
+  clip chưa từng dùng được lấy trước, hết thì lấy clip dùng ít lần nhất. Lượt dùng chỉ tăng khi
+  video render xong (`src/utils/clip_usage.py`). Clip được nhận diện theo video gốc + đoạn thứ N
+  (`src/utils/clip_identity.py`), nên bản bake / bản tải trùng ở thư viện khác dùng chung bộ đếm.
+  MongoDB tắt thì chế độ này trả lỗi 503, không lặng lẽ quay về bốc ngẫu nhiên.
+- **Id video gốc Pexels/Pixabay** của mọi video tải về và các clip cắt từ nó (ghi nền, không chặn luồng tải).
+- **Từ khóa đã tìm** theo từng provider. Harvest/tải trước chỉ bỏ qua từ khóa đã dùng khi tick
+  "Bỏ qua từ khóa đã dùng"; danh sách + xoá ở mục "Từ khóa đã tìm" trang cấu hình.
+
+Collection: `source_videos`, `clips`, `clip_usage_events`, `search_keywords` (DB `story_video_studio`).
+Code ở `src/db/`.
+
 ---
 
 ## 3. Cấu trúc Backend (`src/`)
@@ -60,8 +76,13 @@ src/
 ├── processors/
 │   ├── audio_utils.py           # Đọc thông tin audio (duration, validate)
 │   └── crt_effect_processor.py  # Sinh filter hiệu ứng TV/CRT
+├── db/                          # MongoDB (tuỳ chọn): video gốc, lượt dùng clip, từ khóa
+├── tools/
+│   └── backfill_media_db.py     # Nạp thư viện + từ khóa cũ vào MongoDB (chạy tay)
 └── utils/
     ├── story_video_pipeline.py     # Runner 1 video
+    ├── clip_identity.py            # Key video gốc / clip từ dữ liệu index.json sẵn có
+    ├── clip_usage.py               # Chế độ "Mỗi clip 1 lần": chọn clip theo lượt dùng
     ├── story_video_batch.py        # Runner batch
     ├── story_library*.py           # Thư viện clip: CRUD, bake, normalize
     ├── story_bulk_harvest.py       # Tải hàng loạt theo từ khoá
@@ -150,6 +171,11 @@ PIXABAY_API_KEY=...
 # ----- Web -----
 WEB_PORT=5000
 FRONTEND_PORT=5176
+
+# ----- MongoDB (tuỳ chọn) -----
+MONGODB_URI=mongodb://127.0.0.1:27017   # Bỏ trống = tắt hẳn phần MongoDB
+MONGODB_DB=story_video_studio
+MONGODB_TIMEOUT_MS=2000
 ```
 
 Toàn bộ key nằm trong [src/config.py](src/config.py). `.env` chỉ đọc lúc server khởi động —
@@ -173,6 +199,14 @@ pip install -r requirements.txt
 
 npm install
 npm --prefix frontend install
+```
+
+MongoDB (chỉ cần cho chế độ "Mỗi clip 1 lần" và lịch sử từ khóa) chạy bằng Docker:
+
+```powershell
+docker compose up -d                                          # container story-video-mongo, cổng 127.0.0.1:27017
+.\venv\Scripts\python -m src.tools.backfill_media_db --dry-run   # đếm thử dữ liệu cũ sẽ nạp
+.\venv\Scripts\python -m src.tools.backfill_media_db             # nạp thư viện + từ khóa cũ (chạy lại được)
 ```
 
 ### Dev

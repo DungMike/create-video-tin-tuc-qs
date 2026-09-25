@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { SKIP_USED_KEYWORDS_STORAGE_KEY, useStoredFlag } from "@/hooks/useStoredFlag";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -90,6 +91,8 @@ export function StoryLibraryPrefetchPanel({
   const [orientation, setOrientation] = useState<StoryPrefetchOrientation | "">("landscape");
   const [minResIndex, setMinResIndex] = useState(2);
   const [skipImported, setSkipImported] = useState(true);
+  // Opt-in, mac dinh tat = luong cu: tu choi tu khoa DB ghi la da dung tren provider nay.
+  const [skipUsedKeywords, setSkipUsedKeywords] = useStoredFlag(SKIP_USED_KEYWORDS_STORAGE_KEY, false);
 
   const [markedForDelete, setMarkedForDelete] = useState<Set<string>>(new Set());
   const [reviewPage, setReviewPage] = useState(1);
@@ -246,6 +249,7 @@ export function StoryLibraryPrefetchPanel({
         minWidth: resolution.width || null,
         minHeight: resolution.height || null,
         skipImported,
+        ...(skipUsedKeywords ? { skipUsedKeywords: true } : {}),
       });
       setMarkedForDelete(new Set());
       setReviewPage(1);
@@ -492,6 +496,18 @@ export function StoryLibraryPrefetchPanel({
                 onCheckedChange={(checked) => setSkipImported(Boolean(checked))}
               />
               Bo qua video da import vao thu vien nay
+            </label>
+
+            <label
+              className="flex w-fit cursor-pointer items-center gap-2 text-sm text-muted-foreground"
+              title="Tu choi tu khoa da quet xong truoc day tren provider nay (luu o MongoDB). Bo tick de van tai lai."
+            >
+              <Checkbox
+                checked={skipUsedKeywords}
+                disabled={controlsDisabled}
+                onCheckedChange={(checked) => setSkipUsedKeywords(Boolean(checked))}
+              />
+              Bo qua tu khoa da dung
             </label>
 
             <div className="flex justify-end">
