@@ -4,7 +4,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { StoryDecorFrame, StoryDecorImage, StoryDecorMaskMode } from "@/types/api";
+import { ColorInput, HEX_COLOR_RE } from "@/components/color-input";
+import type { StoryDecorBorder, StoryDecorFrame, StoryDecorImage, StoryDecorMaskMode } from "@/types/api";
 
 const FRAME_W = 1920;
 const FRAME_H = 1080;
@@ -15,6 +16,19 @@ const MIN_SIDE = 64;
 const BLUR_MAX = 40;
 /** Config.STORY_DECOR_KEY_COLOR, only ever drawn as a hint on the canvas. */
 const CHROMA_GREEN = "0,177,64";
+/** Mirrors `story_decor_images.DECOR_BORDER_MAX` (same 0..20 as "Hai lớp cùng nguồn"). */
+export const DECOR_BORDER_MAX = 20;
+/** Mirrors the backend default: off, in the "Hai lớp cùng nguồn" cream. */
+export const DECOR_BORDER_DEFAULT: StoryDecorBorder = { width: 0, color: "#F5F0E6", shadow: false };
+
+/** What the server will bake for a border: width clamped, junk colour back to the default. */
+export function resolveDecorBorder(width: string | number, color: string, shadow: boolean): StoryDecorBorder {
+  const px = Math.round(Math.max(0, Math.min(Number(width) || 0, DECOR_BORDER_MAX)));
+  const hex = HEX_COLOR_RE.test(color.trim())
+    ? `#${color.trim().replace(/^#/, "").toUpperCase()}`
+    : DECOR_BORDER_DEFAULT.color;
+  return { width: px, color: hex, shadow };
+}
 
 type Handle = "nw" | "ne" | "sw" | "se" | "move";
 
@@ -28,6 +42,8 @@ interface StoryDecorFrameEditorProps {
    * it the canvas would draw sharp while the server bakes a blur.
    */
   defaultBlur: number;
+  /** Same reason as `defaultBlur`: the border an inheriting image will get. */
+  defaultBorder: StoryDecorBorder;
   isPreviewLoading?: boolean;
   isSaving?: boolean;
   onRequestPreview: () => void;
@@ -110,12 +126,11 @@ function maxRadius(frame: StoryDecorFrame): number {
   return Math.floor(Math.min(frame.w, frame.h) / 2);
 }
 
-function traceRect(
+function addRectPath(
   ctx: CanvasRenderingContext2D,
   frame: StoryDecorFrame,
   radius: number,
 ) {
-  ctx.beginPath();
   if (radius > 0 && typeof ctx.roundRect === "function") {
     ctx.roundRect(frame.x, frame.y, frame.w, frame.h, radius);
   } else {
@@ -123,10 +138,20 @@ function traceRect(
   }
 }
 
+function traceRect(
+  ctx: CanvasRenderingContext2D,
+  frame: StoryDecorFrame,
+  radius: number,
+) {
+  ctx.beginPath();
+  addRectPath(ctx, frame, radius);
+}
+
 export function StoryDecorFrameEditor({
   image,
   previewPath,
   defaultBlur,
+  defaultBorder,
   isPreviewLoading = false,
   isSaving = false,
   onRequestPreview,
@@ -147,6 +172,11 @@ export function StoryDecorFrameEditor({
   // a single number: the flag says which one the user meant.
   const [blurOwn, setBlurOwn] = useState(() => image.blurRadius != null);
   const [blurRadius, setBlurRadius] = useState(String(image.blurRadius ?? defaultBlur));
+  // Same split as the blur: the flag says "own border" vs "follow the default".
+  const [borderOwn, setBorderOwn] = useState(() => image.border != null);
+  const [borderWidth, setBorderWidth] = useState(String((image.border ?? defaultBorder).width));
+  const [borderColor, setBorderColor] = useState((image.border ?? defaultBorder).color);
+  const [borderShadow, setBorderShadow] = useState((image.border ?? defaultBorder).shadow);
   // A self-drawn area is 16:9 by default — it is the shape the video already
   // has, so anything else only wastes picture. The user can still unlock it for
   // an off-aspect screen (an old 4:3 TV in the photo).
@@ -174,9 +204,14 @@ export function StoryDecorFrameEditor({
     setBlend(String(image.blend ?? 0.05));
     setBlurOwn(image.blurRadius != null);
     setBlurRadius(String(image.blurRadius ?? defaultBlur));
+    const border = image.border ?? defaultBorder;
+    setBorderOwn(image.border != null);
+    setBorderWidth(String(border.width));
+    setBorderColor(border.color);
+    setBorderShadow(border.shadow);
     setLockAspect(mode === "manual" || isSourceAspect(image.frame));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [image.id, image.updatedAt, defaultBlur]);
+  }, [image.id, image.updatedAt, defaultBlur, defaultBorder.width, defaultBorder.color, defaultBorder.shadow]);
 
   // Chroma mode draws the keyed PNG, because its transparent hole IS the
   // alignment target. Manual mode has no hole yet — we are about to cut one —
@@ -215,6 +250,12 @@ export function StoryDecorFrameEditor({
   const blurPx = !isManual
     ? 0
     : Math.max(0, Math.min(blurOwn ? Number(blurRadius) || 0 : defaultBlur, BLUR_MAX));
+  /** Same for the border; chroma images never get one. */
+  const border: StoryDecorBorder = !isManual
+    ? { ...DECOR_BORDER_DEFAULT }
+    : borderOwn
+      ? resolveDecorBorder(borderWidth, borderColor, borderShadow)
+      : resolveDecorBorder(defaultBorder.width, defaultBorder.color, defaultBorder.shadow);
 
   const drawCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -263,6 +304,30 @@ export function StoryDecorFrameEditor({
     // the backend cuts the alpha directly — but it is the picture the user has
     // in their head, and it shows the rounded corners exactly as they will cut.
     if (!previewBitmap && isManual) {
+      // The border hint: ring and shadow grow outwards from the area, clipped
+      // off the area itself exactly the way the punched hole cuts them on the
+      // server, so the photo under the green stays as it was.
+      if (border.width > 0 || border.shadow) {
+        const bw = border.width;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, FRAME_W, FRAME_H);
+        addRectPath(ctx, frame, radiusPx);
+        ctx.clip("evenodd");
+        if (border.shadow) {
+          ctx.shadowColor = "rgba(0,0,0,0.65)";
+          ctx.shadowBlur = 44;
+          ctx.shadowOffsetY = 16;
+        }
+        traceRect(
+          ctx,
+          { x: frame.x - bw, y: frame.y - bw, w: frame.w + 2 * bw, h: frame.h + 2 * bw },
+          radiusPx ? radiusPx + bw : 0,
+        );
+        ctx.fillStyle = border.color;
+        ctx.fill();
+        ctx.restore();
+      }
       ctx.save();
       traceRect(ctx, frame, radiusPx);
       ctx.fillStyle = `rgba(${CHROMA_GREEN},0.62)`;
@@ -300,7 +365,7 @@ export function StoryDecorFrameEditor({
     ctx.fillStyle = "#e2e8f0";
     ctx.fillText(label, frame.x + 13, boxY + 30);
     ctx.restore();
-  }, [frame, decorBitmap, previewBitmap, isManual, radiusPx, blurPx]);
+  }, [frame, decorBitmap, previewBitmap, isManual, radiusPx, blurPx, border.width, border.color, border.shadow]);
 
   useEffect(() => {
     drawCanvas();
@@ -661,6 +726,75 @@ export function StoryDecorFrameEditor({
                 Theo mặc định chung ({defaultBlur}px)
               </label>
             </div>
+
+            <div className="grid gap-3 rounded-md border border-border/70 p-3 sm:col-span-2">
+              <div className="grid gap-1">
+                <Label htmlFor="decor-border">
+                  Viền cửa sổ video ({border.width}px{border.shadow ? " · có bóng" : ""})
+                </Label>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="decor-border-range"
+                    type="range"
+                    className="h-10 flex-1 cursor-pointer disabled:opacity-40"
+                    min={0}
+                    max={DECOR_BORDER_MAX}
+                    step={1}
+                    value={border.width}
+                    disabled={!borderOwn}
+                    onChange={(event) => setBorderWidth(event.currentTarget.value)}
+                  />
+                  <Input
+                    id="decor-border"
+                    type="number"
+                    className="w-24"
+                    min={0}
+                    max={DECOR_BORDER_MAX}
+                    value={borderOwn ? borderWidth : String(defaultBorder.width)}
+                    disabled={!borderOwn}
+                    onChange={(event) => setBorderWidth(event.currentTarget.value)}
+                  />
+                </div>
+              </div>
+              <ColorInput
+                id="decor-border-color"
+                label="Màu viền"
+                value={borderOwn ? borderColor : defaultBorder.color}
+                fallback={DECOR_BORDER_DEFAULT.color}
+                placeholder={DECOR_BORDER_DEFAULT.color}
+                resetValue={DECOR_BORDER_DEFAULT.color}
+                resetTitle="Về màu mặc định"
+                disabled={!borderOwn}
+                onChange={setBorderColor}
+              />
+              <label className="flex cursor-pointer items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={border.shadow}
+                  disabled={!borderOwn}
+                  onChange={(event) => setBorderShadow(event.currentTarget.checked)}
+                />
+                Đổ bóng quanh cửa sổ
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={!borderOwn}
+                  onChange={(event) => {
+                    const inherit = event.currentTarget.checked;
+                    setBorderOwn(!inherit);
+                    // Same as the blur: unlocking starts from what is showing now.
+                    if (!inherit) {
+                      setBorderWidth(String(border.width));
+                      setBorderColor(border.color);
+                      setBorderShadow(border.shadow);
+                    }
+                  }}
+                />
+                Theo mặc định chung ({defaultBorder.width}px · {defaultBorder.color}
+                {defaultBorder.shadow ? " · có bóng" : ""})
+              </label>
+            </div>
           </>
         ) : (
           <>
@@ -708,7 +842,8 @@ export function StoryDecorFrameEditor({
         {isManual ? (
           <>
             Bo góc 0 = vuông góc. Màn hình TV/điện thoại thật thường bo nhẹ 20-60px ở độ phân
-            giải 1920×1080 — bo đúng bằng màn hình trong ảnh thì mép video sẽ không lộ.
+            giải 1920×1080 — bo đúng bằng màn hình trong ảnh thì mép video sẽ không lộ. Viền cửa
+            sổ vẽ ra phía ngoài vùng và bo theo góc, nên không che mất phần nào của video.
           </>
         ) : (
           <>
@@ -733,7 +868,9 @@ export function StoryDecorFrameEditor({
               // Only in manual mode: sending it for a chroma image would clear
               // an override it still has stored, which would then be silently
               // gone if the image is ever switched back to manual.
-              ...(isManual ? { blurRadius: blurOwn ? blurPx : null } : {}),
+              ...(isManual
+                ? { blurRadius: blurOwn ? blurPx : null, border: borderOwn ? border : null }
+                : {}),
             })
           }
           disabled={isSaving}

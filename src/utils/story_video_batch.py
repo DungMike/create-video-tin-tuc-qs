@@ -82,6 +82,29 @@ def batch_output_dir(progress: dict) -> str:
     return os.path.abspath(os.path.join(Config.OUTPUT_DIR, "story-video", subdir))
 
 
+def decor_ids_still_needed() -> set[str]:
+    """Decor images some batch on disk will still render.
+
+    Every story that has not finished for good counts: pending and running ones,
+    and failed ones too, since retry-failed re-renders them with the image they
+    were dealt. Purging used decor images must leave these alone.
+    """
+    root = _batches_root()
+    if not os.path.isdir(root):
+        return set()
+    needed: set[str] = set()
+    for batch_id in os.listdir(root):
+        progress_path = os.path.join(root, batch_id, "progress.json")
+        if not os.path.isfile(progress_path):
+            continue
+        progress = _load_json(progress_path) or {}
+        for story in progress.get("stories") or []:
+            decor_id = str(story.get("decor_image_id") or "").strip()
+            if decor_id and story.get("status") not in {"completed", "cancelled"}:
+                needed.add(decor_id)
+    return needed
+
+
 # ---------------------------------------------------------------------------
 # Queue: one worker thread drains a FIFO of runners, one batch at a time.
 # ---------------------------------------------------------------------------
