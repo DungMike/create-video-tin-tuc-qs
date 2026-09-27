@@ -3004,6 +3004,25 @@ def get_drive_audio_import(session_id: str):
 LOCAL_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 # "<audio stem>.chapters.txt": chapter titles/labels and quote marks for edit styles.
 CHAPTERS_SUFFIX = ".chapters.txt"
+_STEM_SEPARATORS = "-_ ."
+
+
+def _match_companion_stem(audio_stem: str, candidates: dict[str, str]) -> str:
+    """Key in ``candidates`` (lowercased stems) that belongs to ``audio_stem``.
+
+    Exact stem wins. Otherwise the longest candidate that prefixes the audio stem
+    at a separator, e.g. ``k10a_full.srt`` for ``k10a_full-an-thai-kenh1.mp3``
+    (but never ``k1a`` for ``k10a``).
+    """
+    stem = audio_stem.lower()
+    if stem in candidates:
+        return stem
+    best = ""
+    for key in candidates:
+        if len(key) > len(best) and len(key) < len(stem) and stem.startswith(key) \
+                and stem[len(key)] in _STEM_SEPARATORS:
+            best = key
+    return best
 
 
 @story_video_bp.route("/api/story-video/batch/local-folder", methods=["POST"])
@@ -3049,16 +3068,18 @@ def scan_local_audio_folder():
         for name in sorted(audio_names, key=str.lower):
             audio_path = os.path.join(dir_path, name)
             stem = os.path.splitext(name)[0]
-            subtitle_path = subtitles.get(stem.lower(), "")
+            subtitle_key = _match_companion_stem(stem, subtitles)
+            subtitle_path = subtitles.get(subtitle_key, "") if subtitle_key else ""
             if subtitle_path:
                 paired_count += 1
-                used_stems.add(stem.lower())
+                used_stems.add(subtitle_key)
             try:
                 size_bytes = os.path.getsize(audio_path)
             except OSError:
                 size_bytes = 0
             total_bytes += size_bytes
-            chapters_path = chapter_files.get(stem.lower(), "")
+            chapters_key = _match_companion_stem(stem, chapter_files)
+            chapters_path = chapter_files.get(chapters_key, "") if chapters_key else ""
             items.append({
                 "audioPath": audio_path,
                 "audioName": name,

@@ -101,6 +101,11 @@ class Config:
     CLIP_EXPECTED_PIX_FMT = os.getenv("CLIP_EXPECTED_PIX_FMT", "yuv420p")
     CLIP_EXPECTED_COLOR_RANGE = os.getenv("CLIP_EXPECTED_COLOR_RANGE", "tv")
     CLIP_EXPECTED_COLOR_SPACE = os.getenv("CLIP_EXPECTED_COLOR_SPACE", "bt709")
+    # true = render bo qua han buoc ffprobe kiem tra clip (filter_valid_clips), lay
+    # thang moi clip trong thu vien. Chi bat khi thu vien da sach (vd khoi phuc tu du
+    # lieu cu): mot clip lech spec lot vao se lam hong overlay GPU giua chung.
+    # Quet/chuan hoa thu vien (normalize) van probe nhu cu.
+    STORY_SKIP_CLIP_SPEC_CHECK = os.getenv("STORY_SKIP_CLIP_SPEC_CHECK", "false").strip().lower() in ("1", "true", "yes", "on")
     # Primaries/transfer aren't part of the render's exclusion check, but every clip
     # written by src/utils/clip_canonical.py is tagged with them so the whole library
     # carries one identical VUI. See src/utils/clip_canonical.py.
