@@ -2892,7 +2892,19 @@ def create_story_video():
     }
 
     runner = StoryVideoPipelineRunner(story_id, config_dict)
-    threading.Thread(target=runner.run, daemon=True).start()
+
+    # A single render has no batch file on disk, so it holds its decor image here
+    # to keep purge-used from deleting the PNG before the render reads it.
+    from src.utils.story_decor_images import hold_decor_image, release_decor_hold
+
+    def run_holding_decor():
+        try:
+            runner.run()
+        finally:
+            release_decor_hold(decor_image_id)
+
+    hold_decor_image(decor_image_id)
+    threading.Thread(target=run_holding_decor, daemon=True).start()
 
     logger.info(f"[StoryVideo] Started single pipeline: story_id={story_id}")
     return jsonify({"storyId": story_id}), 202
@@ -4125,6 +4137,23 @@ def patch_decor_image(image_id: str):
             except (TypeError, ValueError):
                 return _error("Gia tri blurRadius khong hop le.", code="invalid_value")
 
+    # Vien cung luat voi blurRadius: ``null`` = theo mac dinh chung.
+    if "border" in payload:
+        raw = payload["border"]
+        if raw is None:
+            updates["border"] = None
+        elif isinstance(raw, dict):
+            try:
+                updates["border"] = {
+                    "width": int(raw.get("width") or 0),
+                    "color": str(raw.get("color") or ""),
+                    "shadow": bool(raw.get("shadow")),
+                }
+            except (TypeError, ValueError):
+                return _error("Gia tri border khong hop le.", code="invalid_value")
+        else:
+            return _error("Gia tri border khong hop le.", code="invalid_value")
+
     try:
         record = update_decor_image(image_id, updates)
     except Exception as exc:
@@ -4137,8 +4166,10 @@ def patch_decor_image(image_id: str):
 
 @story_video_bp.route("/api/story-video/decor-images/settings", methods=["PATCH"])
 def patch_decor_image_settings():
-    """Do mo mac dinh chung cho moi anh decor tu ve vung nen.
+    """Mac dinh chung (do mo, vien cua so) cho moi anh decor tu ve vung nen.
 
+    Gui mot hoac nhieu khoa trong ``backgroundBlur``, ``borderWidth``,
+    ``borderColor``, ``borderShadow``; khoa khong gui thi giu nguyen.
     Anh nao dang theo mac dinh chung se duoc ve lai PNG ngay trong request --
     khoang 0,6s moi anh, nen mot thu vien vai chuc anh mat vai giay. Doi lai,
     khi request tra ve thi moi thu tren dia da dung, khong con trang thai nua
@@ -4148,18 +4179,34 @@ def patch_decor_image_settings():
     Nhu ``/group`` o duoi, segment tinh "settings" khong the bi sibling
     ``<image_id>`` nuot mat: Werkzeug xep rule khong tham so len truoc.
     """
-    from src.utils.story_decor_images import apply_decor_blur_default
+    import re
+
+    from src.utils.story_decor_images import apply_decor_settings
 
     payload = request.get_json(silent=True) or {}
-    if "backgroundBlur" not in payload:
-        return _error("Thieu backgroundBlur.", code="invalid_value")
-    try:
-        blur = float(payload["backgroundBlur"])
-    except (TypeError, ValueError):
-        return _error("Gia tri backgroundBlur khong hop le.", code="invalid_value")
+    updates = {}
+    if "backgroundBlur" in payload:
+        try:
+            updates["backgroundBlur"] = float(payload["backgroundBlur"])
+        except (TypeError, ValueError):
+            return _error("Gia tri backgroundBlur khong hop le.", code="invalid_value")
+    if "borderWidth" in payload:
+        try:
+            updates["borderWidth"] = int(payload["borderWidth"])
+        except (TypeError, ValueError):
+            return _error("Gia tri borderWidth khong hop le.", code="invalid_value")
+    if "borderColor" in payload:
+        color = payload["borderColor"]
+        if not isinstance(color, str) or not re.match(r"^#?[0-9a-fA-F]{6}$", color.strip()):
+            return _error("Mau vien phai dang #RRGGBB.", code="invalid_value")
+        updates["borderColor"] = color
+    if "borderShadow" in payload:
+        updates["borderShadow"] = bool(payload["borderShadow"])
+    if not updates:
+        return _error("Thieu backgroundBlur / borderWidth / borderColor / borderShadow.", code="invalid_value")
 
     try:
-        settings, images = apply_decor_blur_default(blur)
+        settings, images = apply_decor_settings(updates)
     except Exception as exc:
         logger.error(f"[StoryVideo] Decor settings update failed: {exc}", exc_info=True)
         return _error(f"Khong the cap nhat cai dat: {exc}", code="decor_settings_failed", status=500)
@@ -4212,6 +4259,30 @@ def reset_decor_images_used():
     )
     logger.info(f"[StoryVideo] Decor used-mark reset: {cleared} anh (group={group!r})")
     return jsonify({"cleared": cleared})
+
+
+@story_video_bp.route("/api/story-video/decor-images/purge-used", methods=["POST"])
+def purge_used_decor_images_route():
+    """Delete used decor images from disk: ``group`` for one theme, none = whole library.
+
+    Images a batch still has to render (queued, running, or failed and waiting
+    for retry) and single renders in flight are kept and reported as ``kept``.
+    """
+    from src.utils.story_decor_images import held_decor_ids, purge_used_decor_images
+    from src.utils.story_video_batch import decor_ids_still_needed
+
+    payload = request.get_json(silent=True) or {}
+    group = payload.get("group")
+
+    try:
+        result = purge_used_decor_images(
+            group=None if group is None else str(group),
+            keep_ids=decor_ids_still_needed() | held_decor_ids(),
+        )
+    except Exception as exc:
+        logger.error(f"[StoryVideo] Decor purge failed: {exc}", exc_info=True)
+        return _error(f"Khong the don anh decor da dung: {exc}", code="decor_purge_failed", status=500)
+    return jsonify(result)
 
 
 @story_video_bp.route("/api/story-video/decor-images/<image_id>", methods=["DELETE"])

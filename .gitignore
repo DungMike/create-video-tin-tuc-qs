@@ -1,6 +1,7 @@
 node_modules
 storage
 .env
+env
 logs
 tests/*
 !tests/test_google_drive_audio.py
@@ -53,3 +54,4 @@ tests/benchmarks/samples/sample_30a - Copy (3).srt
 tests/benchmarks/samples/sample_30a - Copy (4).srt
 tests/benchmarks/samples/sample_30a - Copy (5).srt
 tests/benchmarks/samples/sample_30a - Copy.srt
+.env

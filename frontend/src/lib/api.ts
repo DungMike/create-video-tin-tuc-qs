@@ -1055,6 +1055,21 @@ export async function deleteDecorImage(id: string) {
   return requestJson<void>(`/api/story-video/decor-images/${id}`, { method: "DELETE" });
 }
 
+/**
+ * Xoá hẳn ảnh decor đã dùng khỏi ổ đĩa. Không truyền group = toàn bộ thư viện.
+ * Ảnh còn batch cần render (đang chờ/chạy, hoặc item lỗi chờ thử lại) được giữ lại (`kept`).
+ */
+export async function purgeUsedDecorImages(payload: { group?: string } = {}) {
+  return requestJson<{ deleted: number; freedBytes: number; kept: number; failed: number }>(
+    "/api/story-video/decor-images/purge-used",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
 /** Re-run green-region detection on the original upload. */
 export async function detectDecorFrame(id: string) {
   return requestJson<{ frame: StoryDecorFrame; keyColor: string }>(

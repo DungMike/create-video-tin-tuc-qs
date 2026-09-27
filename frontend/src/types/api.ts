@@ -1246,6 +1246,15 @@ export interface StoryDecorFrame {
 /** How the transparent screen area of a decor image is produced. */
 export type StoryDecorMaskMode = "chroma" | "manual";
 
+/** Ring (and drop shadow) baked around the video window. width 0 + no shadow = off. */
+export interface StoryDecorBorder {
+  /** px in 1920x1080, 0..20; the ring grows outwards, the hole keeps its size. */
+  width: number;
+  /** #RRGGBB */
+  color: string;
+  shadow: boolean;
+}
+
 /**
  * A full-frame photo with a transparent screen area the story video plays
  * inside. `processedRelativePath` is the RGBA PNG the render overlays;
@@ -1283,6 +1292,13 @@ export interface StoryDecorImage {
   blurRadius?: number | null;
   /** How much blur the PNG on disk actually carries; lets drift self-heal. */
   blurBaked?: number;
+  /**
+   * Ring around the window. `null`/missing = follow the shared default; an
+   * object overrides it. Only `maskMode: "manual"` uses it.
+   */
+  border?: StoryDecorBorder | null;
+  /** The border the PNG on disk actually carries; null = none. */
+  borderBaked?: StoryDecorBorder | null;
   /** False when the green region had to be placed by hand. */
   autoDetected?: boolean;
   enabled?: boolean;
@@ -1299,6 +1315,10 @@ export interface StoryDecorImage {
 export interface StoryDecorSettings {
   /** Default blur for manual-mode images that do not set their own. */
   backgroundBlur: number;
+  /** Default window border for manual-mode images that do not set their own. 0 = off. */
+  borderWidth: number;
+  borderColor: string;
+  borderShadow: boolean;
 }
 
 /** A Pexels/Pixabay photo hit, already filtered to >=1920x1080 and ~16:9. */

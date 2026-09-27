@@ -5,7 +5,13 @@ import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
 import { EmptyCard } from "@/components/empty-card";
 import { LoadingCard } from "@/components/loading-card";
 import { StatusAlert } from "@/components/status-alert";
-import { StoryDecorFrameEditor } from "@/components/StoryDecorFrameEditor";
+import { ColorInput } from "@/components/color-input";
+import {
+  DECOR_BORDER_DEFAULT,
+  DECOR_BORDER_MAX,
+  StoryDecorFrameEditor,
+  resolveDecorBorder,
+} from "@/components/StoryDecorFrameEditor";
 import { StoryDecorImageSearchPanel } from "@/components/StoryDecorImageSearchPanel";
 import { StoryImageClipPanel } from "@/components/StoryImageClipPanel";
 import { StoryOverlayPlacementEditor } from "@/components/StoryOverlayPlacementEditor";
@@ -67,7 +73,9 @@ import type {
   CtaOverlay,
   EffectPreviewSource,
   SparklePreset,
+  StoryDecorBorder,
   StoryDecorImage,
+  StoryDecorSettings,
   StoryProviderImage,
   TVEffectParams,
   TVEffectStyle,
@@ -404,6 +412,14 @@ export function StoryVideoSettingsPage() {
   const [decorBlur, setDecorBlur] = useState(0);
   const [decorBlurDraft, setDecorBlurDraft] = useState("0");
   const [isDecorBlurSaving, setIsDecorBlurSaving] = useState(false);
+  // Vien cua so mac dinh: cung kieu "ban nhap + Ap dung" nhu do mo o tren.
+  const [decorBorder, setDecorBorder] = useState<StoryDecorBorder>(DECOR_BORDER_DEFAULT);
+  const [decorBorderDraft, setDecorBorderDraft] = useState({
+    width: String(DECOR_BORDER_DEFAULT.width),
+    color: DECOR_BORDER_DEFAULT.color,
+    shadow: DECOR_BORDER_DEFAULT.shadow,
+  });
+  const [isDecorBorderSaving, setIsDecorBorderSaving] = useState(false);
   const [decorGroupEdit, setDecorGroupEdit] = useState<{ from: string; value: string } | null>(null);
   const [decorGroupInputFor, setDecorGroupInputFor] = useState<string | null>(null);
   const [decorGroupBusy, setDecorGroupBusy] = useState(false);
@@ -633,12 +649,24 @@ export function StoryVideoSettingsPage() {
       .catch((err) => setErrorMessage(err instanceof ApiError ? err.message : "Khong the tai hieu ung TV."));
   };
 
+  /** A backend that predates the border sends no border keys: that reads as "off". */
+  const syncDecorBorder = (settings: StoryDecorSettings) => {
+    const applied = resolveDecorBorder(
+      settings.borderWidth ?? DECOR_BORDER_DEFAULT.width,
+      settings.borderColor ?? DECOR_BORDER_DEFAULT.color,
+      settings.borderShadow ?? DECOR_BORDER_DEFAULT.shadow,
+    );
+    setDecorBorder(applied);
+    setDecorBorderDraft({ width: String(applied.width), color: applied.color, shadow: applied.shadow });
+  };
+
   const loadDecorImages = async () => {
     const res = await getDecorImages();
     setDecorImages(res.images);
     if (res.settings) {
       setDecorBlur(res.settings.backgroundBlur);
       setDecorBlurDraft(String(res.settings.backgroundBlur));
+      syncDecorBorder(res.settings);
     }
     setSelectedDecorId((current) =>
       current && res.images.some((item) => item.id === current) ? current : res.images[0]?.id ?? "",
@@ -665,6 +693,44 @@ export function StoryVideoSettingsPage() {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the cap nhat do mo chung.");
     } finally {
       setIsDecorBlurSaving(false);
+    }
+  };
+
+  const decorBorderNext = resolveDecorBorder(
+    decorBorderDraft.width,
+    decorBorderDraft.color,
+    decorBorderDraft.shadow,
+  );
+  const isDecorBorderDirty =
+    decorBorderNext.width !== decorBorder.width ||
+    decorBorderNext.color !== decorBorder.color ||
+    decorBorderNext.shadow !== decorBorder.shadow;
+
+  /** Same as the blur: every inheriting PNG is redrawn server-side. */
+  const handleDecorBorderApply = async () => {
+    setIsDecorBorderSaving(true);
+    setErrorMessage(null);
+    setDecorNotice(null);
+    try {
+      const res = await updateDecorSettings({
+        borderWidth: decorBorderNext.width,
+        borderColor: decorBorderNext.color,
+        borderShadow: decorBorderNext.shadow,
+      });
+      setDecorImages(res.images);
+      syncDecorBorder(res.settings);
+      setDecorPreviewPath(null);
+      setDecorNotice(
+        res.settings.borderWidth > 0 || res.settings.borderShadow
+          ? `Đã áp viền ${res.settings.borderWidth}px ${res.settings.borderColor}${
+              res.settings.borderShadow ? " có bóng" : ""
+            } cho các ảnh theo mặc định chung.`
+          : "Đã tắt viền cho các ảnh theo mặc định chung.",
+      );
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong the cap nhat vien chung.");
+    } finally {
+      setIsDecorBorderSaving(false);
     }
   };
 
@@ -2500,6 +2566,81 @@ export function StoryVideoSettingsPage() {
                 của mọi khung đang theo mặc định chung; khung nào tự đặt riêng thì giữ nguyên.
               </p>
             </div>
+            <div className="mb-5 rounded-lg border border-input bg-muted/30 p-4">
+              <Label htmlFor="decor-border-default" className="flex items-center justify-between gap-2">
+                <span>Viền cửa sổ video — mặc định chung</span>
+                <span className="font-mono text-xs text-muted-foreground">
+                  {decorBorderNext.width}px{decorBorderNext.shadow ? " · bóng" : ""}
+                </span>
+              </Label>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <input
+                  id="decor-border-default-range"
+                  type="range"
+                  className="h-10 min-w-[160px] flex-1 cursor-pointer"
+                  min={0}
+                  max={DECOR_BORDER_MAX}
+                  step={1}
+                  value={decorBorderNext.width}
+                  onChange={(event) => {
+                    const width = event.currentTarget.value;
+                    setDecorBorderDraft((current) => ({ ...current, width }));
+                  }}
+                />
+                <Input
+                  id="decor-border-default"
+                  type="number"
+                  className="w-24"
+                  min={0}
+                  max={DECOR_BORDER_MAX}
+                  value={decorBorderDraft.width}
+                  onChange={(event) => {
+                    const width = event.currentTarget.value;
+                    setDecorBorderDraft((current) => ({ ...current, width }));
+                  }}
+                />
+              </div>
+              <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                <ColorInput
+                  id="decor-border-default-color"
+                  label="Màu viền"
+                  value={decorBorderDraft.color}
+                  fallback={DECOR_BORDER_DEFAULT.color}
+                  placeholder={DECOR_BORDER_DEFAULT.color}
+                  resetValue={DECOR_BORDER_DEFAULT.color}
+                  resetTitle="Về màu mặc định"
+                  onChange={(color) => setDecorBorderDraft((current) => ({ ...current, color }))}
+                />
+                <label className="flex h-10 cursor-pointer items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={decorBorderDraft.shadow}
+                    onChange={(event) => {
+                      const shadow = event.currentTarget.checked;
+                      setDecorBorderDraft((current) => ({ ...current, shadow }));
+                    }}
+                  />
+                  Đổ bóng quanh cửa sổ
+                </label>
+              </div>
+              <div className="mt-3">
+                <Button
+                  type="button"
+                  onClick={() => void handleDecorBorderApply()}
+                  disabled={isDecorBorderSaving || !isDecorBorderDirty}
+                >
+                  {isDecorBorderSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                  Áp dụng
+                </Button>
+              </div>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Vòng viền màu (và bóng đổ) ôm quanh cửa sổ video, giống kiểu dựng “Hai lớp cùng
+                nguồn”. Chỉ áp cho ảnh ở chế độ “Tự tạo vùng nền xanh”; ảnh TV thật (nền xanh) đã có
+                viền của chính cái TV nên giữ nguyên. Độ dày 0 và bỏ bóng = tắt. Viền vẽ ra ngoài vùng,
+                bo theo góc, và được nướng sẵn vào ảnh nên <em>không</em> tốn thêm thời gian render.
+                Bấm “Áp dụng” sẽ vẽ lại ảnh của mọi khung đang theo mặc định chung.
+              </p>
+            </div>
             <div className="grid gap-5 lg:grid-cols-[minmax(260px,360px)_1fr]">
               <div className="space-y-4">
                 <div className="grid gap-2">
@@ -2921,6 +3062,7 @@ export function StoryVideoSettingsPage() {
                     image={selectedDecor}
                     previewPath={decorPreviewPath}
                     defaultBlur={decorBlur}
+                    defaultBorder={decorBorder}
                     isPreviewLoading={isDecorPreviewLoading}
                     isSaving={isDecorSaving}
                     onRequestPreview={() => void handleDecorFramePreview()}

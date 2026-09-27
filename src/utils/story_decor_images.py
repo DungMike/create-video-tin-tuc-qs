@@ -38,6 +38,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import threading
 import uuid
@@ -98,6 +99,58 @@ def _clamp_blur(value) -> float:
     return round(max(0.0, min(radius, DECOR_BLUR_MAX)), 1)
 
 
+# Vien quanh o cua video, cung khoang 0..20 va cung mau mac dinh voi kieu dung
+# "Hai lop cung nguon". Mac dinh la TAT (0px, khong bong): PNG ve ra y het nhu
+# truoc khi co tinh nang nay.
+DECOR_BORDER_MAX = 20
+DECOR_BORDER_COLOR = "#F5F0E6"
+# Cung do dam bong ma two_layer dung.
+_DECOR_SHADOW_STRENGTH = 170
+_HEX_COLOR = re.compile(r"^#?[0-9a-fA-F]{6}$")
+
+
+def _clamp_border_width(value) -> int:
+    try:
+        width = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if width != width:  # NaN
+        return 0
+    return int(round(max(0.0, min(width, float(DECOR_BORDER_MAX)))))
+
+
+def _clamp_border_color(value) -> str:
+    if isinstance(value, str) and _HEX_COLOR.match(value.strip()):
+        return "#" + value.strip().lstrip("#").upper()
+    return DECOR_BORDER_COLOR
+
+
+def _clamp_border(raw) -> dict:
+    """Vien hop le ``{"width", "color", "shadow"}``; thu gi hong thi ve mac dinh tat."""
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        "width": _clamp_border_width(raw.get("width")),
+        "color": _clamp_border_color(raw.get("color")),
+        "shadow": bool(raw.get("shadow")),
+    }
+
+
+def _border_signature(border: dict | None) -> dict | None:
+    """Phan cua vien thuc su lo ra trong PNG; ``None`` = khong ve gi.
+
+    Day la thu ghi vao ``borderBaked`` va dem ra so. Mau bi bo khi day 0 de
+    mot lan doi mau luc vien dang tat khong ve lai ca thu vien vo ich.
+    """
+    border = _clamp_border(border)
+    if not border["width"] and not border["shadow"]:
+        return None
+    return {
+        "width": border["width"],
+        "color": border["color"] if border["width"] else None,
+        "shadow": border["shadow"],
+    }
+
+
 def load_decor_settings(index: dict | None = None) -> dict:
     """Cai dat dung chung cho ca thu vien anh decor.
 
@@ -110,7 +163,12 @@ def load_decor_settings(index: dict | None = None) -> dict:
     # Config chi la gia tri khoi tao: khi nguoi dung da luu mot lan thi ban da
     # luu thang, doi bien moi truong khong am tham ghi de lua chon cua ho.
     raw = stored.get("backgroundBlur", Config.STORY_DECOR_BLUR)
-    return {"backgroundBlur": _clamp_blur(raw)}
+    return {
+        "backgroundBlur": _clamp_blur(raw),
+        "borderWidth": _clamp_border_width(stored.get("borderWidth", 0)),
+        "borderColor": _clamp_border_color(stored.get("borderColor", DECOR_BORDER_COLOR)),
+        "borderShadow": bool(stored.get("borderShadow", False)),
+    }
 
 
 def _relative(filename: str) -> str:
@@ -623,6 +681,53 @@ def blur_radius_of(record: dict, settings: dict | None = None) -> float:
     return _clamp_blur(own)
 
 
+def border_of(record: dict, settings: dict | None = None) -> dict:
+    """Vien (va bong) quanh o cua, cung luat voi ``blur_radius_of``.
+
+    Chi co o che do ``manual``: anh ``chroma`` la anh TV that, da co san vien
+    cua chinh cai TV. ``border`` cua rieng anh: ``None``/thieu = theo mac dinh
+    chung, dict = tu dat rieng.
+    """
+    if decor_mask_mode(record) != "manual":
+        return _clamp_border(None)
+    own = record.get("border")
+    if own is None:
+        resolved = settings if settings is not None else load_decor_settings()
+        return _clamp_border({
+            "width": resolved.get("borderWidth"),
+            "color": resolved.get("borderColor"),
+            "shadow": resolved.get("borderShadow"),
+        })
+    return _clamp_border(own)
+
+
+def _draw_border(base, frame: dict, radius: int, border: dict):
+    """Bong + vong vien ve *ngoai* o cua, len chinh anh nen.
+
+    Cung cach ``edit_styles.assets.card_frame`` ve cho "Hai lop cung nguon":
+    vong vien om sat mep lo, ban kinh ngoai = bo goc + do day. Lo van giu
+    nguyen kich thuoc nen video khong lech di dau; phan vong vien chui vao
+    trong lo se bi alpha 0 xoa khi dap mask len sau.
+    """
+    from PIL import Image, ImageDraw
+
+    from src.utils.edit_styles import assets as edit_assets
+
+    x, y, w, h = frame["x"], frame["y"], frame["w"], frame["h"]
+    if border["shadow"]:
+        base = Image.alpha_composite(
+            base, edit_assets.shadow((x, y, w, h), _DECOR_SHADOW_STRENGTH, size=base.size)
+        )
+    width = border["width"]
+    if width:
+        ImageDraw.Draw(base).rounded_rectangle(
+            (x - width, y - width, x + w + width - 1, y + h + width - 1),
+            radius=(radius + width) if radius else 0,
+            fill=(*edit_assets.rgb(border["color"], (245, 240, 230)), 255),
+        )
+    return base
+
+
 def build_manual_mask_png(source_path: str, record: dict, settings: dict | None = None) -> str:
     """Punch the frame rectangle into the photo's alpha; no green screen needed.
 
@@ -644,6 +749,7 @@ def build_manual_mask_png(source_path: str, record: dict, settings: dict | None 
     frame = _clamp_frame(record)
     radius = corner_radius_of(record, frame)
     blur = blur_radius_of(record, settings)
+    border = border_of(record, settings)
 
     with Image.open(source_path) as img:
         # The browser rotates by EXIF when it displays the photo, so the
@@ -677,6 +783,11 @@ def build_manual_mask_png(source_path: str, record: dict, settings: dict | None 
         except ImportError as exc:  # noqa: BLE001 - optional dependency guard
             logger.warning(f"[DecorImage] Blur unavailable, giu anh net: {exc}")
 
+    # Ve sau blur de vien van sac. Tat (0px, khong bong) thi bo qua han, giu
+    # nguyen duong cu tung byte.
+    if _border_signature(border) is not None:
+        base = _draw_border(base, frame, radius, border)
+
     base.putalpha(mask)
 
     os.makedirs(Config.STORY_DECOR_DIR, exist_ok=True)
@@ -686,7 +797,10 @@ def build_manual_mask_png(source_path: str, record: dict, settings: dict | None 
     tmp_path = output_path + ".tmp"
     base.save(tmp_path, "PNG")
     os.replace(tmp_path, output_path)
-    logger.info(f"[DecorImage] Manual mask {frame} radius={radius} blur={blur} -> {output_path}")
+    logger.info(
+        f"[DecorImage] Manual mask {frame} radius={radius} blur={blur} "
+        f"border={_border_signature(border)} -> {output_path}"
+    )
     return processed_filename
 
 
@@ -695,6 +809,13 @@ def regenerate_decor_mask(source_path: str, record: dict, settings: dict | None 
     if decor_mask_mode(record) == "manual":
         return build_manual_mask_png(source_path, record, settings)
     return preprocess_decor_image(source_path, record)
+
+
+def _baked_look_is_stale(record: dict, settings: dict | None = None) -> bool:
+    """Do mo hoac vien dang yeu cau khac voi thu that su nam trong PNG."""
+    if blur_radius_of(record, settings) != _clamp_blur(record.get("blurBaked") or 0):
+        return True
+    return _border_signature(border_of(record, settings)) != record.get("borderBaked")
 
 
 def _rebuild_processed(record: dict, settings: dict | None = None):
@@ -713,6 +834,7 @@ def _rebuild_processed(record: dict, settings: dict | None = None):
     record["processedFilename"] = regenerate_decor_mask(source_path, record, settings)
     record["processedRelativePath"] = _relative(record["processedFilename"])
     record["blurBaked"] = blur_radius_of(record, settings)
+    record["borderBaked"] = _border_signature(border_of(record, settings))
     if old_processed and old_processed != record["processedFilename"]:
         try:
             os.remove(_absolute(str(old_processed)))
@@ -751,14 +873,28 @@ def find_decor_by_source(provider: str, source_id: str) -> dict | None:
     return None
 
 
+def _source_key(record: dict) -> str:
+    source = record.get("source") if isinstance(record.get("source"), dict) else {}
+    if source.get("provider") and source.get("id"):
+        return f"{source['provider']}:{source['id']}"
+    return ""
+
+
+def _retired_source_keys(index: dict) -> list[str]:
+    """Provider photos whose record was purged after it was used (see ``purge_used_decor_images``)."""
+    keys = index.get("retiredSources")
+    return [str(key) for key in keys if key] if isinstance(keys, list) else []
+
+
 def imported_source_keys() -> list[str]:
-    """``provider:id`` of every decor image that came from a provider search."""
-    keys = []
-    for item in load_decor_index().get("images", []):
-        source = item.get("source") if isinstance(item.get("source"), dict) else {}
-        if source.get("provider") and source.get("id"):
-            keys.append(f"{source['provider']}:{source['id']}")
-    return keys
+    """``provider:id`` of every decor image that came from a provider search.
+
+    Purged photos stay listed: the search panel hides these, and a spent photo
+    must not come back through a re-import.
+    """
+    index = load_decor_index()
+    keys = [key for key in map(_source_key, index.get("images", [])) if key]
+    return keys + _retired_source_keys(index)
 
 
 def import_decor_image(item: dict, group: str = "") -> dict:
@@ -775,6 +911,8 @@ def import_decor_image(item: dict, group: str = "") -> dict:
         raise ValueError("Anh tu provider khong hop le.")
     if find_decor_by_source(provider, source_id):
         raise FileExistsError(f"Anh {provider} {source_id} da co trong thu vien decor.")
+    if f"{provider}:{source_id}" in _retired_source_keys(load_decor_index()):
+        raise FileExistsError(f"Anh {provider} {source_id} da dung cho 1 video va da bi don khoi thu vien.")
 
     image_id = str(uuid.uuid4())[:8]
     # The download (seconds to over a minute on the Pexels CDN) runs outside the
@@ -917,11 +1055,17 @@ def update_decor_image(image_id: str, updates: dict) -> dict | None:
         raw = updates["blurRadius"]
         record["blurRadius"] = None if raw is None else _clamp_blur(raw)
 
+    # Cung luat voi blurRadius: ``null`` = quay ve mac dinh chung.
+    if "border" in updates:
+        raw = updates["border"]
+        record["border"] = None if raw is None else _clamp_border(raw)
+
     # So muc do mo dang yeu cau voi muc that su nam trong PNG tren dia, thay vi
     # rinh tung thay doi. Nho vay mot anh lech nhip vi bat ky ly do nao -- doi
     # mac dinh chung luc no dang loi, ban ghi cu chua tung co blur -- deu tu
-    # sua lai o lan luu ke tiep.
-    if manual and blur_radius_of(record) != _clamp_blur(record.get("blurBaked") or 0):
+    # sua lai o lan luu ke tiep. Vien cung vay; record cu chua co
+    # ``borderBaked`` la ``None``, khop voi vien tat nen khong bi ve lai.
+    if manual and _baked_look_is_stale(record):
         regenerate = True
 
     for key in ("name", "overscan"):
@@ -954,12 +1098,19 @@ def update_decor_image(image_id: str, updates: dict) -> dict | None:
 
 
 def apply_decor_blur_default(value) -> tuple[dict, list]:
-    """Doi do mo mac dinh chung, va ve lai nhung anh dang di theo no.
+    """Doi do mo mac dinh chung, va ve lai nhung anh dang di theo no."""
+    return apply_decor_settings({"backgroundBlur": value})
 
-    Chi dung toi record ``manual`` co ``blurRadius is None``: anh da tu dat
-    rieng va moi anh ``chroma`` deu khong lien quan, nen khong bi dong vao.
-    Ghi ``index.json`` dung mot lan o cuoi -- ghi sau moi anh vua thua vua de
-    lai mot file nua vo neu co su co giua chung.
+
+def apply_decor_settings(updates: dict) -> tuple[dict, list]:
+    """Doi mac dinh chung (do mo va/hoac vien), va ve lai nhung anh di theo no.
+
+    Nhan bat ky khoa nao trong ``backgroundBlur``, ``borderWidth``,
+    ``borderColor``, ``borderShadow``; khoa khong gui thi giu nguyen. Chi dung
+    toi record ``manual`` ma PNG tren dia khong con khop: anh da tu dat rieng
+    thi ban nuong da khop san, con anh ``chroma`` khong lien quan, nen deu
+    khong bi dong vao. Ghi ``index.json`` dung mot lan o cuoi -- ghi sau moi
+    anh vua thua vua de lai mot file nua vo neu co su co giua chung.
     """
     # Mot cap load/save duy nhat cho ca cai dat lan moi anh vua ve lai. Neu
     # luu cai dat truoc roi moi ve tung anh, mot su co giua chung se de lai
@@ -967,18 +1118,26 @@ def apply_decor_blur_default(value) -> tuple[dict, list]:
     index = load_decor_index()
     images = index.get("images", [])
     settings = load_decor_settings(index)
-    next_blur = _clamp_blur(value)
 
-    index["settings"] = {**(index.get("settings") or {}), "backgroundBlur": next_blur}
-    resolved = {"backgroundBlur": next_blur}
+    stored = dict(index.get("settings") or {})
+    if "backgroundBlur" in updates:
+        stored["backgroundBlur"] = _clamp_blur(updates["backgroundBlur"])
+    if "borderWidth" in updates:
+        stored["borderWidth"] = _clamp_border_width(updates["borderWidth"])
+    if "borderColor" in updates:
+        stored["borderColor"] = _clamp_border_color(updates["borderColor"])
+    if "borderShadow" in updates:
+        stored["borderShadow"] = bool(updates["borderShadow"])
+    index["settings"] = stored
+    resolved = load_decor_settings(index)
     now = datetime.now().isoformat()
     rebuilt = 0
     failed = 0
 
     for record in images:
-        if decor_mask_mode(record) != "manual" or record.get("blurRadius") is not None:
+        if decor_mask_mode(record) != "manual":
             continue
-        if blur_radius_of(record, resolved) == _clamp_blur(record.get("blurBaked") or 0):
+        if not _baked_look_is_stale(record, resolved):
             continue
         try:
             _rebuild_processed(record, resolved)
@@ -997,10 +1156,46 @@ def apply_decor_blur_default(value) -> tuple[dict, list]:
     index["images"] = images
     save_decor_index(index)
     logger.info(
-        f"[DecorImage] Blur mac dinh {settings['backgroundBlur']} -> {next_blur}px, "
+        f"[DecorImage] Mac dinh chung {settings} -> {resolved}, "
         f"ve lai {rebuilt} anh, loi {failed}."
     )
-    return load_decor_settings(index), images
+    return resolved, images
+
+
+def _remove_file(path: str) -> tuple[int, bool]:
+    """``(bytes freed, gone)``; a file that was never there counts as gone."""
+    try:
+        size = os.path.getsize(path)
+        os.remove(path)
+    except FileNotFoundError:
+        return 0, True
+    except OSError as exc:
+        logger.warning(f"[DecorImage] Khong xoa duoc {path}: {exc}")
+        return 0, False
+    return size, True
+
+
+def _remove_decor_files(record: dict) -> tuple[int, bool]:
+    """Delete an image's source, keyed PNG and alignment stills.
+
+    Returns ``(bytes freed, every file gone)``. Only removals that succeeded
+    are counted, so the reported size is what really left the disk.
+    """
+    image_id = str(record.get("id") or "")
+    paths = [_absolute(str(record[key])) for key in ("filename", "processedFilename") if record.get(key)]
+    # Alignment stills are written per image by the frame-preview endpoint; they
+    # have no record of their own, so they only ever get cleaned up here.
+    preview_dir = os.path.join(Config.STORY_DECOR_DIR, "previews")
+    if image_id and os.path.isdir(preview_dir):
+        paths += [os.path.join(preview_dir, name) for name in os.listdir(preview_dir)
+                  if name.startswith(f"{image_id}_")]
+
+    freed, all_gone = 0, True
+    for path in paths:
+        size, gone = _remove_file(path)
+        freed += size
+        all_gone = all_gone and gone
+    return freed, all_gone
 
 
 def delete_decor_image_record(image_id: str) -> bool:
@@ -1010,24 +1205,7 @@ def delete_decor_image_record(image_id: str) -> bool:
     if not record:
         return False
 
-    for key in ("filename", "processedFilename"):
-        filename = record.get(key)
-        if filename:
-            try:
-                os.remove(_absolute(str(filename)))
-            except OSError:
-                pass
-
-    # Alignment stills are written per image by the frame-preview endpoint; they
-    # have no record of their own, so they only ever get cleaned up here.
-    preview_dir = os.path.join(Config.STORY_DECOR_DIR, "previews")
-    if os.path.isdir(preview_dir):
-        for name in os.listdir(preview_dir):
-            if name.startswith(f"{image_id}_"):
-                try:
-                    os.remove(os.path.join(preview_dir, name))
-                except OSError:
-                    pass
+    _remove_decor_files(record)
 
     index["images"] = [item for item in images if item.get("id") != image_id]
     save_decor_index(index)
@@ -1185,3 +1363,88 @@ def reset_decor_used(group: str | None = None, image_ids=None) -> int:
     if cleared:
         save_decor_index(index)
     return cleared
+
+
+# --------------------------------------------------------------------------- #
+# Purging spent images
+# --------------------------------------------------------------------------- #
+# A used image never enters a rotation again, so its files only take up disk.
+# But "used" means "dealt", not "rendered": a queued batch, a failed item
+# waiting for retry, or a single render still in flight reads the PNG later
+# (resolve_decor_image ignores the flag on purpose). The caller passes those
+# ids as ``keep_ids``. Batches are found on disk; a single render has no batch
+# file, so it holds its image in this process for as long as it runs.
+_held_lock = threading.Lock()
+_held: dict[str, int] = {}
+
+
+def hold_decor_image(image_id: str):
+    image_id = str(image_id or "").strip()
+    if image_id:
+        with _held_lock:
+            _held[image_id] = _held.get(image_id, 0) + 1
+
+
+def release_decor_hold(image_id: str):
+    image_id = str(image_id or "").strip()
+    with _held_lock:
+        if _held.get(image_id, 0) > 1:
+            _held[image_id] -= 1
+        else:
+            _held.pop(image_id, None)
+
+
+def held_decor_ids() -> set[str]:
+    with _held_lock:
+        return set(_held)
+
+
+def purge_used_decor_images(group: str | None = None, keep_ids=None) -> dict:
+    """Delete the files and records of used decor images. ``group=None`` = whole library.
+
+    Returns ``{"deleted", "freedBytes", "kept", "failed"}``: ``kept`` were in
+    ``keep_ids``; ``failed`` had a file Windows would not let go of, so their
+    record stays and the next purge tries again instead of orphaning the file.
+    A purged provider photo is remembered in ``retiredSources`` so the search
+    panel keeps hiding it.
+    """
+    keep = {str(item) for item in (keep_ids or []) if item}
+    target_group = None if group is None else normalize_group(group)
+
+    candidates = [
+        record for record in load_decor_index().get("images", [])
+        if decor_is_used(record)
+        and (target_group is None or decor_group_of(record) == target_group)
+    ]
+    kept = [record for record in candidates if str(record.get("id")) in keep]
+
+    # Files go first, outside the index write, so the index is only held for a
+    # quick load/save below rather than for the whole deletion.
+    deleted: dict[str, dict] = {}
+    freed_bytes, failed = 0, 0
+    for record in candidates:
+        if str(record.get("id")) in keep:
+            continue
+        freed, gone = _remove_decor_files(record)
+        freed_bytes += freed
+        if gone:
+            deleted[str(record.get("id"))] = record
+        else:
+            failed += 1
+
+    if deleted:
+        index = load_decor_index()
+        index["images"] = [item for item in index.get("images", []) if str(item.get("id")) not in deleted]
+        retired = _retired_source_keys(index)
+        for key in map(_source_key, deleted.values()):
+            if key and key not in retired:
+                retired.append(key)
+        if retired:
+            index["retiredSources"] = retired
+        save_decor_index(index)
+
+    logger.info(
+        f"[DecorImage] Purged {len(deleted)} used image(s), {freed_bytes / 1048576:.1f} MB freed; "
+        f"kept {len(kept)} still needed by a render, {failed} failed (group={group!r})."
+    )
+    return {"deleted": len(deleted), "freedBytes": freed_bytes, "kept": len(kept), "failed": failed}

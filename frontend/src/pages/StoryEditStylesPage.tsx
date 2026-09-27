@@ -816,7 +816,8 @@ export function StoryEditStylesPage() {
 
       <div className="grid items-start gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
         <PageSection className="lg:sticky lg:top-4">
-          <div className="grid gap-6">
+          {/* Danh sách dài hơn màn hình: cuộn riêng trong cột, còn cột vẫn dính (sticky) cạnh form. */}
+          <div className="-mr-2 grid max-h-[60vh] gap-6 overflow-y-auto overscroll-contain pr-2 lg:max-h-[calc(100vh-6rem)]">
             {(["layout", "modifier"] as const).map((group) => (
               <div key={group} className="grid gap-3">
                 <div>
