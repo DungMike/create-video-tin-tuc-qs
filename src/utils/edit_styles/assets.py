@@ -334,6 +334,37 @@ def solid(hex_colour: str, opacity: float, size=(W, H)) -> str:
                        lambda: Image.new("RGBA", tuple(size), (*rgb, alpha)))
 
 
+def styled_decor(keyed_png: str, frame: dict, radius: int, blur: float, border: dict, cache_key: dict) -> str:
+    """The decor PNG blurred around the screen hole and/or ringed by a shadow +
+    border (TV layouts).
+
+    Same drawing as the decor library's own baked blur and border: the blur
+    never pulls the hole's colour out into the room, it comes first so the ring
+    stays crisp, and the hole is restored at the end so nothing covers the video.
+    """
+    from src.utils.story_decor_images import _blur_keeping_hole_out, _border_signature, _draw_border
+
+    def build():
+        img = Image.open(keyed_png).convert("RGBA")
+        alpha = img.getchannel("A")
+        hole = Image.new("L", img.size, 255)
+        x, y, w, h = (int(frame[k]) for k in ("x", "y", "w", "h"))
+        box = (x, y, x + w - 1, y + h - 1)
+        if radius:
+            ImageDraw.Draw(hole).rounded_rectangle(box, radius=radius, fill=0)
+        else:
+            ImageDraw.Draw(hole).rectangle(box, fill=0)
+        if blur > 0:
+            img = _blur_keeping_hole_out(img, hole, blur)
+        if _border_signature(border) is not None:
+            img = _draw_border(img, frame, radius, border)
+        # Inside the hole: whatever the decor had (0 for a punched frame); outside: the drawn room.
+        img.putalpha(Image.composite(img.getchannel("A"), alpha, hole))
+        return img
+
+    return _cached_png("tvdecor", cache_key, build)
+
+
 def glare_decor(keyed_png: str, frame: dict, p: dict, cache_key: dict) -> str:
     """The decor PNG with a faint diagonal reflection inside the screen hole."""
 

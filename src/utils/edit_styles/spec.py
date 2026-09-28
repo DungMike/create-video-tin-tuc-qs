@@ -114,6 +114,22 @@ def _corner_fields(group="Góc ngắm"):
     ]
 
 
+def _window_border_fields(group="Viền cửa sổ"):
+    """Blurred room + ring + shadow around the TV screen hole, same look as
+    "Hai lớp cùng nguồn".
+
+    Drawn on top of the decor image, so the border replaces whatever the image
+    itself was baked with and the blur adds to its own; 0 and no shadow leave
+    the decor image as it is.
+    """
+    return [
+        num("bgBlur", "Độ mờ ảnh nền khung (px, chỉ ảnh khung tự vẽ; 0 = theo ảnh decor)", 12, 0, 40, 1, "Nền"),
+        integer("borderWidth", "Độ dày viền (0 = theo ảnh decor)", 6, 0, 20, group=group),
+        color("borderColor", "Màu viền", "#F5F0E6", group),
+        boolean("shadow", "Đổ bóng", True, group),
+    ]
+
+
 TYPES: list[dict] = [
     # ------------------------------------------------------------- layouts
     {
@@ -125,7 +141,7 @@ TYPES: list[dict] = [
         "id": "tv_frame", "group": "layout", "phase": 1, "labRatio": 1.08, "requiresDecor": True,
         "shrinksFrame": True,
         "name": "Khung TV (decor)", "description": "Video chạy trong màn hình của ảnh decor đã chọn.",
-        "fields": _placement_fields(),
+        "fields": _window_border_fields() + _placement_fields(),
     },
     {
         "id": "tv_glass", "group": "layout", "phase": 1, "labRatio": 1.07, "requiresDecor": True,
@@ -138,7 +154,7 @@ TYPES: list[dict] = [
             num("glareSlope", "Độ nghiêng vệt", 0.55, 0.1, 1.5, 0.05, "Kính"),
             num("glareWidth", "Bề rộng vệt", 0.10, 0.03, 0.30, 0.01, "Kính"),
             integer("topSheen", "Ánh sáng mép trên", 10, 0, 40, group="Kính"),
-        ] + _placement_fields(),
+        ] + _window_border_fields() + _placement_fields(),
     },
     {
         "id": "tv_drift", "group": "layout", "phase": 1, "labRatio": 1.14, "requiresDecor": True,
@@ -150,7 +166,7 @@ TYPES: list[dict] = [
             num("amplitude", "Biên độ trôi (tỉ lệ phần dư)", 0.9, 0.1, 1.0, 0.05, "Chuyển động"),
             integer("periodX", "Chu kỳ ngang (giây)", 41, 10, 180, group="Chuyển động"),
             integer("periodY", "Chu kỳ dọc (giây)", 53, 10, 180, group="Chuyển động"),
-        ] + _placement_fields(),
+        ] + _window_border_fields() + _placement_fields(),
     },
     {
         "id": "card", "group": "layout", "phase": 1, "labRatio": 1.16, "shrinksFrame": True,
@@ -446,7 +462,7 @@ TYPES: list[dict] = [
             num("everyMinutes", "N phút (khi chọn mỗi N phút)", 3.0, 0.5, 20.0, 0.5, "Chuyển cảnh"),
             select("startState", "Bắt đầu ở", "room", [("room", "Trong khung TV"), ("full", "Toàn màn hình")],
                    "Chuyển cảnh"),
-        ] + _chapter_fields() + _placement_fields(),
+        ] + _window_border_fields() + _chapter_fields() + _placement_fields(),
     },
     {
         "id": "two_layer", "group": "layout", "phase": 3, "labRatio": 1.24, "shrinksFrame": True,
