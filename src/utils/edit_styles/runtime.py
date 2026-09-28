@@ -24,6 +24,8 @@ from src.utils.edit_styles.graph import Ops, T, sum_expr, windows_expr
 from src.utils.logger import logger
 
 W, H, FPS = 1920, 1080, 30
+# Layouts that fit the video into a decor image and blur/border it themselves.
+_TV_BORDER_LAYOUTS = ("tv_frame", "tv_glass", "tv_drift", "tv_zoom")
 
 
 # --------------------------------------------------------------------------- #
@@ -265,14 +267,48 @@ class EditPlan:
             self._media_thread = None
 
     def use_decor(self, decor_record: dict, decor_png: str):
-        """Remember the dealt decor (a timeline layout scales it itself) and let
-        tv_glass swap the PNG for one with a reflection on the glass."""
+        """Remember the dealt decor (a timeline layout scales it itself), draw the
+        layout's background blur and window border onto it, and let tv_glass swap the PNG for one
+        with a reflection on the glass."""
         self.decor_record_used, self.decor_png_used = decor_record, decor_png
+        styled = self._styled_decor(decor_record, decor_png)
+        if styled:
+            # tv_zoom scales decor_png_used itself, so the blur and border have to ride along.
+            self.decor_png_used = self.decor_png_override = decor_png = styled
         if self.layout_type == "tv_glass" and decor_record and decor_png:
-            key = {"decor": decor_record.get("id"), "at": decor_record.get("updatedAt"),
+            key = {"decor": decor_record.get("id"), "at": decor_record.get("updatedAt"), "base": decor_png,
                    **{k: self.p[k] for k in ("glareStrength", "glareSecondary", "glareSlope", "glareWidth",
                                              "topSheen")}}
             self.decor_png_override = assets.glare_decor(decor_png, decor_record["frame"], self.p, key)
+
+    def _styled_decor(self, decor_record: dict, decor_png: str) -> str | None:
+        """The decor PNG with the layout's background blur and window border, or
+        None to keep it as is.
+
+        Only a ``manual`` decor has a punched rectangle to blur around and ring;
+        a ``chroma`` one is a real TV photo that already has its own bezel.
+        """
+        if self.layout_type not in _TV_BORDER_LAYOUTS or not decor_record or not decor_png:
+            return None
+        from src.utils.story_decor_images import _clamp_frame, corner_radius_of, decor_mask_mode
+
+        p = self.p
+        blur = round(max(0.0, float(p.get("bgBlur", 0))), 1)
+        border = {"width": int(p.get("borderWidth", 0)), "color": p.get("borderColor", "#F5F0E6"),
+                  "shadow": bool(p.get("shadow"))}
+        if decor_mask_mode(decor_record) != "manual" or (not blur and not border["width"]
+                                                         and not border["shadow"]):
+            return None
+        frame = _clamp_frame(decor_record)
+        radius = corner_radius_of(decor_record, frame)
+        try:
+            # The keyed PNG is re-baked in place (blur/border changes), so its mtime is part of the key.
+            key = {"png": os.path.basename(decor_png), "mtime": os.path.getmtime(decor_png),
+                   "frame": frame, "radius": radius, "blur": blur, **border}
+            return assets.styled_decor(decor_png, frame, radius, blur, border, key)
+        except Exception as exc:  # noqa: BLE001 - the video still renders, just on the plain decor
+            logger.warning(f"[EditStyles:{self.story_id}] Decor blur/border failed: {exc}")
+            return None
 
     # ------------------------------------------------------------ clip selection
     def run_length(self, rng: random.Random) -> int:
