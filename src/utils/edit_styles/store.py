@@ -77,13 +77,16 @@ def _new_record(type_id: str, name: str | None = None, params: dict | None = Non
 
 
 def _seed_unlocked(data: dict) -> bool:
-    """Give each type one default record, once. A type the user emptied stays empty."""
+    """Give each type one default record (plus its ready-made ``presets``), once.
+    A type the user emptied stays empty."""
     changed = False
     for t in spec.TYPES:
         if t["id"] in data["seededTypes"]:
             continue
         if not any(r.get("type") == t["id"] for r in data["styles"]):
             data["styles"].append(_new_record(t["id"]))
+            for preset in t.get("presets") or []:
+                data["styles"].append(_new_record(t["id"], preset["name"], preset["params"]))
         data["seededTypes"].append(t["id"])
         changed = True
     return changed
@@ -311,6 +314,27 @@ def resolve_modifiers(style_ids: list[str]) -> list[dict]:
         if record and record["type"] not in seen:
             out.append(record)
             seen.add(record["type"])
+    return out
+
+
+def deal_modifier_rotation(style_ids: list[str], count: int) -> list[list[str]]:
+    """Modifier ids for each of ``count`` videos.
+
+    A video still gets at most one record per type. Picking several records of
+    the same type (three sweep looks, say) deals them across the batch like
+    layouts, so neighbouring videos look different; a type picked once goes to
+    every video exactly as before.
+    """
+    by_type: dict[str, list[str]] = {}
+    for sid in dict.fromkeys(style_ids or []):
+        record = _usable(sid, "modifier")
+        if record:
+            by_type.setdefault(record["type"], []).append(record["id"])
+    out: list[list[str]] = [[] for _ in range(max(0, count))]
+    for ids in by_type.values():
+        dealt = deal_rotation(ids, count) if len(ids) > 1 else [ids[0]] * count
+        for item, sid in zip(out, dealt):
+            item.append(sid)
     return out
 
 

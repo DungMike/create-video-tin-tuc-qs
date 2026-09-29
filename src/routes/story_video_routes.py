@@ -2452,14 +2452,15 @@ def _decor_free_layouts(layout_ids: list[str], count: int) -> list[str]:
 def _resolve_edit_selection(shared_config: dict, library_ids, count: int):
     """Deal layouts across ``count`` videos and decide which of them get a decor image.
 
-    Returns ``((layout_per_item, decor_per_item, modifier_ids), error_response)``.
+    Returns ``((layout_per_item, decor_per_item, modifiers_per_item), error_response)``.
 
     - No ``layoutIds``: the old behaviour. ``decorImageIds`` alone puts every video
       in the TV frame (``_resolve_decor_selection``), so old payloads and retries of
       old batches render exactly as before.
     - With ``layoutIds``: one enabled layout per video, dealt from a shuffled deck.
       Decor images are dealt only to the videos that drew a layout needing one.
-    - ``modifierIds`` apply to every video (one record per modifier type).
+    - ``modifierIds`` apply to every video, one record per modifier type; several
+      records of one type are dealt across the videos (``deal_modifier_rotation``).
 
     Each decor image is spent on one video and never dealt again, so a batch can
     ask for more TV frames than the library still holds. The videos left over
@@ -2478,7 +2479,7 @@ def _resolve_edit_selection(shared_config: dict, library_ids, count: int):
     if modifier_ids and not modifiers:
         return None, _error("Khong co hieu ung bo tro nao dung duoc (da tat hoac da xoa).",
                             code="modifier_unusable")
-    modifier_out = [m["id"] for m in modifiers]
+    modifier_out = store.deal_modifier_rotation(modifier_ids, count)
 
     if not layout_ids:
         decor_assignments, decor_error = _resolve_decor_selection(decor_ids, library_ids, count)
@@ -2868,8 +2869,9 @@ def create_story_video():
     )
     if edit_error is not None:
         return edit_error
-    layouts, decors, modifier_ids = edit_selection
+    layouts, decors, modifier_assignments = edit_selection
     decor_image_id = decors[0] if decors else ""
+    modifier_ids = modifier_assignments[0] if modifier_assignments else []
 
     config_dict = {
         "input_type": input_type,
@@ -3204,7 +3206,7 @@ def create_story_batch():
     if edit_error is not None:
         _abandon_batch_dir(batch_dir, decor_assignments)
         return edit_error
-    layout_assignments, decor_assignments, modifier_ids = edit_selection
+    layout_assignments, decor_assignments, modifier_assignments = edit_selection
 
     # Song am va CTA cung xoay vong theo cach do: chon nhieu cau hinh thi moi N
     # video lien tiep dung du N cau hinh, thu tu ngau nhien. Khong chon = giu
@@ -3345,7 +3347,7 @@ def create_story_batch():
             "cta_overlay_id": cta_assignments[idx] if cta_assignments else "",
             "decor_image_id": decor_assignments[idx] if decor_assignments else "",
             "layout_id": layout_assignments[idx] if layout_assignments else "",
-            "modifier_ids": list(modifier_ids),
+            "modifier_ids": list(modifier_assignments[idx]) if modifier_assignments else [],
             "chapters_path": chapters_path,
             "voice_id": str(shared_config.get("voiceId", "")).strip(),
             "subtitle_path": subtitle_path,
@@ -3370,7 +3372,8 @@ def create_story_batch():
     logger.info(
         f"[StoryVideo] Queued batch: batch_id={batch_id}, items={len(story_configs)}, "
         f"queue_position={queue_position}, optimize_mode={optimize_mode}, "
-        f"layouts={len({lid for lid in layout_assignments if lid})}, modifiers={len(modifier_ids)}, "
+        f"layouts={len({lid for lid in layout_assignments if lid})}, "
+        f"modifiers={len({mid for ids in modifier_assignments for mid in ids})}, "
         f"decor_images={len({d for d in decor_assignments if d})}, "
         f"waveforms={len(set(waveform_assignments)) if waveform_assignments else 0}, "
         f"cta_overlays={len(set(cta_assignments)) if cta_assignments else 0}, "

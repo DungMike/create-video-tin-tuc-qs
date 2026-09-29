@@ -1,5 +1,18 @@
-import { ArrowLeft, Copy, Eye, ImagePlus, Loader2, Plus, RotateCcw, Save, Trash2, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ArrowLeft,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Eye,
+  ImagePlus,
+  Loader2,
+  Plus,
+  RotateCcw,
+  Save,
+  Trash2,
+  X,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
@@ -16,6 +29,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useActiveStoryLibrary } from "@/hooks/useActiveStoryLibrary";
+import { useStoredFlag } from "@/hooks/useStoredFlag";
 import {
   ApiError,
   createEditStyle,
@@ -57,6 +71,11 @@ const GROUP_TITLES: Record<EditStyleGroup, { title: string; hint: string }> = {
     hint: "Tick ở batch là áp cho mọi video, chồng lên bố cục đã bốc.",
   },
 };
+
+const GROUP_ORDER = ["layout", "modifier"] as const;
+
+/** Nhớ theo trình duyệt: nhóm "Không sử dụng" đang mở hay gập. */
+const SHOW_UNUSED_STORAGE_KEY = "story-edit-styles-show-unused";
 
 const FRAME_ITEM_CLASSES = [
   "border-sky-300 bg-sky-400/25",
@@ -124,6 +143,84 @@ function TypeBadges({ type }: { type: EditStyleType }) {
         </Badge>
       ) : null}
     </span>
+  );
+}
+
+/** Một kiểu ở cột trái: tên, badge và các bản (tick = bật). */
+function EditStyleTypeCard({
+  type,
+  records,
+  selectedId,
+  busyIds,
+  unused,
+  flash,
+  cardRef,
+  onAdd,
+  onSelect,
+  onToggle,
+}: {
+  type: EditStyleType;
+  records: EditStyleRecord[];
+  selectedId: string | null;
+  busyIds: Set<string>;
+  /** Không bản nào đang bật: vẽ nhạt hơn để tách khỏi các kiểu đang dùng. */
+  unused: boolean;
+  /** Vừa đổi nhóm (bật/tắt bản cuối): nháy viền để mắt theo kịp. */
+  flash: boolean;
+  cardRef: (node: HTMLDivElement | null) => void;
+  onAdd: () => void;
+  onSelect: (record: EditStyleRecord) => void;
+  onToggle: (record: EditStyleRecord, enabled: boolean) => void;
+}) {
+  return (
+    <div
+      ref={cardRef}
+      className={`grid gap-1.5 rounded-lg border p-2.5 transition-shadow ${
+        unused ? "border-dashed border-border bg-muted/20" : "border-border/70 bg-background/60"
+      } ${flash ? "ring-2 ring-primary/50" : ""}`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className={`text-sm font-medium ${unused ? "text-muted-foreground" : "text-foreground"}`}>{type.name}</p>
+          <TypeBadges type={type} />
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 shrink-0 px-2"
+          title="Thêm một bản mới với thông số mặc định"
+          onClick={onAdd}
+        >
+          <Plus className="size-4" />
+        </Button>
+      </div>
+      {records.map((record) => (
+        <div
+          key={record.id}
+          className={`flex items-center gap-2 rounded-md border px-2 py-1.5 ${
+            record.id === selectedId ? "border-primary bg-primary/10" : "border-transparent"
+          }`}
+        >
+          <Checkbox
+            checked={record.enabled}
+            disabled={busyIds.has(record.id)}
+            title={record.enabled ? "Đang bật — bấm để tắt" : "Đang tắt — bấm để bật"}
+            onCheckedChange={(checked) => onToggle(record, checked === true)}
+          />
+          <button
+            type="button"
+            onClick={() => onSelect(record)}
+            className={`min-w-0 flex-1 truncate text-left text-sm ${
+              record.enabled ? "text-foreground" : "text-muted-foreground line-through"
+            }`}
+          >
+            {record.name}
+          </button>
+        </div>
+      ))}
+      {!records.length ? <p className="px-2 text-xs text-muted-foreground">Chưa có bản nào — bấm + để tạo.</p> : null}
+    </div>
   );
 }
 
@@ -581,11 +678,46 @@ export function StoryEditStylesPage() {
   const [previewDecorId, setPreviewDecorId] = useState("");
   const { libraries, activeId: activeLibraryId } = useActiveStoryLibrary();
   const [previewLibraryId, setPreviewLibraryId] = useState("");
+  const [showUnused, setShowUnused] = useStoredFlag(SHOW_UNUSED_STORAGE_KEY, false);
+  const [flashTypeId, setFlashTypeId] = useState<string | null>(null);
+  const typeCardRefs = useRef(new Map<string, HTMLDivElement>());
+  const prevUsedTypeIds = useRef<Set<string> | null>(null);
 
   const typeById = useMemo(() => new Map(types.map((type) => [type.id, type])), [types]);
   const selected = styles.find((style) => style.id === selectedId) ?? null;
   const selectedType = selected ? typeById.get(selected.type) ?? null : null;
   const isDirty = Boolean(selected) && (draftName !== selected?.name || !sameJson(draftParams, selected?.params));
+  /** Kiểu "đang dùng" = còn ít nhất một bản bật (mới hiện ở trang render batch). */
+  const usedTypeIds = useMemo(
+    () => new Set(styles.filter((style) => style.enabled).map((style) => style.type)),
+    [styles],
+  );
+  const unusedTypes = types.filter((type) => !usedTypeIds.has(type.id));
+  const selectedIsUnused = Boolean(selected) && !usedTypeIds.has(selected?.type ?? "");
+
+  // Bản đang chọn nằm trong nhóm "Không sử dụng" thì mở nhóm ra, không để nó khuất.
+  useEffect(() => {
+    if (selectedIsUnused) setShowUnused(true);
+  }, [selectedId, selectedIsUnused, setShowUnused]);
+
+  // Bật/tắt/xoá làm một kiểu đổi nhóm: mở nhóm đích và nháy thẻ đó cho người dùng thấy nó đi đâu.
+  useEffect(() => {
+    if (isLoading) return;
+    const prev = prevUsedTypeIds.current;
+    prevUsedTypeIds.current = usedTypeIds;
+    if (!prev) return;
+    const moved = types.find((type) => prev.has(type.id) !== usedTypeIds.has(type.id));
+    if (!moved) return;
+    if (!usedTypeIds.has(moved.id)) setShowUnused(true);
+    setFlashTypeId(moved.id);
+  }, [isLoading, usedTypeIds, types, setShowUnused]);
+
+  useEffect(() => {
+    if (!flashTypeId) return;
+    typeCardRefs.current.get(flashTypeId)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    const timer = window.setTimeout(() => setFlashTypeId(null), 1600);
+    return () => window.clearTimeout(timer);
+  }, [flashTypeId]);
 
   const loadRecord = useCallback((record: EditStyleRecord | null) => {
     setSelectedId(record?.id ?? null);
@@ -603,7 +735,12 @@ export function StoryEditStylesPage() {
         setTypes(res.types);
         setStyles(res.styles);
         setImageBase(res.imageBase || "story_edit_styles");
-        const first = res.styles[0] ?? null;
+        // Mở trang ở một bản đang bật (nhóm trên cùng), không rơi vào nhóm "Không sử dụng" đang gập.
+        const first =
+          res.styles.find((style) => style.enabled && style.group === "layout") ??
+          res.styles.find((style) => style.enabled) ??
+          res.styles[0] ??
+          null;
         if (first) loadRecord(first);
       }),
       // Phần còn lại chỉ để vẽ form cho đẹp: lỗi ở đây không chặn trang.
@@ -779,6 +916,25 @@ export function StoryEditStylesPage() {
   const enabledCount = (group: EditStyleGroup) =>
     styles.filter((style) => style.group === group && style.enabled).length;
 
+  const renderTypeCard = (type: EditStyleType) => (
+    <EditStyleTypeCard
+      key={type.id}
+      type={type}
+      records={styles.filter((style) => style.type === type.id)}
+      selectedId={selectedId}
+      busyIds={busyIds}
+      unused={!usedTypeIds.has(type.id)}
+      flash={flashTypeId === type.id}
+      cardRef={(node) => {
+        if (node) typeCardRefs.current.set(type.id, node);
+        else typeCardRefs.current.delete(type.id);
+      }}
+      onAdd={() => void addVariant(type)}
+      onSelect={selectRecord}
+      onToggle={(record, enabled) => void toggleEnabled(record, enabled)}
+    />
+  );
+
   if (isLoading) {
     return (
       <AppShell>
@@ -818,66 +974,65 @@ export function StoryEditStylesPage() {
         <PageSection className="lg:sticky lg:top-4">
           {/* Danh sách dài hơn màn hình: cuộn riêng trong cột, còn cột vẫn dính (sticky) cạnh form. */}
           <div className="-mr-2 grid max-h-[60vh] gap-6 overflow-y-auto overscroll-contain pr-2 lg:max-h-[calc(100vh-6rem)]">
-            {(["layout", "modifier"] as const).map((group) => (
-              <div key={group} className="grid gap-3">
-                <div>
-                  <h2 className="text-base font-semibold text-foreground">{GROUP_TITLES[group].title}</h2>
-                  <p className="text-xs text-muted-foreground">{GROUP_TITLES[group].hint}</p>
+            {GROUP_ORDER.map((group) => {
+              const groupTypes = types.filter((type) => type.group === group && usedTypeIds.has(type.id));
+              return (
+                <div key={group} className="grid gap-3">
+                  <div>
+                    <h2 className="text-base font-semibold text-foreground">{GROUP_TITLES[group].title}</h2>
+                    <p className="text-xs text-muted-foreground">{GROUP_TITLES[group].hint}</p>
+                  </div>
+                  {groupTypes.map(renderTypeCard)}
+                  {!groupTypes.length ? (
+                    <p className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                      Chưa bật kiểu nào. Mở nhóm "Không sử dụng" bên dưới và tick một bản để dùng.
+                    </p>
+                  ) : null}
                 </div>
-                {types
-                  .filter((type) => type.group === group)
-                  .map((type) => {
-                    const records = styles.filter((style) => style.type === type.id);
-                    return (
-                      <div key={type.id} className="grid gap-1.5 rounded-lg border border-border/70 bg-background/60 p-2.5">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium text-foreground">{type.name}</p>
-                            <TypeBadges type={type} />
-                          </div>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 shrink-0 px-2"
-                            title="Thêm một bản mới với thông số mặc định"
-                            onClick={() => void addVariant(type)}
-                          >
-                            <Plus className="size-4" />
-                          </Button>
+              );
+            })}
+
+            {unusedTypes.length ? (
+              <div className="grid gap-3 border-t border-border/70 pt-4">
+                <button
+                  type="button"
+                  aria-expanded={showUnused}
+                  onClick={() => setShowUnused(!showUnused)}
+                  className="-mx-1 flex items-start gap-2 rounded-md px-1 py-1 text-left hover:bg-muted/40"
+                >
+                  {showUnused ? (
+                    <ChevronDown className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <ChevronRight className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  )}
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-2 text-base font-semibold text-foreground">
+                      Không sử dụng
+                      <Badge variant="secondary" className="rounded-full text-[10px]">
+                        {unusedTypes.length}
+                      </Badge>
+                    </span>
+                    <span className="block text-xs text-muted-foreground">
+                      Không có bản nào đang bật nên không hiện ở trang render. Tick một bản để đưa kiểu về nhóm của nó.
+                    </span>
+                  </span>
+                </button>
+                {showUnused
+                  ? GROUP_ORDER.map((group) => {
+                      const groupTypes = unusedTypes.filter((type) => type.group === group);
+                      if (!groupTypes.length) return null;
+                      return (
+                        <div key={group} className="grid gap-2">
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                            {GROUP_TITLES[group].title}
+                          </p>
+                          {groupTypes.map(renderTypeCard)}
                         </div>
-                        {records.map((record) => (
-                          <div
-                            key={record.id}
-                            className={`flex items-center gap-2 rounded-md border px-2 py-1.5 ${
-                              record.id === selectedId ? "border-primary bg-primary/10" : "border-transparent"
-                            }`}
-                          >
-                            <Checkbox
-                              checked={record.enabled}
-                              disabled={busyIds.has(record.id)}
-                              title={record.enabled ? "Đang bật — bấm để tắt" : "Đang tắt — bấm để bật"}
-                              onCheckedChange={(checked) => void toggleEnabled(record, checked === true)}
-                            />
-                            <button
-                              type="button"
-                              onClick={() => selectRecord(record)}
-                              className={`min-w-0 flex-1 truncate text-left text-sm ${
-                                record.enabled ? "text-foreground" : "text-muted-foreground line-through"
-                              }`}
-                            >
-                              {record.name}
-                            </button>
-                          </div>
-                        ))}
-                        {!records.length ? (
-                          <p className="px-2 text-xs text-muted-foreground">Chưa có bản nào — bấm + để tạo.</p>
-                        ) : null}
-                      </div>
-                    );
-                  })}
+                      );
+                    })
+                  : null}
               </div>
-            ))}
+            ) : null}
           </div>
         </PageSection>
 

@@ -130,6 +130,40 @@ def _window_border_fields(group="Viền cửa sổ"):
     ]
 
 
+_SCAN_DIRECTIONS = [("down", "Trên → xuống"), ("up", "Dưới → lên"), ("right", "Trái → phải"),
+                    ("left", "Phải → trái")]
+
+# Light effects (phase 4): the sweep reuses the four straight directions and adds
+# slanted ones, back-and-forth and a per-video draw.
+SWEEP_DIRECTIONS = _SCAN_DIRECTIONS + [
+    ("diag_right", "Chéo, trái → phải"), ("diag_left", "Chéo, phải → trái"),
+    ("bounce_v", "Qua lại trên ↔ dưới"), ("bounce_h", "Qua lại trái ↔ phải"),
+    ("random", "Ngẫu nhiên mỗi video (6 hướng một chiều)"),
+]
+SWEEP_PROFILES = [
+    ("soft", "Mềm — mép mờ dần"), ("flat", "Dải đều — kiểu camera an ninh"),
+    ("laser", "Tia mảnh + quầng sáng"), ("double", "Hai vệt — ánh kính"),
+    ("trail", "Đuôi sao chổi (hướng qua lại dùng vệt mềm)"), ("prism", "Cầu vồng lăng kính (bỏ qua màu)"),
+]
+_EVENT_RHYTHMS = [("interval", "Mỗi N giây một lượt"), ("cuts", "Ở điểm cắt clip (mỗi N lần cắt)"),
+                  ("paragraph", "Đầu mỗi đoạn SRT"), ("chapter", "Đầu mỗi chương")]
+LEAK_PALETTES = [("amber", "Hổ phách ấm"), ("rose", "Hồng đào"), ("gold", "Vàng nắng"), ("fire", "Lửa cam đỏ"),
+                 ("teal", "Xanh ngọc lạnh"), ("violet", "Tím mộng mơ"), ("random", "Ngẫu nhiên mỗi video")]
+
+
+def _rhythm_fields(default, every, every_cuts, loop=False, group="Nhịp"):
+    options = ([("loop", "Liên tục — hết lượt này tới lượt khác")] if loop else []) + _EVENT_RHYTHMS
+    return [
+        select("rhythm", "Khi nào xuất hiện", default, options, group),
+        num("everySeconds", "N giây (khi chọn mỗi N giây)", every, 2, 180, 0.5, group),
+        integer("everyNCuts", "N lần cắt (khi chọn điểm cắt)", every_cuts, 1, 20, group=group),
+    ]
+
+
+def _sweep_preset(name, **params):
+    return {"name": name, "params": params}
+
+
 TYPES: list[dict] = [
     # ------------------------------------------------------------- layouts
     {
@@ -256,6 +290,7 @@ TYPES: list[dict] = [
             text("startTime", "Mốc bắt đầu (HH:MM:SS)", "21:47:12", "Thành phần", 8),
             color("recColor", "Màu chấm REC", "#FF2020", "Thành phần"),
             boolean("scanBand", "Vệt quét sáng", True, "Vệt quét"),
+            select("scanDirection", "Hướng quét", "down", _SCAN_DIRECTIONS, "Vệt quét"),
             num("scanOpacity", "Độ sáng vệt quét", 0.07, 0.02, 0.3, 0.01, "Vệt quét"),
             integer("scanSpeed", "Tốc độ vệt quét (px/giây)", 140, 20, 400, group="Vệt quét"),
             font("font", "Font", "Chakra Petch", "Chữ"),
@@ -537,6 +572,109 @@ TYPES: list[dict] = [
             integer("endSeconds", "Hiện ở cuối video (giây, 0 = tắt)", 30, 0, 120, group="Mốc"),
             select("entry", "Kiểu xuất hiện", "slide_left",
                    [("slide_left", "Trượt từ trái"), ("slide_right", "Trượt từ phải"), ("cut", "Hiện ngay")], "Mốc"),
+        ],
+    },
+    # ------------------------------------------------------------- modifiers, phase 4: light
+    # Listed before chapter cards and quotes so those still draw on top of the light.
+    # ``presets`` are extra records seeded next to the default one the first time
+    # the type appears: ready-made looks the user can tick, tweak or delete.
+    {
+        "id": "light_sweep", "group": "modifier", "phase": 4,
+        "name": "Vệt quét sáng",
+        "description": "Dải sáng lướt qua khung hình, chồng được lên mọi bố cục: chọn hướng (dọc, ngang, chéo, "
+                       "qua lại), kiểu vệt và nhịp xuất hiện.",
+        "fields": [
+            select("direction", "Hướng quét", "down", SWEEP_DIRECTIONS, "Hướng"),
+            integer("angle", "Độ nghiêng vệt chéo (độ)", 20, 5, 45, group="Hướng"),
+            select("profile", "Kiểu vệt", "soft", SWEEP_PROFILES, "Vệt"),
+            color("color", "Màu vệt", "#FFFFFF", "Vệt"),
+            num("opacity", "Độ sáng (giữa vệt)", 0.2, 0.02, 0.6, 0.01, "Vệt"),
+            integer("width", "Bề rộng vệt (px)", 240, 20, 600, 2, "Vệt"),
+            integer("speed", "Tốc độ (px/giây)", 160, 40, 2400, 10, "Nhịp"),
+        ] + _rhythm_fields("loop", 8, 3, loop=True),
+        "presets": [
+            _sweep_preset("Ánh kim chéo", direction="diag_right", angle=22, profile="double", opacity=0.22,
+                          width=150, speed=1100, rhythm="interval", everySeconds=7),
+            _sweep_preset("Tia laser quét lên xuống", direction="bounce_v", profile="laser", color="#9FE8FF",
+                          opacity=0.2, width=120, speed=240, rhythm="loop"),
+            _sweep_preset("Cầu vồng lăng kính", direction="diag_left", angle=18, profile="prism", opacity=0.16,
+                          width=280, speed=800, rhythm="interval", everySeconds=10),
+            _sweep_preset("Sao chổi theo nhịp cắt", direction="right", profile="trail", opacity=0.2, width=280,
+                          speed=1300, rhythm="cuts", everyNCuts=4),
+            _sweep_preset("Ánh vàng chuyển đoạn", direction="diag_right", angle=26, profile="soft",
+                          color="#FFD89A", opacity=0.22, width=340, speed=1500, rhythm="paragraph"),
+            _sweep_preset("Bóng tối lướt qua", direction="up", profile="soft", color="#000000", opacity=0.4,
+                          width=420, speed=120, rhythm="loop"),
+            _sweep_preset("Quét ngẫu nhiên mỗi video", direction="random", profile="soft", opacity=0.16,
+                          width=240, speed=700, rhythm="interval", everySeconds=9),
+        ],
+    },
+    {
+        "id": "light_leak", "group": "modifier", "phase": 4,
+        "name": "Rò sáng phim",
+        "description": "Quầng màu như phim bị lọt sáng trôi vào từ mép khung rồi tan đi, theo nhịp đã chọn.",
+        "fields": [
+            select("palette", "Bảng màu", "amber", LEAK_PALETTES, "Màu"),
+            num("intensity", "Độ đậm", 0.42, 0.1, 0.8, 0.02, "Màu"),
+            integer("size", "Cỡ quầng sáng (px)", 1100, 500, 1600, 20, "Hình"),
+            select("side", "Trôi vào từ", "alternate",
+                   [("left", "Mép trái"), ("right", "Mép phải"), ("top", "Mép trên"),
+                    ("alternate", "Luân phiên trái / phải"), ("random", "Ngẫu nhiên mỗi lần")], "Hình"),
+            integer("reach", "Lấn vào khung (px)", 240, 0, 800, 10, "Hình"),
+            num("seconds", "Mỗi lần kéo dài (giây)", 4.5, 1.5, 12, 0.5, "Nhịp"),
+        ] + _rhythm_fields("interval", 14, 6),
+        "presets": [
+            {"name": "Rò sáng hồng khi chuyển đoạn",
+             "params": {"palette": "rose", "rhythm": "paragraph", "seconds": 3.5, "side": "random"}},
+            {"name": "Lửa cam đầu chương",
+             "params": {"palette": "fire", "rhythm": "chapter", "seconds": 5, "intensity": 0.44, "size": 1300}},
+            {"name": "Xanh ngọc lạnh",
+             "params": {"palette": "teal", "intensity": 0.3, "everySeconds": 18, "side": "top"}},
+        ],
+    },
+    {
+        "id": "light_rays", "group": "modifier", "phase": 4,
+        "name": "Tia nắng xiên",
+        "description": "Chùm tia sáng chiếu xiên từ phía trên, lay rất chậm như nắng lọt qua tán cây hay khung cửa.",
+        "fields": [
+            select("corner", "Nguồn sáng", "top_left",
+                   [("top_left", "Góc trên trái"), ("top_right", "Góc trên phải"), ("top", "Chính giữa phía trên"),
+                    ("random", "Ngẫu nhiên mỗi video")], "Tia"),
+            color("color", "Màu tia", "#FFF1D0", "Tia"),
+            num("intensity", "Độ sáng", 0.3, 0.04, 0.6, 0.01, "Tia"),
+            integer("rays", "Số tia", 11, 4, 24, group="Tia"),
+            integer("spread", "Độ xòe (độ)", 60, 20, 120, group="Tia"),
+            num("length", "Độ dài tia (tỉ lệ khung)", 1.0, 0.4, 1.6, 0.05, "Tia"),
+            integer("sway", "Biên độ lay (px)", 80, 0, 240, 2, "Chuyển động"),
+            integer("period", "Chu kỳ lay (giây)", 16, 4, 60, group="Chuyển động"),
+        ],
+        "presets": [
+            {"name": "Nắng vàng góc phải",
+             "params": {"corner": "top_right", "color": "#FFD58A", "intensity": 0.34, "rays": 8, "spread": 50}},
+            {"name": "Ánh trăng lạnh",
+             "params": {"corner": "top", "color": "#BFD8FF", "intensity": 0.24, "rays": 14, "spread": 80,
+                        "period": 24}},
+        ],
+    },
+    {
+        "id": "spotlight", "group": "modifier", "phase": 4,
+        "name": "Đèn rọi trôi",
+        "description": "Khung tối dần ra mép, chỉ một vùng sáng trôi chậm quanh hình — như đèn pin rọi trong đêm.",
+        "fields": [
+            num("darkness", "Độ tối quanh vùng sáng", 0.6, 0.1, 0.9, 0.02, "Vùng tối"),
+            color("color", "Màu vùng tối", "#000000", "Vùng tối"),
+            select("shape", "Hình vùng sáng", "ellipse", [("ellipse", "Bầu dục theo khung"), ("circle", "Tròn")],
+                   "Vùng sáng"),
+            num("radius", "Cỡ vùng sáng (tỉ lệ chiều cao khung)", 0.62, 0.25, 1.0, 0.01, "Vùng sáng"),
+            num("softness", "Độ mềm mép", 0.6, 0.1, 1.0, 0.05, "Vùng sáng"),
+            integer("drift", "Biên độ trôi (px, 0 = đứng yên)", 200, 0, 420, 2, "Chuyển động"),
+            integer("periodX", "Chu kỳ ngang (giây)", 37, 8, 120, group="Chuyển động"),
+            integer("periodY", "Chu kỳ dọc (giây)", 23, 8, 120, group="Chuyển động"),
+        ],
+        "presets": [
+            {"name": "Đèn pin trong đêm",
+             "params": {"darkness": 0.78, "color": "#03060F", "shape": "circle", "radius": 0.5, "softness": 0.45,
+                        "drift": 320, "periodX": 19, "periodY": 13}},
         ],
     },
     # ------------------------------------------------------------- modifiers, phase 2

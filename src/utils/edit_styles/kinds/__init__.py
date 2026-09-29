@@ -86,7 +86,7 @@ class Kind:
 
 def _registry() -> dict[str, type[Kind]]:
     from src.utils.edit_styles.kinds import (
-        album, chapter_cards, doc_strip, dossier, magazine, newsroom, quote_moments, split_accent,
+        album, chapter_cards, doc_strip, dossier, light_fx, magazine, newsroom, quote_moments, split_accent,
         tv_zoom, two_layer,
     )
 
@@ -101,6 +101,10 @@ def _registry() -> dict[str, type[Kind]]:
         "doc_strip": doc_strip.DocStrip,
         "chapter_cards": chapter_cards.ChapterCards,
         "quote_moments": quote_moments.QuoteMoments,
+        "light_sweep": light_fx.LightSweep,
+        "light_leak": light_fx.LightLeak,
+        "light_rays": light_fx.LightRays,
+        "spotlight": light_fx.Spotlight,
     }
 
 

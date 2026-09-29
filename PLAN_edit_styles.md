@@ -10,6 +10,7 @@
 | 1 | Hạ tầng + 10 bố cục + 4 bổ trợ + trang cấu hình + bộ chọn batch + file chương + font | ✅ Xong (2026-09-22) |
 | 2 | magazine, split_accent, dossier, newsroom, album, doc_strip, biến thể film_frame, chapter_cards, quote_moments, upload ảnh | ✅ Xong (2026-09-22) |
 | 3 | tv_zoom, two_layer (render theo timeline), Ken Burns trong bake thư viện | ✅ Xong (2026-09-22) |
+| 4 | Hiệu ứng ánh sáng (bổ trợ): vệt quét sáng nhiều hướng, rò sáng phim, tia nắng xiên, đèn rọi trôi + mẫu tạo sẵn; hướng quét cho OSD camera an ninh; nhiều bản cùng kiểu bổ trợ xoay vòng qua video | ✅ Xong (2026-09-28) |
 
 **Việc cần người dùng làm sau mỗi đợt:** restart backend Flask (`.\venv\Scripts\python -m src.web_app`) — Claude không tự restart được.
 
@@ -92,7 +93,26 @@
 | Chuyển đổi bản ghi cũ | ✅ | `store._migrate_unlocked` xoá giá trị `Phần {n}` cũ một lần, ghi cờ `chapterTextFromFileOnly` vào index.json |
 | Hướng dẫn cấu trúc file chương + file mẫu trong giao diện | ✅ | `components/chapter-file-help.tsx`, hiện ở trang render (cả single và batch) và trang Kiểu dựng; có nút tải file mẫu |
 
+### Đợt 4 — ✅ xong (hiệu ứng ánh sáng)
+
+Vệt quét sáng vốn chỉ có trong bố cục OSD camera an ninh; nay là **hiệu ứng bổ trợ** nên tick ở batch là chồng được lên mọi bố cục. Mọi hiệu ứng là 1 PNG dựng sẵn (cache theo tham số) + biểu thức x/y `eval=frame`, lúc không hiện thì `enable` tắt lớp đó. Code: `src/utils/edit_styles/kinds/light_fx.py`.
+
+| Hạng mục | Trạng thái | Ghi chú |
+|---|---|---|
+| `light_sweep` Vệt quét sáng | ✅ | Hướng: trên→xuống, dưới→lên, trái→phải, phải→trái, chéo ↘/↙ (chỉnh độ nghiêng), qua lại dọc/ngang, ngẫu nhiên mỗi video. Kiểu vệt: mềm, dải đều (như CCTV), tia mảnh + quầng, hai vệt (ánh kính), đuôi sao chổi, cầu vồng. Nhịp: liên tục, mỗi N giây, mỗi N lần cắt, đầu đoạn SRT, đầu chương. 7 mẫu tạo sẵn |
+| `light_leak` Rò sáng phim | ✅ | Quầng màu trôi vào từ mép rồi tan; 6 bảng màu + ngẫu nhiên; mép trái/phải/trên/luân phiên/ngẫu nhiên; 3 mẫu |
+| `light_rays` Tia nắng xiên | ✅ | Chùm tia từ góc trên, lay chậm; 2 mẫu |
+| `spotlight` Đèn rọi trôi | ✅ | Tối viền, vùng sáng trôi theo đường Lissajous; mẫu "Đèn pin trong đêm" |
+| `osd_cctv`: trường `scanDirection` | ✅ | Mặc định "Trên → xuống" ra đúng biểu thức cũ |
+| Mẫu tạo sẵn (`presets` trong spec) | ✅ | Chỉ tạo một lần khi kiểu xuất hiện lần đầu (`seededTypes`); xoá mẫu thì không tự sinh lại |
+| Nhiều bản cùng kiểu bổ trợ | ✅ | `store.deal_modifier_rotation`: mỗi video vẫn tối đa 1 bản/kiểu; kiểu tick nhiều bản thì chia xoay vòng như bố cục. Kiểu tick 1 bản: y như cũ. `modifier_ids` lưu theo từng item nên retry giữ đúng bản đã bốc |
+| pytest (`tests/test_edit_styles_light.py`) | ✅ | 78 test, gồm chạy FFmpeg thật trên chuỗi CPU cho mọi hướng/nhịp và cả 4 hiệu ứng chồng nhau |
+| Đo tốc độ bước overlay thật (60 s, phụ đề + sóng âm/CTA, GPU chia đoạn) | ✅ | Từng hiệu ứng ×0.98–1.14 so với không hiệu ứng (nhiễu đo ~±5%); cả 4 chồng nhau ×1.24; OSD CCTV ×1.10–1.12 |
+
 ### Vấn đề đã biết / việc còn nợ
+
+- ⚠️ (Phát hiện khi làm đợt 4, có từ trước) Đường GPU **không có phụ đề** (`_gpu_overlay_tail` nhánh `scale_cuda=format=yuv420p`) mà có `overlay_cuda` ra khung **1920×1088**, 8 dòng dưới cùng màu xanh lá. Có phụ đề (nhánh `hwdownload` + ASS) thì đúng 1080 — các bản render sản xuất đã kiểm đều 1080.
+- ⚠️ Rò sáng / vệt quét "đầu chương" không hiện gì ở video ngắn hơn một chương tự chia (mặc định 2 phút) khi không có file chương.
 
 - ⚠️ Chọn cùng lúc "Trôi khung" + "Cảnh dài": khung vẫn đổi hướng ở mỗi clip, kể cả giữa một cảnh dài.
 - ⚠️ Tạp chí: câu trích tiếng Thái dài bị thu nhỏ nhiều vì cột hẹp và tiếng Thái ít dấu cách để ngắt dòng — nên tự xuống dòng bằng ký hiệu xuống dòng trong file chương.
@@ -110,6 +130,7 @@
 - **2026-09-22** — Hai lỗi phát hiện khi render 10 phút và đã sửa: (1) blur GPU bị vỡ ô vuông; (2) FFmpeg không phân tích nổi biểu thức có hơn ~110 mệnh đề cộng — ảnh hưởng mọi thứ bám theo điểm cắt/đoạn, nay cộng theo cây cân bằng.
 - **2026-09-22** — Đợt 3 xong: render theo mảnh (đoạn tĩnh GPU + đoạn chuyển CPU), `tv_zoom` 11.3x và `two_layer` 12.3x trên bản 10 phút; Ken Burns nung sẵn khi bake thư viện (thêm dưới 1 giây mỗi clip).
 - **2026-09-22** — Cả 24 kiểu đã render thật 10 phút: `tests/test-render/prod_styles/` (video + `_previews/` + `results.csv`). Chậm nhất 11.3x, nhanh nhất 18.4x.
+- **2026-09-28** — Đợt 4 xong: 4 hiệu ứng ánh sáng bổ trợ + 13 mẫu tạo sẵn, hướng quét cho OSD CCTV, xoay vòng nhiều bản cùng kiểu bổ trợ. Đo trên 60 s clip thư viện thật qua `_apply_story_overlays`: mỗi hiệu ứng tốn thêm 0–14%.
 
 ---
 
