@@ -14,6 +14,9 @@ export function TopNav() {
         <Button asChild variant={currentPath === "/story-video/edit-styles" ? "secondary" : "ghost"}>
           <Link to="/story-video/edit-styles">Kiểu dựng</Link>
         </Button>
+        <Button asChild variant={currentPath === "/youtube-download" ? "secondary" : "ghost"}>
+          <Link to="/youtube-download">Tải YouTube</Link>
+        </Button>
       </div>
     </nav>
   );

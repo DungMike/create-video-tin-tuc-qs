@@ -218,7 +218,8 @@ class EditPlan:
             labels = p.get("cameraLabels") or ["CAM 01"]
             self.camera_label = random.Random(self.story_id).choice(labels)
             if p.get("scanBand"):
-                self.assets["band"] = assets.solid("#FFFFFF", float(p["scanOpacity"]), (W, 90))
+                across = p.get("scanDirection") in ("left", "right")
+                self.assets["band"] = assets.solid("#FFFFFF", float(p["scanOpacity"]), (90, H) if across else (W, 90))
 
         cut = self.mod("cut_accents")
         if cut:
@@ -375,9 +376,14 @@ class EditPlan:
             parts += [ops.upload(idx, "el_bars"), ops.overlay(chain, "[el_bars]", "[el_out]")]
             chain, idx = "[el_out]", idx + 1
         elif lt == "osd_cctv" and self.assets.get("band"):
-            y = f"mod({tx}*{int(p['scanSpeed'])},{H + 90})-90"
+            speed = int(p["scanSpeed"])
+            x, y = {
+                "up": ("0", f"{H}-mod({tx}*{speed},{H + 90})"),
+                "right": (f"mod({tx}*{speed},{W + 90})-90", "0"),
+                "left": (f"{W}-mod({tx}*{speed},{W + 90})", "0"),
+            }.get(p.get("scanDirection"), ("0", f"mod({tx}*{speed},{H + 90})-90"))
             parts += [ops.upload(idx, "eb_band"),
-                      ops.overlay(chain, "[eb_band]", "[eb_out]", "0", y, dynamic=True)]
+                      ops.overlay(chain, "[eb_band]", "[eb_out]", x, y, dynamic=True)]
             chain, idx = "[eb_out]", idx + 1
         elif lt in ("drift", "tv_drift"):
             zoom = float(p["zoom"])

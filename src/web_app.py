@@ -7,6 +7,7 @@ vu file media va catch-all tra ve SPA.
 """
 
 import os
+import re
 
 from flask import Flask, abort, jsonify, send_from_directory
 
@@ -19,6 +20,8 @@ app.secret_key = Config.WEB_SECRET_KEY
 # Register modular blueprints
 from src.routes.story_video_routes import story_video_bp  # noqa: E402
 app.register_blueprint(story_video_bp)
+from src.routes.youtube_download_routes import youtube_download_bp  # noqa: E402
+app.register_blueprint(youtube_download_bp)
 app.config["MAX_CONTENT_LENGTH"] = Config.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
 # Fonts the edit styles draw with (Thai OFL faces) must sit in STORY_FONTS_DIR:
@@ -46,6 +49,12 @@ def media(relative_path: str):
     if normalized == "output" or normalized.startswith("output/"):
         base_dir = os.path.abspath(Config.OUTPUT_DIR)
         sub_path = normalized[len("output"):].lstrip("/")
+    # "output_E/..." = a batch rendered to another drive's output root.
+    elif re.match(r"^output_[A-Za-z](/|$)", normalized):
+        from src.utils.file_manager import output_root
+
+        base_dir = output_root(normalized[len("output_")])
+        sub_path = normalized[len("output_E"):].lstrip("/")
     # Same story for "story_raw/...": STORY_RAW_DIR is overridable on its own (the
     # deployment keeps it on a big slow disk, off STORAGE_DIR), and the prefetch
     # review step previews those staged source videos straight from the browser.

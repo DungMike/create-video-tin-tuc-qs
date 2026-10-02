@@ -24,6 +24,7 @@ import type {
   StartStoryHarvestRequest,
   StartStoryLibraryNormalizeResponse,
   StoryBatchProgress,
+  OutputDriveOptions,
   StoryBatchQueue,
   StoryDecorFrame,
   StoryDecorImage,
@@ -79,6 +80,8 @@ import type {
   UpdateStoryLibraryRequest,
   VoicesResponse,
   WaveformOverlay,
+  YoutubeDownloadFormat,
+  YoutubeDownloadJob,
 } from "@/types/api";
 
 export class ApiError extends Error {
@@ -344,6 +347,13 @@ export async function commitStoryHarvest(jobId: string, libraryId: string, delet
       body: JSON.stringify({ libraryId, deleteStaging }),
     },
   );
+}
+
+/** Dừng lượt cắt clip sau video đang làm. Gọi lại commitStoryHarvest để chạy tiếp. */
+export async function pauseStoryHarvestCommit(jobId: string) {
+  return requestJson<StoryHarvestJob>(`/api/story-video/library/harvest/${jobId}/commit/pause`, {
+    method: "POST",
+  });
 }
 
 export async function deleteStoryHarvestJob(jobId: string) {
@@ -744,6 +754,11 @@ export async function createStoryBatch(
   return requestJson<{ batchId: string; queuePosition: number }>("/api/story-video/batch/create", { method: "POST", body: fd });
 }
 
+/** Ổ đĩa chọn được để lưu video output của batch (kèm dung lượng trống). */
+export async function getOutputDrives() {
+  return requestJson<OutputDriveOptions>("/api/story-video/output-drives");
+}
+
 /** Batch đang chạy + đang chờ + vừa xong (mới nhất trước). */
 export async function getStoryBatchQueue() {
   return requestJson<StoryBatchQueue>("/api/story-video/batch/queue");
@@ -1091,4 +1106,22 @@ export async function renderDecorFramePreview(
       body: JSON.stringify(payload),
     },
   );
+}
+
+export async function createYoutubeDownloadJob(urls: string[], format: YoutubeDownloadFormat) {
+  return requestJson<YoutubeDownloadJob>("/api/youtube-download/jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ urls, format }),
+  });
+}
+
+export async function getYoutubeDownloadJob(jobId: string) {
+  return requestJson<YoutubeDownloadJob>(`/api/youtube-download/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function cancelYoutubeDownloadJob(jobId: string) {
+  return requestJson<YoutubeDownloadJob>(`/api/youtube-download/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST",
+  });
 }

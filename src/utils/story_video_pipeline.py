@@ -25,7 +25,7 @@ from src.utils.clip_usage import (
     normalize_clip_usage_mode,
 )
 from src.utils.ffmpeg_helper import FFmpegHelper
-from src.utils.file_manager import storage_absolute_path, storage_relative_path
+from src.utils.file_manager import output_root, storage_absolute_path, storage_relative_path
 from src.utils.logger import logger
 from src.utils.story_clip_bag import SharedClipBag
 from src.utils.story_library import (
@@ -146,13 +146,14 @@ def _temp_dir(story_id: str) -> str:
     return path
 
 
-def _output_dir(subdir: str = "") -> str:
+def _output_dir(subdir: str = "", drive: str = "") -> str:
     """Thu muc chua video thanh pham.
 
     Batch truyen ``subdir`` = batch id de moi batch co thu muc rieng, video cua cac
     batch khong lan vao nhau; render le khong truyen nen van ra thang ``story-video/``.
+    ``drive`` = o dia batch chon (vd "E"); rong -> OUTPUT_DIR nhu cu.
     """
-    path = os.path.join(Config.OUTPUT_DIR, "story-video")
+    path = os.path.join(output_root(drive), "story-video")
     if subdir:
         # Chi nhan ten thu muc phang (batch id), khong cho "..", dau gach cheo...
         if not all(ch.isascii() and (ch.isalnum() or ch in "-_") for ch in subdir):
@@ -359,6 +360,8 @@ class StoryVideoPipelineRunner:
         # Batch gan batch id vao day de moi batch co thu muc output rieng; render le
         # de trong nen video van ra thang story-video/ nhu cu.
         self.output_subdir = str(config_dict.get("output_subdir", "") or "").strip()
+        # O dia luu video batch chon; rong (batch cu) -> o cua OUTPUT_DIR.
+        self.output_drive = str(config_dict.get("output_drive", "") or "").strip()
         self.clip_tags = config_dict.get("clip_tags", [])
         # A render can draw clips from several libraries at once: their pools are
         # merged into one deck so a clip only repeats after every clip of every
@@ -2598,7 +2601,7 @@ class StoryVideoPipelineRunner:
         if not safe_name:
             safe_name = f"story_{self.story_id}"
 
-        output_dir = _output_dir(self.output_subdir)
+        output_dir = _output_dir(self.output_subdir, self.output_drive)
         final_path = os.path.join(output_dir, f"{safe_name}.mp4")
 
         counter = 1

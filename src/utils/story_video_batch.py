@@ -79,7 +79,11 @@ def batch_output_dir(progress: dict) -> str:
     subdir = str(progress.get("outputSubdir") or "")
     if not subdir:
         return ""
-    return os.path.abspath(os.path.join(Config.OUTPUT_DIR, "story-video", subdir))
+    from src.utils.file_manager import output_root
+
+    return os.path.abspath(os.path.join(
+        output_root(str(progress.get("outputDrive") or "")), "story-video", subdir,
+    ))
 
 
 def decor_ids_still_needed() -> set[str]:
@@ -350,6 +354,7 @@ def resume_batch_queue() -> int:
             config["storyConfigs"],
             optimize_mode=bool(config.get("optimizeMode", False)),
             output_subdir=config.get("outputSubdir") or batch_id,
+            output_drive=str(config.get("outputDrive") or ""),
         )
         # Keep the original place in line rather than the restart time.
         runner.progress["queuedAt"] = queued_at or _utc_now()
@@ -426,12 +431,15 @@ class StoryVideoBatchRunner:
         *,
         optimize_mode: bool = False,
         output_subdir: str | None = None,
+        output_drive: str = "",
     ):
         self.batch_id = batch_id
         self.story_configs = story_configs
         # Folder under OUTPUT_DIR/story-video/ this batch's videos land in. A retry
         # passes the original batch's folder so the replacements sit with the rest.
         self.output_subdir = output_subdir or batch_id
+        # Drive letter the videos go to ("" = OUTPUT_DIR's own drive, older batches).
+        self.output_drive = output_drive or ""
         # Optimize mode (per-batch toggle): when True, suspend configured competing
         # apps and boost ffmpeg priority for this batch's duration; when False, render
         # alongside everything else. Defaults off so batches don't freeze other apps
@@ -461,6 +469,7 @@ class StoryVideoBatchRunner:
             "percent": 0,
             "optimizeMode": self._optimize_mode,
             "outputSubdir": self.output_subdir,
+            "outputDrive": self.output_drive,
             "message": "Cho xu ly...",
             "stories": [],
             "results": [],
@@ -472,6 +481,7 @@ class StoryVideoBatchRunner:
             story_id = config.get("story_id") or f"s-{batch_id}-{i}"
             config["story_id"] = story_id
             config["output_subdir"] = self.output_subdir
+            config["output_drive"] = self.output_drive
             self.progress["stories"].append({
                 "storyId": story_id,
                 "status": "pending",
@@ -565,6 +575,7 @@ class StoryVideoBatchRunner:
             "storyConfigs": self.story_configs,
             "optimizeMode": self._optimize_mode,
             "outputSubdir": self.output_subdir,
+            "outputDrive": self.output_drive,
             "queuedAt": self.progress["queuedAt"],
         })
         self._save_progress()
@@ -714,7 +725,8 @@ class StoryVideoBatchRunner:
         self._update_progress("running", 0, f"Bat dau xu ly batch {total} video...")
         logger.info(
             f"[StoryBatch:{self.batch_id}] Started batch with {total} stories "
-            f"(max_workers={self._max_workers}, output_subdir={self.output_subdir})."
+            f"(max_workers={self._max_workers}, output_subdir={self.output_subdir}, "
+            f"output_drive={self.output_drive or '-'})."
         )
 
         # Optimize mode: suspend configured competing apps + boost ffmpeg for the whole

@@ -39,6 +39,7 @@ import {
   generateSubtitlePreview,
   getCtaOverlays,
   getStoryBatchProgress,
+  getOutputDrives,
   getStoryBatchQueue,
   getStoryDriveAudioImport,
   getDecorImages,
@@ -58,6 +59,7 @@ import {
   uploadSubtitleFont,
 } from "@/lib/api";
 import type {
+  OutputDriveOption,
   CreateStoryBatchItem,
   CreateStoryBatchRequest,
   CreateStoryVideoRequest,
@@ -131,6 +133,10 @@ interface BatchItem {
 }
 
 let batchIdCounter = 0;
+
+function formatGigabytes(bytes: number): string {
+  return `${(bytes / 1024 ** 3).toFixed(0)} GB`;
+}
 
 function nextBatchId(): string {
   batchIdCounter += 1;
@@ -307,6 +313,9 @@ export function StoryVideoPage() {
   // Optimize mode: khi bật, batch tạm dừng các app cạnh tranh (browser farm) và ưu tiên
   // CPU cho render; tắt (mặc định) thì render chạy song song với mọi thứ như bình thường.
   const [optimizeMode, setOptimizeMode] = useState(false);
+  // Ổ đĩa lưu video output của batch; "" cho tới khi backend trả về ổ mặc định (E).
+  const [outputDrives, setOutputDrives] = useState<OutputDriveOption[]>([]);
+  const [outputDrive, setOutputDrive] = useState("");
   // Bỏ qua bước hiệu ứng TV khi render: dùng cho thư viện chưa bake hiệu ứng nhưng
   // chỉ cần video thô (clip + sóng âm/CTA + phụ đề). Thư viện đã bake luôn tự bỏ qua.
   const [skipTvEffect, setSkipTvEffect] = useState(false);
@@ -526,6 +535,15 @@ export function StoryVideoPage() {
       .catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    getOutputDrives()
+      .then((res) => {
+        setOutputDrives(res.drives);
+        setOutputDrive((current) => current || res.defaultDrive);
+      })
+      .catch(() => undefined);
+  }, []);
+
   const refreshBatchQueue = useCallback(() => {
     return getStoryBatchQueue()
       .then(setBatchQueue)
@@ -631,6 +649,7 @@ export function StoryVideoPage() {
         libraryIds: selectedLibraryIds,
         introId: introId === "none" ? "" : introId,
         optimizeMode,
+        outputDrive: outputDrive || undefined,
         skipTvEffect,
         clipUsageMode,
         clipTags: [],
@@ -685,7 +704,7 @@ export function StoryVideoPage() {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the bat dau batch render.");
       setIsSubmitting(false);
     }
-  }, [selectedLibraryIds, introId, optimizeMode, skipTvEffect, clipUsageMode, decorEnabled, activeDecorIds, activeLayoutIds, activeModifierIds, activeWaveformIds, activeCtaIds, voiceId, subtitleFont, subtitlePreset, subtitleMaxCharsPerLine, subtitleMaxLines, subtitleFontScale, subtitleColorPayload, activeSubtitleStyleIds, batchId, batchProgress, viewBatch, refreshBatchQueue, refreshDecorImages]);
+  }, [selectedLibraryIds, introId, optimizeMode, outputDrive, skipTvEffect, clipUsageMode, decorEnabled, activeDecorIds, activeLayoutIds, activeModifierIds, activeWaveformIds, activeCtaIds, voiceId, subtitleFont, subtitlePreset, subtitleMaxCharsPerLine, subtitleMaxLines, subtitleFontScale, subtitleColorPayload, activeSubtitleStyleIds, batchId, batchProgress, viewBatch, refreshBatchQueue, refreshDecorImages]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1835,6 +1854,28 @@ export function StoryVideoPage() {
                   Khi bật: tạm dừng các trình duyệt/app khác (browser farm) và ưu tiên CPU cho render để chạy nhanh hơn — chúng tự động chạy lại khi batch kết thúc. Tắt (mặc định): render chạy song song, không ảnh hưởng app khác.
                 </p>
               </div>
+
+              {outputDrives.length ? (
+                <div className="grid gap-2 md:w-1/2">
+                  <Label htmlFor="batch-output-drive">Ổ đĩa lưu video output</Label>
+                  <select
+                    id="batch-output-drive"
+                    value={outputDrive}
+                    onChange={(event) => setOutputDrive(event.target.value)}
+                    disabled={isSubmitting}
+                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                  >
+                    {outputDrives.map((option) => (
+                      <option key={option.drive} value={option.drive}>
+                        Ổ {option.drive}: — trống {formatGigabytes(option.freeBytes)} / {formatGigabytes(option.totalBytes)} ({option.outputDir})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Video của batch được lưu vào &lt;ổ&gt;/…/story-video/&lt;batch id&gt;/. Retry các video lỗi vẫn ghi vào ổ của batch gốc.
+                  </p>
+                </div>
+              ) : null}
 
               <BatchInputForm
                 items={batchItems}

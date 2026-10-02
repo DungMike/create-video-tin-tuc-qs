@@ -216,6 +216,19 @@ export interface StoryHarvestJob {
   skippedPairs?: StorySkippedKeywordPair[];
   /** "ok" | "disabled" (chưa cấu hình MongoDB) | "unavailable" (MongoDB tắt → không bỏ qua gì). */
   keywordCheck?: "ok" | "disabled" | "unavailable";
+  /**
+   * Lượt cắt clip vào thư viện. "interrupted" = thread đã chết (restart app);
+   * "paused"/"interrupted"/"failed" đều bấm Tiếp tục được (chỉ cắt video còn lại).
+   */
+  commitStatus?: "running" | "pausing" | "paused" | "interrupted" | "completed" | "failed";
+  commitSessionId?: string;
+  /** Thư viện người dùng chọn lúc bắt đầu cắt. */
+  commitLibraryId?: string;
+  /** Thư viện đang nhận clip — bản v2, v3... khi thư viện gốc đầy. */
+  commitTargetLibraryId?: string;
+  commitCurrent?: number;
+  commitTotal?: number;
+  commitRemaining?: number;
 }
 
 export interface StorySkippedKeywordPair {
@@ -638,13 +651,15 @@ export interface StoryLibraryBulkDeleteResponse {
 
 export interface DownloadProgress {
   sessionId: string;
-  status: "downloading" | "splitting" | "rendering" | "completed" | "failed";
+  status: "downloading" | "splitting" | "rendering" | "completed" | "failed" | "paused";
   current: number;
   total: number;
   message: string;
   addedClips: number;
   /** Chỉ có ở commit thư viện clip từ ảnh: người dùng đã huỷ giữa chừng. */
   cancelled?: boolean;
+  /** Commit harvest: các thư viện đã nhận clip (gốc + bản v2, v3... khi thư viện đầy). */
+  libraryIds?: string[];
 }
 
 export interface CRTSettings {
@@ -967,6 +982,8 @@ export interface CreateStoryBatchRequest {
     introId?: string;
     /** Optimize mode: suspend competing apps + boost ffmpeg priority for this batch. */
     optimizeMode?: boolean;
+    /** Ổ đĩa lưu video output của batch (vd "E"); rỗng = ổ mặc định của backend. */
+    outputDrive?: string;
     clipTags?: string[];
     crtSettings?: CRTSettings;
     /** Bỏ qua bước hiệu ứng TV khi render (thư viện chưa bake hiệu ứng). */
@@ -1226,7 +1243,20 @@ export interface StoryBatchQueueEntry {
   failedItems: number;
   cancelledItems: number;
   outputDir: string;
+  outputDrive?: string;
   queuedAt: string;
+}
+
+export interface OutputDriveOption {
+  drive: string;
+  outputDir: string;
+  freeBytes: number;
+  totalBytes: number;
+}
+
+export interface OutputDriveOptions {
+  drives: OutputDriveOption[];
+  defaultDrive: string;
 }
 
 export interface StoryBatchQueue {
@@ -1403,4 +1433,38 @@ export interface CtaOverlay {
   processedHeight?: number;
   createdAt: string;
   updatedAt?: string;
+}
+
+export type YoutubeDownloadFormat = "mp3" | "mp4" | "both";
+export type YoutubeDownloadJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type YoutubeDownloadItemStatus = "pending" | "downloading" | "converting" | "done" | "failed" | "cancelled";
+
+export interface YoutubeDownloadFile {
+  kind: "mp3" | "mp4";
+  name: string;
+  size: number;
+  url: string;
+}
+
+export interface YoutubeDownloadItem {
+  index: number;
+  url: string;
+  status: YoutubeDownloadItemStatus;
+  phase: string;
+  title: string | null;
+  percent: number;
+  speed: number | null;
+  eta: number | null;
+  error: string | null;
+  files: YoutubeDownloadFile[];
+}
+
+export interface YoutubeDownloadJob {
+  jobId: string;
+  format: YoutubeDownloadFormat;
+  status: YoutubeDownloadJobStatus;
+  createdAt: number;
+  finishedAt: number | null;
+  outputDir: string;
+  items: YoutubeDownloadItem[];
 }

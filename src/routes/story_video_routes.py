@@ -1028,12 +1028,12 @@ def list_story_harvest_jobs():
 
 @story_video_bp.route("/api/story-video/library/harvest/<job_id>", methods=["GET"])
 def get_story_harvest_job(job_id: str):
-    from src.utils.story_bulk_harvest import load_harvest_progress
+    from src.utils.story_bulk_harvest import load_harvest_progress, with_commit_state
 
     progress = load_harvest_progress(job_id)
     if not progress:
         return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
-    return jsonify(progress)
+    return jsonify(with_commit_state(job_id, progress))
 
 
 @story_video_bp.route("/api/story-video/library/harvest/<job_id>/items", methods=["GET"])
@@ -1103,6 +1103,7 @@ def resume_story_harvest(job_id: str):
 def delete_story_harvest_items(job_id: str):
     from src.utils.story_bulk_harvest import (
         delete_harvest_items,
+        is_commit_active,
         load_harvest_manifest,
         load_harvest_progress,
     )
@@ -1117,6 +1118,12 @@ def delete_story_harvest_items(job_id: str):
         return _error(
             "Job dang tai video. Hay doi tai xong hoac huy truoc khi xoa.",
             code="harvest_running",
+            status=409,
+        )
+    if is_commit_active(job_id):
+        return _error(
+            "Job dang cat clip vao thu vien. Hay tam dung truoc khi xoa.",
+            code="harvest_committing",
             status=409,
         )
 
@@ -1150,7 +1157,14 @@ def delete_story_harvest_items(job_id: str):
 
 @story_video_bp.route("/api/story-video/library/harvest/<job_id>/commit", methods=["POST"])
 def commit_story_harvest(job_id: str):
-    from src.utils.story_bulk_harvest import load_harvest_manifest, load_harvest_progress
+    """Cat clip + nhap thu vien. Goi lai sau khi tam dung / restart = chay tiep."""
+    from src.utils.story_bulk_harvest import (
+        claim_commit,
+        is_commit_active,
+        load_harvest_manifest,
+        load_harvest_progress,
+        release_commit,
+    )
 
     progress = load_harvest_progress(job_id)
     if not progress:
@@ -1162,9 +1176,19 @@ def commit_story_harvest(job_id: str):
             code="harvest_running",
             status=409,
         )
+    if is_commit_active(job_id):
+        return _error(
+            "Job dang cat clip vao thu vien roi.",
+            code="harvest_committing",
+            status=409,
+        )
 
     data = request.get_json(silent=True) or {}
-    library_id, err = _resolve_or_404(data.get("libraryId") or progress.get("libraryId"))
+    # Chay tiep sau tam dung: mac dinh nhap vao dung thu vien cua luot truoc
+    # (thu vien goc; ban v2/v3 duoc tu chon lai theo so clip).
+    library_id, err = _resolve_or_404(
+        data.get("libraryId") or progress.get("commitLibraryId") or progress.get("libraryId")
+    )
     if err:
         return err
 
@@ -1177,6 +1201,8 @@ def commit_story_harvest(job_id: str):
 
     delete_staging = bool(data.get("deleteStaging", True))
     session_id = f"hvc-{str(uuid.uuid4())[:8]}"
+    if not claim_commit(job_id, session_id):
+        return _error("Job dang cat clip vao thu vien roi.", code="harvest_committing", status=409)
 
     # Dung chung _download_sessions + GET /download-progress/<id> co san nen
     # frontend poll bang dung mot ham getStoryDownloadProgress.
@@ -1207,30 +1233,62 @@ def commit_story_harvest(job_id: str):
                 progress_callback=progress_cb,
                 delete_staging=delete_staging,
             )
-            added_count = len(result) if isinstance(result, list) else 0
+            added_count = len(result["added"])
+            library_ids = result["libraryIds"]
             with _download_sessions_lock:
-                _download_sessions[session_id].update({
-                    "status": "completed",
-                    "current": len(pending),
-                    "total": len(pending),
-                    "message": f"Hoan tat! Da them {added_count} clips.",
-                    "addedClips": added_count,
-                })
+                if result["paused"]:
+                    _download_sessions[session_id].update({
+                        "status": "paused",
+                        "addedClips": added_count,
+                        "libraryIds": library_ids,
+                    })
+                else:
+                    _download_sessions[session_id].update({
+                        "status": "completed",
+                        "current": len(pending),
+                        "total": len(pending),
+                        "message": f"Hoan tat! Da them {added_count} clips.",
+                        "addedClips": added_count,
+                        "libraryIds": library_ids,
+                    })
         except Exception as exc:
             logger.error(f"[StoryVideo] Harvest commit failed: {exc}", exc_info=True)
+            _mark_harvest_commit_failed(job_id)
             with _download_sessions_lock:
                 _download_sessions[session_id].update({
                     "status": "failed",
                     "message": f"Loi: {str(exc)}",
                 })
+        finally:
+            release_commit(job_id, session_id)
 
     threading.Thread(target=_run_commit, daemon=True).start()
     return jsonify({"sessionId": session_id, "total": len(pending)}), 202
 
 
+def _mark_harvest_commit_failed(job_id: str):
+    from src.utils.story_bulk_harvest import mark_commit_failed
+
+    try:
+        mark_commit_failed(job_id)
+    except Exception as exc:
+        logger.warning(f"[Harvest] {job_id}: khong ghi duoc trang thai commit loi: {exc}")
+
+
+@story_video_bp.route("/api/story-video/library/harvest/<job_id>/commit/pause", methods=["POST"])
+def pause_story_harvest_commit(job_id: str):
+    """Dung luot cat clip sau video dang lam. POST /commit lai de chay tiep."""
+    from src.utils.story_bulk_harvest import request_commit_pause
+
+    progress = request_commit_pause(job_id)
+    if not progress:
+        return _error("Harvest job khong ton tai.", code="harvest_not_found", status=404)
+    return jsonify(progress)
+
+
 @story_video_bp.route("/api/story-video/library/harvest/<job_id>", methods=["DELETE"])
 def delete_story_harvest_job(job_id: str):
-    from src.utils.story_bulk_harvest import delete_harvest_job, load_harvest_progress
+    from src.utils.story_bulk_harvest import delete_harvest_job, is_commit_active, load_harvest_progress
 
     progress = load_harvest_progress(job_id)
     if not progress:
@@ -1239,6 +1297,12 @@ def delete_story_harvest_job(job_id: str):
         return _error(
             "Job dang chay. Hay huy truoc khi xoa.",
             code="harvest_running",
+            status=409,
+        )
+    if is_commit_active(job_id):
+        return _error(
+            "Job dang cat clip vao thu vien. Hay tam dung truoc khi xoa.",
+            code="harvest_committing",
             status=409,
         )
 
@@ -2452,14 +2516,15 @@ def _decor_free_layouts(layout_ids: list[str], count: int) -> list[str]:
 def _resolve_edit_selection(shared_config: dict, library_ids, count: int):
     """Deal layouts across ``count`` videos and decide which of them get a decor image.
 
-    Returns ``((layout_per_item, decor_per_item, modifier_ids), error_response)``.
+    Returns ``((layout_per_item, decor_per_item, modifiers_per_item), error_response)``.
 
     - No ``layoutIds``: the old behaviour. ``decorImageIds`` alone puts every video
       in the TV frame (``_resolve_decor_selection``), so old payloads and retries of
       old batches render exactly as before.
     - With ``layoutIds``: one enabled layout per video, dealt from a shuffled deck.
       Decor images are dealt only to the videos that drew a layout needing one.
-    - ``modifierIds`` apply to every video (one record per modifier type).
+    - ``modifierIds`` apply to every video, one record per modifier type; several
+      records of one type are dealt across the videos (``deal_modifier_rotation``).
 
     Each decor image is spent on one video and never dealt again, so a batch can
     ask for more TV frames than the library still holds. The videos left over
@@ -2478,7 +2543,7 @@ def _resolve_edit_selection(shared_config: dict, library_ids, count: int):
     if modifier_ids and not modifiers:
         return None, _error("Khong co hieu ung bo tro nao dung duoc (da tat hoac da xoa).",
                             code="modifier_unusable")
-    modifier_out = [m["id"] for m in modifiers]
+    modifier_out = store.deal_modifier_rotation(modifier_ids, count)
 
     if not layout_ids:
         decor_assignments, decor_error = _resolve_decor_selection(decor_ids, library_ids, count)
@@ -2868,8 +2933,9 @@ def create_story_video():
     )
     if edit_error is not None:
         return edit_error
-    layouts, decors, modifier_ids = edit_selection
+    layouts, decors, modifier_assignments = edit_selection
     decor_image_id = decors[0] if decors else ""
+    modifier_ids = modifier_assignments[0] if modifier_assignments else []
 
     config_dict = {
         "input_type": input_type,
@@ -3116,6 +3182,16 @@ def scan_local_audio_folder():
 
 
 # ---------------------------------------------------------------------------
+# 13z. GET /api/story-video/output-drives - o dia chon duoc de luu video batch
+# ---------------------------------------------------------------------------
+@story_video_bp.route("/api/story-video/output-drives", methods=["GET"])
+def get_output_drives():
+    from src.utils.file_manager import output_drive_options
+
+    return jsonify(output_drive_options())
+
+
+# ---------------------------------------------------------------------------
 # 14. POST /api/story-video/batch/create - batch of stories
 # ---------------------------------------------------------------------------
 @story_video_bp.route("/api/story-video/batch/create", methods=["POST"])
@@ -3145,6 +3221,13 @@ def create_story_batch():
     clip_usage_mode, clip_usage_error = _clip_usage_mode_or_503(shared_config.get("clipUsageMode"))
     if clip_usage_error is not None:
         return clip_usage_error
+
+    from src.utils.file_manager import resolve_output_drive
+
+    try:
+        output_drive = resolve_output_drive(str(shared_config.get("outputDrive") or ""))
+    except ValueError as exc:
+        return _error(str(exc), code="invalid_output_drive")
 
     # Resolved once for the whole batch, before the batch dir exists, so a bad
     # selection fails without leaving files behind.
@@ -3225,7 +3308,7 @@ def create_story_batch():
     if edit_error is not None:
         _abandon_batch_dir(batch_dir, decor_assignments)
         return edit_error
-    layout_assignments, decor_assignments, modifier_ids = edit_selection
+    layout_assignments, decor_assignments, modifier_assignments = edit_selection
 
     # Song am va CTA cung xoay vong theo cach do: chon nhieu cau hinh thi moi N
     # video lien tiep dung du N cau hinh, thu tu ngau nhien. Khong chon = giu
@@ -3366,7 +3449,7 @@ def create_story_batch():
             "cta_overlay_id": cta_assignments[idx] if cta_assignments else "",
             "decor_image_id": decor_assignments[idx] if decor_assignments else "",
             "layout_id": layout_assignments[idx] if layout_assignments else "",
-            "modifier_ids": list(modifier_ids),
+            "modifier_ids": list(modifier_assignments[idx]) if modifier_assignments else [],
             "chapters_path": chapters_path,
             "voice_id": str(shared_config.get("voiceId", "")).strip(),
             "subtitle_path": subtitle_path,
@@ -3385,13 +3468,17 @@ def create_story_batch():
 
     # Batch vao hang doi: moi luc chi render 1 batch, batch nay xong moi toi batch sau.
     # Video ra thu muc output rieng OUTPUT_DIR/story-video/<batch_id>/.
-    runner = StoryVideoBatchRunner(batch_id, story_configs, optimize_mode=optimize_mode)
+    runner = StoryVideoBatchRunner(
+        batch_id, story_configs, optimize_mode=optimize_mode, output_drive=output_drive,
+    )
     queue_position = runner.enqueue()
 
     logger.info(
         f"[StoryVideo] Queued batch: batch_id={batch_id}, items={len(story_configs)}, "
+        f"output_drive={output_drive or '-'}, "
         f"queue_position={queue_position}, optimize_mode={optimize_mode}, "
-        f"layouts={len({lid for lid in layout_assignments if lid})}, modifiers={len(modifier_ids)}, "
+        f"layouts={len({lid for lid in layout_assignments if lid})}, "
+        f"modifiers={len({mid for ids in modifier_assignments for mid in ids})}, "
         f"decor_images={len({d for d in decor_assignments if d})}, "
         f"waveforms={len(set(waveform_assignments)) if waveform_assignments else 0}, "
         f"cta_overlays={len(set(cta_assignments)) if cta_assignments else 0}, "
@@ -3432,6 +3519,7 @@ def get_batch_queue():
             "failedItems": progress.get("failed", 0),
             "cancelledItems": progress.get("cancelled", 0),
             "outputDir": batch_output_dir(progress),
+            "outputDrive": progress.get("outputDrive", ""),
             "queuedAt": progress.get("queuedAt", ""),
         })
     return jsonify({"activeBatchId": snapshot["activeBatchId"], "batches": batches})
@@ -3612,6 +3700,7 @@ def retry_batch_failed(batch_id: str):
         optimize_mode=bool(progress.get("optimizeMode", False)),
         # Video retry nam chung thu muc output voi batch goc.
         output_subdir=progress.get("outputSubdir") or batch_id,
+        output_drive=str(progress.get("outputDrive") or ""),
     )
     queue_position = runner.enqueue()
 
