@@ -1,4 +1,4 @@
-import { Check, Download, ExternalLink, Loader2, Trash2, X } from "lucide-react";
+import { Check, Download, ExternalLink, Loader2, Pause, Play, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { EmptyCard } from "@/components/empty-card";
@@ -32,6 +32,7 @@ import {
   getStoryHarvestItems,
   getStoryHarvestJob,
   listStoryHarvestJobs,
+  pauseStoryHarvestCommit,
   startStoryHarvest,
 } from "@/lib/api";
 import type {
@@ -49,6 +50,10 @@ const PROVIDERS: { value: StoryVideoProvider; label: string }[] = [
 ];
 
 const RUNNING_STATUSES: StoryHarvestJob["status"][] = ["running", "cancelling"];
+// Lượt cắt clip còn sống ở backend (poll tiếp được bằng commitSessionId).
+const LIVE_COMMIT_STATUSES = ["running", "pausing"];
+// Lượt cắt dừng giữa chừng — bấm Tiếp tục chỉ cắt các video còn lại.
+const RESUMABLE_COMMIT_STATUSES = ["paused", "interrupted", "failed"];
 
 function formatBytes(bytes: number) {
   if (!bytes) return "0 MB";
@@ -112,6 +117,9 @@ export function StoryBulkHarvestPanel({ libraryId, disabled = false, onCommitted
   const [commitSessionId, setCommitSessionId] = useState<string | null>(null);
   const [commitProgress, setCommitProgress] = useState<DownloadProgress | null>(null);
   const [isCommitting, setIsCommitting] = useState(false);
+  const [isPausing, setIsPausing] = useState(false);
+  // jobId của lượt cắt đang poll, để nạp lại job khi lượt cắt tạm dừng.
+  const commitJobIdRef = useRef<string | null>(null);
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -155,7 +163,14 @@ export function StoryBulkHarvestPanel({ libraryId, disabled = false, onCommitted
       .then((response) => {
         if (cancelled) return;
         const latest = response.jobs.find((entry) => (entry.keptItems ?? 0) > 0 || RUNNING_STATUSES.includes(entry.status));
-        if (latest) setJob(latest);
+        if (!latest) return;
+        setJob(latest);
+        // Mở lại trang khi lượt cắt vẫn đang chạy: poll tiếp đúng session đó.
+        if (latest.commitSessionId && LIVE_COMMIT_STATUSES.includes(latest.commitStatus ?? "")) {
+          commitJobIdRef.current = latest.jobId;
+          setIsCommitting(true);
+          setCommitSessionId(latest.commitSessionId);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -202,15 +217,26 @@ export function StoryBulkHarvestPanel({ libraryId, disabled = false, onCommitted
       getStoryDownloadProgress(commitSessionId)
         .then((progress) => {
           setCommitProgress(progress);
-          if (progress.status === "completed" || progress.status === "failed") {
+          if (progress.status === "completed" || progress.status === "failed" || progress.status === "paused") {
             if (commitPollRef.current) {
               clearInterval(commitPollRef.current);
               commitPollRef.current = null;
             }
             setIsCommitting(false);
+            setIsPausing(false);
             setCommitSessionId(null);
-            if (progress.status === "completed") {
-              setSuccessMessage(`Da them ${progress.addedClips} clip vao thu vien.`);
+            const libraryCount = progress.libraryIds?.length ?? 1;
+            const librarySuffix = libraryCount > 1 ? ` (chia vao ${libraryCount} thu vien v2, v3...)` : "";
+            if (progress.status === "paused") {
+              setSuccessMessage(progress.message + librarySuffix);
+              const pausedJobId = commitJobIdRef.current;
+              if (pausedJobId) {
+                getStoryHarvestJob(pausedJobId).then(setJob).catch(() => undefined);
+              }
+              setReloadToken((token) => token + 1);
+              onCommittedRef.current?.();
+            } else if (progress.status === "completed") {
+              setSuccessMessage(`Da them ${progress.addedClips} clip vao thu vien${librarySuffix}.`);
               setJob(null);
               setItems([]);
               setKeptTotal(0);
@@ -304,12 +330,26 @@ export function StoryBulkHarvestPanel({ libraryId, disabled = false, onCommitted
     setSuccessMessage(null);
     setIsCommitting(true);
     setCommitProgress(null);
+    commitJobIdRef.current = job.jobId;
     try {
-      const response = await commitStoryHarvest(job.jobId, libraryId);
+      // Chạy tiếp thì nhập vào đúng thư viện của lượt trước (backend tự chọn bản v2, v3...).
+      const targetLibraryId = commitResumable && job.commitLibraryId ? job.commitLibraryId : libraryId;
+      const response = await commitStoryHarvest(job.jobId, targetLibraryId);
       setCommitSessionId(response.sessionId);
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong nhap duoc vao thu vien.");
       setIsCommitting(false);
+    }
+  };
+
+  const handlePauseCommit = async () => {
+    if (!job) return;
+    setIsPausing(true);
+    try {
+      await pauseStoryHarvestCommit(job.jobId);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Khong tam dung duoc.");
+      setIsPausing(false);
     }
   };
 
@@ -345,6 +385,7 @@ export function StoryBulkHarvestPanel({ libraryId, disabled = false, onCommitted
     ? Math.round((commitProgress.current / Math.max(commitProgress.total, 1)) * 100)
     : 0;
   const busy = disabled || isCommitting || isDeleting;
+  const commitResumable = Boolean(job && RESUMABLE_COMMIT_STATUSES.includes(job.commitStatus ?? ""));
 
   return (
     <div className="grid min-w-0 gap-4">
@@ -704,11 +745,25 @@ export function StoryBulkHarvestPanel({ libraryId, disabled = false, onCommitted
 
             <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border/70 pt-4">
               <span className="mr-auto text-xs text-muted-foreground">
-                Chi video con lai moi duoc cat clip va bake theo hieu ung thu vien.
+                {commitResumable && !isCommitting
+                  ? `Luot cat clip ${job.commitStatus === "paused" ? "da tam dung" : "bi ngat giua chung"} — con ${keptTotal} video chua cat.`
+                  : "Chi video con lai moi duoc cat clip va bake theo hieu ung thu vien. Thu vien day se tu chia sang ban v2, v3..."}
               </span>
+              {isCommitting ? (
+                <Button type="button" variant="outline" onClick={handlePauseCommit} disabled={isPausing || !commitSessionId}>
+                  {isPausing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Pause className="mr-2 size-4" />}
+                  {isPausing ? "Dang dung sau video hien tai..." : "Tam dung"}
+                </Button>
+              ) : null}
               <Button type="button" onClick={handleCommit} disabled={busy || !keptTotal}>
-                {isCommitting ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Check className="mr-2 size-4" />}
-                Cat clip &amp; dua vao thu vien ({keptTotal})
+                {isCommitting ? (
+                  <Loader2 className="mr-2 size-4 animate-spin" />
+                ) : commitResumable ? (
+                  <Play className="mr-2 size-4" />
+                ) : (
+                  <Check className="mr-2 size-4" />
+                )}
+                {commitResumable && !isCommitting ? "Tiep tuc cat clip" : "Cat clip & dua vao thu vien"} ({keptTotal})
               </Button>
             </div>
           </CardContent>

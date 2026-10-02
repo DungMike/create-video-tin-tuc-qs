@@ -101,6 +101,11 @@ class Config:
     CLIP_EXPECTED_PIX_FMT = os.getenv("CLIP_EXPECTED_PIX_FMT", "yuv420p")
     CLIP_EXPECTED_COLOR_RANGE = os.getenv("CLIP_EXPECTED_COLOR_RANGE", "tv")
     CLIP_EXPECTED_COLOR_SPACE = os.getenv("CLIP_EXPECTED_COLOR_SPACE", "bt709")
+    # true = render bo qua han buoc ffprobe kiem tra clip (filter_valid_clips), lay
+    # thang moi clip trong thu vien. Chi bat khi thu vien da sach (vd khoi phuc tu du
+    # lieu cu): mot clip lech spec lot vao se lam hong overlay GPU giua chung.
+    # Quet/chuan hoa thu vien (normalize) van probe nhu cu.
+    STORY_SKIP_CLIP_SPEC_CHECK = os.getenv("STORY_SKIP_CLIP_SPEC_CHECK", "false").strip().lower() in ("1", "true", "yes", "on")
     # Primaries/transfer aren't part of the render's exclusion check, but every clip
     # written by src/utils/clip_canonical.py is tagged with them so the whole library
     # carries one identical VUI. See src/utils/clip_canonical.py.
@@ -109,6 +114,15 @@ class Config:
 
     # Storage (STORAGE_DIR itself is defined at the top of the class)
     OUTPUT_DIR = os.getenv("OUTPUT_DIR", os.path.join(STORAGE_DIR, "output"))
+    # O dia chon duoc luc render batch: video ra "<o>:" + phan duong dan cua OUTPUT_DIR
+    # (OUTPUT_DIR=F:/THAI/output, chon E -> E:/THAI/output). Chi hien o nao ton tai
+    # tren may; o mac dinh khong ton tai -> dung chinh o cua OUTPUT_DIR.
+    OUTPUT_DRIVES = [
+        d.strip().rstrip(":").upper()
+        for d in os.getenv("OUTPUT_DRIVES", "E,F").split(",")
+        if d.strip()
+    ]
+    OUTPUT_DEFAULT_DRIVE = os.getenv("OUTPUT_DEFAULT_DRIVE", "E").strip().rstrip(":").upper()
 
     # Web UI
     WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
@@ -166,6 +180,11 @@ class Config:
     # The render no longer trims to it: every clip plays its own full length, so a
     # library can mix clips of different lengths (e.g. 8s video cuts + 3-5s photo clips).
     STORY_CLIP_DURATION = int(os.getenv("STORY_CLIP_DURATION", "3"))
+    # index.json cua mot thu vien bi ghi lai NGUYEN FILE sau moi video nhap vao, nen
+    # thu vien cang lon nhap cang cham (~23 MB index -> 5-15s/video). Luong cat thu
+    # vien hang loat (bulk harvest commit) tu mo thu vien "<ten> v2", "v3"... khi
+    # thu vien dich cham nguong nay. 0 = tat.
+    STORY_LIBRARY_ROLLOVER_CLIPS = int(os.getenv("STORY_LIBRARY_ROLLOVER_CLIPS", "20000"))
     # Thu vien clip tu anh: moi anh nhan mot do dai NGAU NHIEN trong [MIN, MAX] giay,
     # doc lap voi STORY_CLIP_DURATION (luong cat video) -- render phat du do dai tung clip.
     STORY_IMAGE_CLIP_DURATION_MIN = float(os.getenv("STORY_IMAGE_CLIP_DURATION_MIN", "3"))
@@ -288,6 +307,16 @@ class Config:
     STORY_EDIT_STYLE_DIR = os.path.join(STORAGE_DIR, "story_edit_styles")
     # Font bundled with the app (OFL), copied into STORY_FONTS_DIR on first use so libass finds them.
     STORY_BUNDLED_FONTS_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
+
+    # --- Trang tai YouTube (MP3/MP4), src/utils/youtube_downloader.py ---
+    YOUTUBE_DOWNLOAD_DIR = os.getenv("YOUTUBE_DOWNLOAD_DIR", os.path.join(STORAGE_DIR, "youtube_downloads"))
+    YOUTUBE_MP3_BITRATE = os.getenv("YOUTUBE_MP3_BITRATE", "192k")
+    # Thu lan luot tung player client cua yt-dlp. Client mac dinh (android_vr) hien bi
+    # YouTube tra 403 khi tai; web_embedded (can node/deno + goi yt-dlp-ejs) van tai duoc.
+    # "default" = de yt-dlp tu chon, dung lam phuong an cuoi (vd. video chan nhung).
+    YOUTUBE_PLAYER_CLIENTS = [
+        c.strip() for c in os.getenv("YOUTUBE_PLAYER_CLIENTS", "web_embedded,default").split(",") if c.strip()
+    ]
 
     # --- Story TV Noise Overlay ---
     STORY_TV_NOISE_OVERLAY_DIR = os.path.join(STORAGE_DIR, "story_tv_noise_overlays")

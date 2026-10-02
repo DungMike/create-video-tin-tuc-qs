@@ -100,6 +100,65 @@ def _is_within(child: str, parent: str) -> bool:
         return False
 
 
+_OUTPUT_DRIVE_PREFIX_RE = re.compile(r"^output_([A-Za-z])(?:/|$)")
+
+
+def _normalize_drive(drive: str) -> str:
+    letter = (drive or "").strip().rstrip(":").rstrip("/\\").upper()
+    return letter if len(letter) == 1 and letter.isalpha() else ""
+
+
+def output_root(drive: str = "") -> str:
+    """Absolute output root on ``drive`` (a letter such as "E").
+
+    The root is OUTPUT_DIR moved to that drive: OUTPUT_DIR=F:/THAI/output and
+    drive E give E:/THAI/output. No drive (or the OUTPUT_DIR's own) -> OUTPUT_DIR.
+    """
+    base = os.path.abspath(Config.OUTPUT_DIR)
+    letter = _normalize_drive(drive)
+    base_drive, tail = os.path.splitdrive(base)
+    if not letter or not base_drive or base_drive.rstrip(":").upper() == letter:
+        return base
+    return os.path.normpath(f"{letter}:{tail}")
+
+
+def output_drive_options() -> dict:
+    """Drives a batch may write its videos to, with free space, plus the default."""
+    base_drive = os.path.splitdrive(os.path.abspath(Config.OUTPUT_DIR))[0].rstrip(":").upper()
+    letters = [d for d in (_normalize_drive(x) for x in Config.OUTPUT_DRIVES) if d]
+    if base_drive and base_drive not in letters:
+        letters.append(base_drive)
+    drives = []
+    for letter in sorted(set(letters)):
+        if not os.path.isdir(f"{letter}:/"):
+            continue
+        try:
+            usage = shutil.disk_usage(f"{letter}:/")
+            free, total = usage.free, usage.total
+        except OSError:
+            free = total = 0
+        drives.append({
+            "drive": letter,
+            "outputDir": output_root(letter).replace("\\", "/"),
+            "freeBytes": free,
+            "totalBytes": total,
+        })
+    available = {d["drive"] for d in drives}
+    default = _normalize_drive(Config.OUTPUT_DEFAULT_DRIVE)
+    if default not in available:
+        default = base_drive if base_drive in available else (drives[0]["drive"] if drives else "")
+    return {"drives": drives, "defaultDrive": default}
+
+
+def resolve_output_drive(drive: str) -> str:
+    """Validated drive letter for a new batch; "" -> the default. Raises ValueError."""
+    options = output_drive_options()
+    letter = _normalize_drive(drive) or options["defaultDrive"]
+    if options["drives"] and letter not in {d["drive"] for d in options["drives"]}:
+        raise ValueError(f"O dia {drive!r} khong ton tai hoac khong duoc phep.")
+    return letter
+
+
 def storage_relative_path(abs_path: str) -> str:
     """Convert an absolute path to a path servable via the /media/ route.
 
@@ -117,10 +176,19 @@ def storage_relative_path(abs_path: str) -> str:
     if _is_within(abs_norm, storage_root):
         return os.path.relpath(abs_norm, storage_root).replace("\\", "/")
 
-    output_root = os.path.abspath(Config.OUTPUT_DIR)
-    if _is_within(abs_norm, output_root):
-        rel = os.path.relpath(abs_norm, output_root).replace("\\", "/")
+    base_output_root = os.path.abspath(Config.OUTPUT_DIR)
+    if _is_within(abs_norm, base_output_root):
+        rel = os.path.relpath(abs_norm, base_output_root).replace("\\", "/")
         return "output" if rel == "." else f"output/{rel}"
+
+    # Output on another drive (batch rendered to a chosen drive): "output_E/...".
+    abs_drive = _normalize_drive(os.path.splitdrive(abs_norm)[0])
+    if abs_drive:
+        drive_root = output_root(abs_drive)
+        if drive_root != base_output_root and _is_within(abs_norm, drive_root):
+            rel = os.path.relpath(abs_norm, drive_root).replace("\\", "/")
+            prefix = f"output_{abs_drive}"
+            return prefix if rel == "." else f"{prefix}/{rel}"
 
     story_raw_root = os.path.abspath(Config.STORY_RAW_DIR)
     if _is_within(abs_norm, story_raw_root):
@@ -144,6 +212,10 @@ def storage_absolute_path(rel_path: str) -> str:
     if norm == "output" or norm.startswith("output/"):
         sub = norm[len("output"):].lstrip("/")
         return os.path.normpath(os.path.join(os.path.abspath(Config.OUTPUT_DIR), sub))
+    drive_match = _OUTPUT_DRIVE_PREFIX_RE.match(norm)
+    if drive_match:
+        sub = norm[len(drive_match.group(0)):].lstrip("/")
+        return os.path.normpath(os.path.join(output_root(drive_match.group(1)), sub))
     if norm == "story_raw" or norm.startswith("story_raw/"):
         sub = norm[len("story_raw"):].lstrip("/")
         return os.path.normpath(os.path.join(os.path.abspath(Config.STORY_RAW_DIR), sub))

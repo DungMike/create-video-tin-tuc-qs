@@ -224,7 +224,16 @@ def filter_valid_clips(
     StoryVideoPipelineRunner._select_clips builds internally. Returns
     (kept_candidates, excluded_absolute_paths). Uses a per-library on-disk cache
     (path + mtime + schema-version keyed) so unchanged clips are never re-probed.
+
+    With Config.STORY_SKIP_CLIP_SPEC_CHECK every candidate is kept unprobed.
     """
+    if Config.STORY_SKIP_CLIP_SPEC_CHECK:
+        logger.info(
+            f"[ClipSpecValidation] STORY_SKIP_CLIP_SPEC_CHECK on: keeping all "
+            f"{len(candidates)} clips in {library_dir} without probing"
+        )
+        return list(candidates), []
+
     specs = probe_specs_cached(
         library_dir, [path for path, _duration in candidates], max_workers=max_workers
     )

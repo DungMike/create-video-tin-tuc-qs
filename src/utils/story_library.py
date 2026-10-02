@@ -692,6 +692,79 @@ def set_library_metadata(library_id, **fields) -> dict:
         return target
 
 
+# --------------------------------------------------------------------------- #
+# Phien ban thu vien: "<ten>", "<ten> v2", "<ten> v3"...
+# --------------------------------------------------------------------------- #
+# index.json bi ghi lai nguyen file sau moi lan nhap clip, nen nhap vao thu vien
+# lon cham dan. Luong nhap hang loat chia sang thu vien "<ten> vN" moi khi thu vien
+# dang nhap cham nguong (Config.STORY_LIBRARY_ROLLOVER_CLIPS).
+_VERSION_SUFFIX_RE = re.compile(r"^(.*\S)\s+v(\d+)$", re.IGNORECASE)
+
+# Field cua thu vien goc KHONG chep sang ban vN: dinh danh + trang thai bake/normalize
+# cua rieng thu vien goc. Moi field con lai (style, clipDuration, ...) duoc chep de
+# clip moi trong vN duoc cat/bake giong het thu vien goc.
+_VERSION_SKIP_FIELDS = {"id", "name", "isDefault", "createdAt", "updatedAt", "versionOf"}
+_VERSION_SKIP_PREFIXES = ("bake", "normalize")
+
+
+def _split_version(name: str) -> tuple[str, int]:
+    """``"16-20 abc v3"`` -> ``("16-20 abc", 3)``; khong co hau to -> version 1."""
+    match = _VERSION_SUFFIX_RE.match(str(name or "").strip())
+    if match:
+        return match.group(1), int(match.group(2))
+    return str(name or "").strip(), 1
+
+
+def library_version_family(library_id) -> list[dict]:
+    """Thu vien goc + moi ban vN cua no, xep theo version tang dan."""
+    record = get_library(library_id)
+    if not record:
+        return []
+    base, _ = _split_version(record.get("name"))
+    family = []
+    for lib in load_libraries():
+        lib_base, version = _split_version(lib.get("name"))
+        if lib_base.lower() == base.lower():
+            family.append((version, lib))
+    family.sort(key=lambda pair: pair[0])
+    return [lib for _, lib in family]
+
+
+def resolve_rollover_library(library_id, limit: int | None = None) -> str:
+    """Thu vien nen nhap clip tiep theo: ban moi nhat cua ho thu vien, con cho.
+
+    Ban moi nhat (version lon nhat) da cham ``limit`` clip -> tao ban ``v{N+1}``
+    chep cau hinh cua thu vien goc. ``limit`` <= 0 tat tinh nang, tra ve nguyen
+    ``library_id``.
+    """
+    threshold = Config.STORY_LIBRARY_ROLLOVER_CLIPS if limit is None else int(limit)
+    if threshold <= 0 or not get_library(library_id):
+        return str(library_id)
+
+    with _registry_lock:
+        family = library_version_family(library_id)
+        latest = family[-1]
+        if count_library_clips(latest.get("id")) < threshold:
+            return str(latest.get("id"))
+
+        base_record = family[0]
+        base_name, _ = _split_version(latest.get("name"))
+        _, latest_version = _split_version(latest.get("name"))
+        new_record = create_library(f"{base_name} v{latest_version + 1}")
+        extra = {
+            key: value
+            for key, value in base_record.items()
+            if key not in _VERSION_SKIP_FIELDS and not key.startswith(_VERSION_SKIP_PREFIXES)
+        }
+        extra["versionOf"] = base_record.get("id")
+        new_record = set_library_metadata(new_record["id"], **extra)
+        logger.info(
+            f"[Library] {latest.get('id')} cham {threshold} clip -> "
+            f"mo thu vien moi {new_record['id']} ({new_record['name']})"
+        )
+        return str(new_record["id"])
+
+
 def is_styled_library(library_id=None) -> bool:
     """True when the resolved library is a pre-baked "styled" library.
 

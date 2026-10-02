@@ -66,6 +66,12 @@ _HARVEST_STALE_SECONDS = 600
 _job_locks_guard = threading.Lock()
 _job_locks: dict[str, threading.RLock] = {}
 
+# job_id -> session_id cua luot commit dang chay TRONG process nay. Thread commit la
+# daemon: restart web app la no mat, nen progress.json con "running" ma khong co
+# entry o day nghia la luot commit da chet -> hien la "interrupted", cho chay tiep.
+_active_commits: dict[str, str] = {}
+_active_commits_lock = threading.Lock()
+
 
 def _utc_now() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -132,6 +138,14 @@ def _cancel_path(job_id: str) -> str:
     return os.path.join(_job_dir(job_id), "cancel.requested")
 
 
+def _commit_pause_path(job_id: str) -> str:
+    return os.path.join(_job_dir(job_id), "commit_pause.requested")
+
+
+def _commit_log_path(job_id: str) -> str:
+    return os.path.join(_job_dir(job_id), "commit_status.log")
+
+
 # --------------------------------------------------------------------------- #
 # Doc / ghi state
 # --------------------------------------------------------------------------- #
@@ -144,6 +158,12 @@ def load_harvest_manifest(job_id: str) -> dict:
     if not isinstance(data, dict):
         return {"jobId": job_id, "items": []}
     data.setdefault("items", [])
+    overrides = _read_commit_log(job_id)
+    if overrides:
+        for item in data["items"]:
+            status = overrides.get(item.get("itemId"))
+            if status:
+                item["status"] = status
     # Manifest cu (truoc khi storage_relative_path biet toi STORY_RAW_DIR) luu
     # duong dan tuyet doi khi STORY_RAW_DIR nam ngoai STORAGE_DIR, khien
     # previewPath thanh "/media/D:/..." va <video> khong phat duoc. Tinh lai theo
@@ -165,6 +185,49 @@ def _save_progress(job_id: str, progress: dict):
 
 def _save_manifest(job_id: str, manifest: dict):
     _save_json(_manifest_path(job_id), manifest)
+
+
+# Luot commit doi status tung video. Manifest cua mot dot tai lon (~10k video) nang
+# vai MB, ghi lai nguyen file sau moi video ton ngang buoc cat. Nen status moi duoc
+# ghi NOI TIEP vao commit_status.log (1 dong/video), va load_harvest_manifest luon
+# ap log len manifest -> moi noi doc van thay status moi nhat. Cu
+# _COMMIT_LOG_FLUSH_EVERY video thi gop log vao manifest roi xoa log (lam lai khi
+# crash giua chung van dung vi ap log la idempotent).
+_COMMIT_LOG_FLUSH_EVERY = 25
+
+
+def _read_commit_log(job_id: str) -> dict[str, str]:
+    path = os.path.join(_jobs_root(), job_id, "commit_status.log")
+    if not os.path.isfile(path):
+        return {}
+    overrides: dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as file_obj:
+            for line in file_obj:
+                item_id, _, status = line.rstrip("\n").partition("\t")
+                if item_id and status:
+                    overrides[item_id] = status
+    except OSError as exc:
+        logger.warning(f"[Harvest] {job_id}: khong doc duoc commit log: {exc}")
+    return overrides
+
+
+def _append_commit_status(job_id: str, item_id: str, status: str):
+    with _job_lock(job_id):
+        with open(_commit_log_path(job_id), "a", encoding="utf-8") as file_obj:
+            file_obj.write(f"{item_id}\t{status}\n")
+
+
+def _flush_commit_log(job_id: str) -> int:
+    """Gop commit log vao manifest; tra ve so video con "kept"."""
+    with _job_lock(job_id):
+        manifest = load_harvest_manifest(job_id)
+        _save_manifest(job_id, manifest)
+        try:
+            os.remove(_commit_log_path(job_id))
+        except OSError:
+            pass
+        return sum(1 for item in manifest["items"] if item.get("status") == "kept")
 
 
 def is_harvest_cancel_requested(job_id: str) -> bool:
@@ -221,6 +284,7 @@ def list_harvest_jobs() -> list[dict]:
         progress["keptItems"] = sum(1 for item in items if item.get("status") == "kept")
         progress["totalItems"] = len(items)
         progress["stale"] = is_harvest_stale(progress)
+        with_commit_state(job_id, progress)
         jobs.append(progress)
 
     jobs.sort(key=lambda job: job.get("startedAt", ""), reverse=True)
@@ -605,6 +669,60 @@ def delete_harvest_items(job_id: str, item_ids: list[str] | None = None, *, dele
     return {"deletedCount": deleted, "failedItemIds": failed, "remainingCount": remaining}
 
 
+def is_commit_active(job_id: str) -> bool:
+    with _active_commits_lock:
+        return job_id in _active_commits
+
+
+def with_commit_state(job_id: str, progress: dict) -> dict:
+    """Doi ``commitStatus`` "running"/"pausing" cua thread da chet thanh "interrupted"."""
+    if progress.get("commitStatus") in {"running", "pausing"} and not is_commit_active(job_id):
+        progress["commitStatus"] = "interrupted"
+    return progress
+
+
+def _update_commit_state(job_id: str, **fields):
+    with _job_lock(job_id):
+        progress = load_harvest_progress(job_id)
+        if not progress:
+            return
+        progress.update(fields)
+        _save_progress(job_id, progress)
+
+
+def request_commit_pause(job_id: str) -> dict | None:
+    """Dung luot commit sau khi cat xong video dang lam; ``commit`` lai de chay tiep."""
+    progress = load_harvest_progress(job_id)
+    if not progress:
+        return None
+    if is_commit_active(job_id):
+        with open(_commit_pause_path(job_id), "w", encoding="utf-8") as file_obj:
+            file_obj.write(_utc_now())
+        _update_commit_state(job_id, commitStatus="pausing")
+    return with_commit_state(job_id, load_harvest_progress(job_id) or progress)
+
+
+def mark_commit_failed(job_id: str):
+    """Luot commit nem exception: gop log (giu cac video da cat) + ghi status."""
+    _flush_commit_log(job_id)
+    _update_commit_state(job_id, commitStatus="failed")
+
+
+def claim_commit(job_id: str, session_id: str) -> bool:
+    """Giu cho luot commit cua job; False neu job dang co luot commit khac."""
+    with _active_commits_lock:
+        if job_id in _active_commits:
+            return False
+        _active_commits[job_id] = session_id
+        return True
+
+
+def release_commit(job_id: str, session_id: str):
+    with _active_commits_lock:
+        if _active_commits.get(job_id) == session_id:
+            _active_commits.pop(job_id, None)
+
+
 def commit_harvest_job(
     job_id: str,
     *,
@@ -612,28 +730,71 @@ def commit_harvest_job(
     session_id: str,
     progress_callback=None,
     delete_staging: bool = True,
-) -> list[dict]:
+) -> dict:
     """Cat clip + nhap thu vien cho cac video con giu lai.
 
     Tai su dung nguyen `split_into_clips` + `_ingest_clips` cua luong import cu,
     nen thu vien da bake van tu dong bake lai clip moi.
+
+    - Tam dung: `request_commit_pause` dat marker, vong lap dung truoc video ke
+      tiep. Video chua cat van "kept" nen goi lai ham nay la chay tiep.
+    - Chia thu vien: khi thu vien dang nhap cham Config.STORY_LIBRARY_ROLLOVER_CLIPS
+      clip thi chuyen sang "<ten> v2", "v3"... (xem story_library.resolve_rollover_library).
+
+    Tra ve ``{"added": [...], "paused": bool, "libraryIds": [...]}``.
     """
+    from src.utils.story_library import count_library_clips, resolve_rollover_library
+
+    try:
+        os.remove(_commit_pause_path(job_id))
+    except OSError:
+        pass
+
     with _job_lock(job_id):
         manifest = load_harvest_manifest(job_id)
         pending = [item for item in manifest["items"] if item.get("status") == "kept"]
 
     job_tags = (load_harvest_progress(job_id) or {}).get("tags") or []
-    clip_duration = _target_clip_duration(library_id)
+    rollover_limit = Config.STORY_LIBRARY_ROLLOVER_CLIPS
+    target_id = resolve_rollover_library(library_id)
+    target_count = count_library_clips(target_id)
+    used_library_ids = [target_id]
+    clip_duration = _target_clip_duration(target_id)
     all_added: list[dict] = []
     total = len(pending)
+    paused = False
+
+    _update_commit_state(
+        job_id,
+        commitStatus="running",
+        commitSessionId=session_id,
+        commitLibraryId=library_id,
+        commitTargetLibraryId=target_id,
+        commitCurrent=0,
+        commitTotal=total,
+        commitStartedAt=_utc_now(),
+    )
 
     for index, item in enumerate(pending):
+        if os.path.isfile(_commit_pause_path(job_id)):
+            paused = True
+            break
+
+        if rollover_limit > 0 and target_count >= rollover_limit:
+            target_id = resolve_rollover_library(library_id)
+            target_count = count_library_clips(target_id)
+            clip_duration = _target_clip_duration(target_id)
+            if target_id not in used_library_ids:
+                used_library_ids.append(target_id)
+            _update_commit_state(job_id, commitTargetLibraryId=target_id)
+
         video_path = os.path.join(staging_dir(job_id), item.get("filename") or "")
         provider = item.get("provider") or "direct"
         keyword = item.get("keyword") or ""
 
         if not os.path.isfile(video_path):
             logger.warning(f"[Harvest] {job_id}: missing staged file {video_path}")
+            _append_commit_status(job_id, item.get("itemId"), "missing")
             continue
 
         if progress_callback:
@@ -648,7 +809,7 @@ def commit_harvest_job(
         if clips:
             clip_tags = [provider, f"session:{session_id}", f"keyword:{keyword}", *job_tags]
             added = _ingest_clips(
-                clips, provider, clip_tags, library_id=library_id,
+                clips, provider, clip_tags, library_id=target_id,
                 session_id=session_id, progress_callback=progress_callback,
                 current=index + 1, total=total,
                 source_ref=provider_item_source_ref(
@@ -656,27 +817,42 @@ def commit_harvest_job(
                 ),
             )
             all_added.extend(added)
+            target_count += len(added)
 
-        with _job_lock(job_id):
-            manifest = load_harvest_manifest(job_id)
-            for entry in manifest["items"]:
-                if entry.get("itemId") == item.get("itemId"):
-                    entry["status"] = "committed"
-                    break
-            _save_manifest(job_id, manifest)
+        _append_commit_status(job_id, item.get("itemId"), "committed")
+        if (index + 1) % _COMMIT_LOG_FLUSH_EVERY == 0:
+            _flush_commit_log(job_id)
+        _update_commit_state(job_id, commitCurrent=index + 1, commitRemaining=total - index - 1)
 
-    if delete_staging:
-        _clear_staging(job_id)
+    remaining = _flush_commit_log(job_id)
+    try:
+        os.remove(_commit_pause_path(job_id))
+    except OSError:
+        pass
+
+    if paused:
+        _update_commit_state(job_id, commitStatus="paused", commitRemaining=remaining)
+        message = (
+            f"Da tam dung sau {index}/{total} video ({len(all_added)} clip). "
+            f"Bam Tiep tuc de cat not."
+        )
+    else:
+        _update_commit_state(
+            job_id, commitStatus="completed", commitRemaining=remaining, commitFinishedAt=_utc_now(),
+        )
+        if delete_staging and remaining == 0:
+            _clear_staging(job_id)
+        message = f"Hoan tat! Da them {len(all_added)} clip tu {total} video."
 
     if progress_callback:
         progress_callback({
-            "stage": "complete",
-            "current": total,
+            "stage": "paused" if paused else "complete",
+            "current": index if paused else total,
             "total": total,
-            "message": f"Hoan tat! Da them {len(all_added)} clip tu {total} video.",
+            "message": message,
         })
 
-    return all_added
+    return {"added": all_added, "paused": paused, "libraryIds": used_library_ids}
 
 
 def _clear_staging(job_id: str):

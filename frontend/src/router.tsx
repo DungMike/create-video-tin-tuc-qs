@@ -3,6 +3,7 @@ import { createBrowserRouter, Navigate } from "react-router-dom";
 import { StoryEditStylesPage } from "@/pages/StoryEditStylesPage";
 import { StoryVideoPage } from "@/pages/StoryVideoPage";
 import { StoryVideoSettingsPage } from "@/pages/StoryVideoSettingsPage";
+import { YoutubeDownloadPage } from "@/pages/YoutubeDownloadPage";
 
 export const router = createBrowserRouter([
   {
@@ -16,6 +17,10 @@ export const router = createBrowserRouter([
   {
     path: "/story-video/edit-styles",
     element: <StoryEditStylesPage />,
+  },
+  {
+    path: "/youtube-download",
+    element: <YoutubeDownloadPage />,
   },
   // Cac luong cu (upload/review/batch-pipeline/news-bulletin/...) da bi go bo.
   // Moi URL khac deu quay ve trang chinh thay vi tra ra trang trang.
