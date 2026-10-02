@@ -6,6 +6,11 @@ lan tim dau, vi doi no giua chung lam lech ranh gioi trang (trang 3 x 80 khong c
 la trang 3 x 200). Chi ``reset_cursor`` hoac doi ``query_signature`` (bo loc gui
 len API) moi bat dau lai tu trang 1 voi ``per_page`` mac dinh.
 
+Che do quet sau them con tro cho tung bien the bo loc cua tu khoa
+(``image_clip_search.query_variants``): ``_id = "<provider>:<tu khoa>|<bien the>"``
+kem truong ``variant``. Con tro goc KHONG co truong ``variant`` -- giu nguyen
+``_id`` va hinh dang cu.
+
 ``source_images`` -- ``_id = "<provider>-photo:<id>"``, cung la ``source_key`` cua
 clip tao tu anh (``src.utils.clip_identity``). Chong trung TOAN HE THONG: anh da
 ``staged`` / ``rejected`` / ``committed`` khong bao gio duoc tai lai.
@@ -30,9 +35,13 @@ from src.db.keyword_repo import normalize_keyword, normalize_provider
 
 PROVIDERS = ("pixabay", "pexels")
 DEFAULT_PER_PAGE = {"pexels": 80, "pixabay": 200}
-# Pixabay chi cho truy cap toi da 500 ket qua moi truy van (totalHits).
-RESULT_CAP = {"pixabay": 500}
+# So ket qua dau moi truy van API cho truy cap. Pixabay: 500 (totalHits). Pexels:
+# 480 -- ``total_results`` bao toi 8000 nhung tu vi tri 481 tro di trang rong (do
+# that 2026-09-29, "forest"/"bangkok street", per_page 20/50/80 deu dung o 480).
+RESULT_CAP = {"pixabay": 500, "pexels": 480}
 PAGE_LOG_LIMIT = 200
+# Bien the da quet het ma lieu nay la da doc tron tap ket qua (khong bi chan).
+_COMPLETE_REASONS = ("last_page", "no_next_page", "empty_page", "no_results", "out_of_range")
 
 PHOTO_STATUSES = ("staged", "rejected", "committed", "discarded", "failed")
 # Anh o cac trang thai nay khong duoc tai lai (discarded/failed thi duoc).
@@ -74,8 +83,9 @@ def _db():
 # --------------------------------------------------------------------------- #
 # Con tro phan trang
 # --------------------------------------------------------------------------- #
-def cursor_id(provider, keyword) -> str:
-    return f"{normalize_provider(provider)}:{normalize_keyword(keyword)}"
+def cursor_id(provider, keyword, variant: str = "") -> str:
+    base = f"{normalize_provider(provider)}:{normalize_keyword(keyword)}"
+    return f"{base}|{variant}" if variant else base
 
 
 def photo_key(provider, photo_id) -> str:
@@ -98,8 +108,43 @@ def compute_max_page(provider, total, per_page) -> int:
     return math.ceil(reachable / per_page) if reachable > 0 else 0
 
 
-def get_cursor(provider, keyword) -> dict | None:
-    return _db()[mongo.IMAGE_SEARCH_CURSORS].find_one({"_id": cursor_id(provider, keyword)})
+def get_cursor(provider, keyword, variant: str = "") -> dict | None:
+    return _db()[mongo.IMAGE_SEARCH_CURSORS].find_one({"_id": cursor_id(provider, keyword, variant)})
+
+
+def get_variant_cursors(provider, keyword) -> dict[str, dict]:
+    """``{bien the: doc}`` cua mot tu khoa, ca con tro goc (khoa ``""``)."""
+    docs = _db()[mongo.IMAGE_SEARCH_CURSORS].find({
+        "provider": normalize_provider(provider), "normalized": normalize_keyword(keyword),
+    })
+    return {str(doc.get("variant") or ""): doc for doc in docs}
+
+
+def cursor_covers_all(doc: dict | None, provider, signature: str) -> bool:
+    """Con tro da doc TRON tap ket qua cua truy van (khong bi tran API chan)?
+
+    Khi do moi bien the them bo loc cua no deu la tap con: quet them chi ton request.
+    """
+    if not doc or doc.get("query_signature") != signature or not doc.get("exhausted"):
+        return False
+    reason = doc.get("exhausted_reason")
+    if reason == "covered":
+        return True
+    if reason not in _COMPLETE_REASONS:
+        return False
+    provider = normalize_provider(provider)
+    cap = RESULT_CAP.get(provider)
+    matches = doc.get("total_matches")
+    if matches is None:
+        # Con tro cu chua co total_matches: Pexels total_results chinh la no; Pixabay
+        # totalHits = min(total, 500) nen chi chac khi con duoi tran.
+        total = doc.get("total_results")
+        if total is not None and (provider == "pexels" or (cap and int(total) < cap)):
+            matches = total
+    try:
+        return matches is not None and (not cap or int(matches) <= cap)
+    except (TypeError, ValueError):
+        return False
 
 
 def get_cursors(provider, keywords) -> dict[str, dict]:
@@ -124,7 +169,8 @@ def start_position(doc: dict | None, provider, signature: str) -> dict:
     return {"page": page, "per_page": per_page, "fresh": False, "exhausted": bool(doc.get("exhausted"))}
 
 
-def _cursor_update(provider, keyword, set_fields: dict, inc: dict | None = None, log_entry: dict | None = None):
+def _cursor_update(provider, keyword, set_fields: dict, inc: dict | None = None, log_entry: dict | None = None,
+                   variant: str = ""):
     now = _now()
     update: dict = {
         "$setOnInsert": {
@@ -133,6 +179,7 @@ def _cursor_update(provider, keyword, set_fields: dict, inc: dict | None = None,
             "keyword": str(keyword).strip(),
             "first_searched_at": now,
             "schema_version": mongo.SCHEMA_VERSION,
+            **({"variant": variant} if variant else {}),
         },
         "$set": {**set_fields, "last_searched_at": now},
     }
@@ -158,11 +205,15 @@ def record_page(
     has_next: bool | None = None,
     new_run: bool = False,
     job_id: str | None = None,
+    variant: str = "",
+    total_matches: int | None = None,
 ) -> dict:
     """Ghi ket qua mot trang vua tim. Tra ve ``{next_page, max_page, exhausted, reason}``.
 
     ``page_done`` = da xu ly het trang. Dung giua trang (du so anh, huy, het dia)
     thi ``next_page`` giu nguyen trang do: lan sau tai lai trang va bo id da biet.
+    ``variant`` = bien the bo loc (con tro rieng); ``total_matches`` = tong anh khop
+    truy van, khong bi tran API chan (de biet bien the sau co thua khong).
     """
     page = max(1, int(page))
     per_page = max(1, int(per_page))
@@ -191,6 +242,8 @@ def record_page(
         "exhausted_reason": reason,
         "last_job_id": job_id,
     }
+    if total_matches is not None:
+        set_fields["total_matches"] = max(0, int(total_matches))
     inc = {
         "pages_fetched": 1,
         "requests": 1,
@@ -201,14 +254,15 @@ def record_page(
     }
     log_entry = {"page": page, "per_page": per_page, "raw": raw_count, "accepted": int(accepted or 0)}
     _db()[mongo.IMAGE_SEARCH_CURSORS].update_one(
-        {"_id": cursor_id(provider, keyword)},
-        _cursor_update(provider, keyword, set_fields, inc, log_entry),
+        {"_id": cursor_id(provider, keyword, variant)},
+        _cursor_update(provider, keyword, set_fields, inc, log_entry, variant=variant),
         upsert=True,
     )
     return {"next_page": next_page, "max_page": max_page, "exhausted": exhausted, "reason": reason}
 
 
-def record_out_of_range(provider, keyword, *, signature: str, page: int, per_page: int, job_id=None) -> None:
+def record_out_of_range(provider, keyword, *, signature: str, page: int, per_page: int, job_id=None,
+                        variant: str = "") -> None:
     """Provider bao trang vuot pham vi (Pixabay 400 "out of valid range"): het ket qua."""
     set_fields = {
         "query_signature": signature,
@@ -219,16 +273,36 @@ def record_out_of_range(provider, keyword, *, signature: str, page: int, per_pag
         "last_job_id": job_id,
     }
     _db()[mongo.IMAGE_SEARCH_CURSORS].update_one(
-        {"_id": cursor_id(provider, keyword)},
-        _cursor_update(provider, keyword, set_fields, {"requests": 1}),
+        {"_id": cursor_id(provider, keyword, variant)},
+        _cursor_update(provider, keyword, set_fields, {"requests": 1}, variant=variant),
+        upsert=True,
+    )
+
+
+def record_covered(provider, keyword, *, signature: str, variant: str, covered_by: str, job_id=None) -> None:
+    """Bien the la tap con cua mot truy van da doc tron (``covered_by``): chot la het
+    ma khong ton request nao."""
+    set_fields = {
+        "query_signature": signature,
+        "per_page": default_per_page(provider),
+        "next_page": 1,
+        "exhausted": True,
+        "exhausted_reason": "covered",
+        "covered_by": covered_by,
+        "last_job_id": job_id,
+    }
+    _db()[mongo.IMAGE_SEARCH_CURSORS].update_one(
+        {"_id": cursor_id(provider, keyword, variant)},
+        _cursor_update(provider, keyword, set_fields, variant=variant),
         upsert=True,
     )
 
 
 def reset_cursor(provider, keyword) -> bool:
-    """Lan sau tim lai tu trang 1 (per_page mac dinh). Giu lich su va id anh."""
-    result = _db()[mongo.IMAGE_SEARCH_CURSORS].update_one(
-        {"_id": cursor_id(provider, keyword)},
+    """Lan sau tim lai tu trang 1 (per_page mac dinh), ca moi bien the cua tu khoa.
+    Giu lich su va id anh."""
+    result = _db()[mongo.IMAGE_SEARCH_CURSORS].update_many(
+        {"provider": normalize_provider(provider), "normalized": normalize_keyword(keyword)},
         {"$set": {
             "query_signature": None,
             "next_page": 1,
@@ -241,7 +315,8 @@ def reset_cursor(provider, keyword) -> bool:
 
 
 def list_cursors(provider: str | None = None, query: str | None = None, limit: int = 500) -> list[dict]:
-    flt: dict = {}
+    """Con tro GOC cua cac tu khoa (bien the tom tat rieng: ``variant_summaries``)."""
+    flt: dict = {"variant": {"$exists": False}}
     if provider:
         flt["provider"] = normalize_provider(provider)
     text = normalize_keyword(query or "")
@@ -251,10 +326,39 @@ def list_cursors(provider: str | None = None, query: str | None = None, limit: i
     return list(docs)
 
 
-def serialize_cursor(doc: dict | None, signature: str | None = None) -> dict | None:
+def variant_summaries(docs, signature: str | None = None) -> dict[str, dict]:
+    """``{_id con tro goc: tong hop cac bien the}`` cho ``docs`` (con tro goc)."""
+    by_base = {cursor_id(doc.get("provider"), doc.get("normalized")): doc for doc in docs}
+    if not by_base:
+        return {}
+    normalized = list({str(doc.get("normalized") or "") for doc in by_base.values()})
+    summaries: dict[str, dict] = {}
+    projection = {"provider": 1, "normalized": 1, "exhausted": 1, "query_signature": 1, "requests": 1,
+                  "photos_accepted": 1, "photos_rejected": 1}
+    variant_docs = _db()[mongo.IMAGE_SEARCH_CURSORS].find(
+        {"variant": {"$exists": True}, "normalized": {"$in": normalized}}, projection,
+    )
+    for doc in variant_docs:
+        base_id = cursor_id(doc.get("provider"), doc.get("normalized"))
+        if base_id not in by_base:
+            continue
+        current = signature is None or doc.get("query_signature") == signature
+        summary = summaries.setdefault(base_id, {
+            "swept": 0, "exhausted": 0, "requests": 0, "photosAccepted": 0, "photosRejected": 0,
+        })
+        summary["swept"] += 1
+        summary["exhausted"] += 1 if doc.get("exhausted") and current else 0
+        summary["requests"] += int(doc.get("requests") or 0)
+        summary["photosAccepted"] += int(doc.get("photos_accepted") or 0)
+        summary["photosRejected"] += int(doc.get("photos_rejected") or 0)
+    return summaries
+
+
+def serialize_cursor(doc: dict | None, signature: str | None = None, variants: dict | None = None) -> dict | None:
     if not doc:
         return None
     current = signature is None or doc.get("query_signature") == signature
+    extra = {"variants": variants} if variants is not None else {}
     return {
         "provider": doc.get("provider"),
         "keyword": doc.get("keyword"),
@@ -276,6 +380,7 @@ def serialize_cursor(doc: dict | None, signature: str | None = None) -> dict | N
         "firstSearchedAt": _iso(doc.get("first_searched_at")),
         "lastSearchedAt": _iso(doc.get("last_searched_at")),
         "lastJobId": doc.get("last_job_id"),
+        **extra,
     }
 
 
@@ -309,6 +414,8 @@ _PHOTO_META_FIELDS = {
     "height": "height",
     "downloadUrl": "download_url",
     "thumbnailUrl": "thumbnail_url",
+    # Ban 1280px (key Pixabay chua full access): co full access thi co the tai lai.
+    "lowRes": "low_res",
 }
 
 
