@@ -166,6 +166,10 @@ class TstClient(_HttpClient):
     def jobs(self, project_id: str, story_id: str) -> list[dict]:
         return self._request("GET", "/api/jobs", params={"project": project_id, "story": story_id}) or []
 
+    def all_jobs(self) -> list[dict]:
+        """Moi job cua studio (ca job nguoi chay tay), moi nhat truoc."""
+        return self._request("GET", "/api/jobs") or []
+
     def job(self, job_id: str, since: int = 0) -> dict | None:
         try:
             return self._request("GET", f"/api/jobs/{job_id}", params={"since": since})

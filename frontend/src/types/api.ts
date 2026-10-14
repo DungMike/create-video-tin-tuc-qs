@@ -1633,3 +1633,38 @@ export interface CreatePipelineRunPayload {
   config: PipelineRunConfig;
   items: { source: string; type: PipelineVideoType; title?: string }[];
 }
+
+export type PipelineGate = "prompts" | "characters";
+
+export interface PipelineReviewCharacter {
+  id: string;
+  name: string;
+  prompt_name?: string;
+  role?: string;
+  description?: string;
+  image: string | null;
+}
+
+export interface PipelineReviewScene {
+  id: number;
+  start: string;
+  end: string;
+  duration?: number;
+  text: string;
+  prompt: string | null;
+  characters: string[];
+  image: string | null;
+}
+
+export interface PipelineReview {
+  gate: PipelineGate;
+  stage: string;
+  status: PipelineItemStatus;
+  counts: { characters: number; scenes: number };
+  setting?: string | null;
+  characters: PipelineReviewCharacter[];
+  scenes: PipelineReviewScene[];
+  tstUrl?: string;
+}
+
+export type PipelineRejectAction = "rerun_ai" | "redo_batches" | "regen_characters" | "manual";

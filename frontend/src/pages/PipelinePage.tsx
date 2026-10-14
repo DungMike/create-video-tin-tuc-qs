@@ -2,10 +2,11 @@ import { useCallback, useState } from "react";
 
 import { AppShell, HeroCard, PageSection } from "@/components/app-shell";
 import { PipelineHealthPanel } from "@/components/pipeline/PipelineHealthPanel";
+import { PipelineReviewDialog } from "@/components/pipeline/PipelineReviewDialog";
 import { PipelineRunForm } from "@/components/pipeline/PipelineRunForm";
 import { PipelineRunDetail, PipelineRunList } from "@/components/pipeline/PipelineRunView";
 import { TopNav } from "@/components/top-nav";
-import type { PipelineRun } from "@/types/api";
+import type { PipelineItem, PipelineRun } from "@/types/api";
 
 const SELECTED_RUN_KEY = "pipeline.selectedRunId";
 
@@ -28,6 +29,8 @@ function storeSelectedRun(runId: string) {
 export function PipelinePage() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(readSelectedRun);
   const [listKey, setListKey] = useState(0);
+  const [reviewTarget, setReviewTarget] = useState<{ run: PipelineRun; item: PipelineItem } | null>(null);
+  const [detailKey, setDetailKey] = useState(0);
 
   const selectRun = useCallback((runId: string) => {
     setSelectedRunId(runId);
@@ -61,10 +64,26 @@ export function PipelinePage() {
           <h2 className="text-lg font-semibold">Lượt chạy</h2>
           <PipelineRunList selectedRunId={selectedRunId} onSelect={selectRun} refreshKey={listKey} />
           {selectedRunId ? (
-            <PipelineRunDetail key={selectedRunId} runId={selectedRunId} onChanged={() => setListKey((key) => key + 1)} />
+            <PipelineRunDetail
+              key={`${selectedRunId}-${detailKey}`}
+              runId={selectedRunId}
+              onChanged={() => setListKey((key) => key + 1)}
+              onReview={(run, item) => setReviewTarget({ run, item })}
+            />
           ) : null}
         </div>
       </PageSection>
+      {reviewTarget ? (
+        <PipelineReviewDialog
+          run={reviewTarget.run}
+          item={reviewTarget.item}
+          onClose={() => setReviewTarget(null)}
+          onDone={() => {
+            setDetailKey((key) => key + 1);
+            setListKey((key) => key + 1);
+          }}
+        />
+      ) : null}
     </AppShell>
   );
 }

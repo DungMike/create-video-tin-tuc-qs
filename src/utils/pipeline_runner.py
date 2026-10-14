@@ -133,6 +133,7 @@ class Context:
     tst: object = None
     lanes_used: dict[str, int] = field(default_factory=dict)
     run_cache: dict = field(default_factory=dict)  # du lieu dung chung trong 1 tick (vd batch SV)
+    acquired_now: set = field(default_factory=set)  # lane item dang xu ly vua xin trong tick nay
 
     @staticmethod
     def lane_limit(lane: str) -> int:
@@ -145,6 +146,10 @@ class Context:
     def can_start(self) -> bool:
         return not self.paused
 
+    def release(self, lane: str) -> None:
+        """Item vua xong job cua chinh no (van dang tinh la 'running' trong lane) tra lai cho."""
+        self.lanes_used[lane] = max(0, self.lanes_used.get(lane, 0) - 1)
+
     def acquire(self, lane: str) -> bool:
         """Xin 1 cho trong lane truoc khi BAT DAU viec moi. False = cho tick sau."""
         if self.paused:
@@ -153,6 +158,7 @@ class Context:
         if used >= self.lane_limit(lane):
             return False
         self.lanes_used[lane] = used + 1
+        self.acquired_now.add(lane)
         return True
 
 
@@ -456,6 +462,12 @@ def process_item(ctx: Context, run: dict, item: dict) -> tuple[dict, list[tuple[
     """
     work = copy.deepcopy(item)
     transitions: list[tuple[str, str, str]] = []
+    # Item dang giu 1 cho trong lane: tra lai truoc, handler tu xin lai neu bat dau viec moi;
+    # neu chi poll job cu (van chay) thi giu lai cho o cuoi ham.
+    held = LANE_OF_STAGE.get(item.get("stage")) if item.get("status") == "running" else None
+    if held:
+        ctx.release(held)
+    ctx.acquired_now = set()
     for _ in range(6):
         before = (work.get("stage"), work.get("status"), work.get("waitingReason"))
         _run_handler(ctx, run, work)
@@ -467,6 +479,9 @@ def process_item(ctx: Context, run: dict, item: dict) -> tuple[dict, list[tuple[
             transitions.append((work.get("stage"), work.get("status"), message))
         if work.get("stage") == before[0] or work.get("status") != "pending":
             break
+    final = LANE_OF_STAGE.get(work.get("stage")) if work.get("status") == "running" else None
+    if final and final not in ctx.acquired_now:
+        ctx.lanes_used[final] = ctx.lanes_used.get(final, 0) + 1
     return work, transitions
 
 
@@ -685,4 +700,4 @@ def retry_item(run_id: str, item_id: str, from_stage: str | None = None) -> dict
 
 
 # Dang ky handler cua tung loai (cac module nay import cac ham o tren).
-from src.utils import pipeline_sv  # noqa: E402,F401
+from src.utils import pipeline_sv, pipeline_type1  # noqa: E402,F401

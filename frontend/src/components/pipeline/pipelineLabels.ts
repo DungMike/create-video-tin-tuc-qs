@@ -1,4 +1,4 @@
-import type { PipelineItemStatus, PipelineRunStatus } from "@/types/api";
+import type { PipelineGate, PipelineItem, PipelineItemStatus, PipelineRunStatus } from "@/types/api";
 
 export const STAGE_LABEL: Record<string, string> = {
   INGEST: "Đọc kịch bản",
@@ -80,3 +80,10 @@ export function formatTime(iso?: string | null) {
 }
 
 export const selectClassName = "h-9 w-full rounded-md border border-input bg-background px-3 text-sm";
+
+/** Cổng duyệt của item (loại 1), null nếu không ở bước duyệt. */
+export function gateOf(item: PipelineItem): PipelineGate | null {
+  if (item.stage === "GATE_PROMPTS") return "prompts";
+  if (item.stage === "GATE_CHARACTERS") return "characters";
+  return null;
+}

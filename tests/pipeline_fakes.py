@@ -104,6 +104,7 @@ class FakeTst:
                        "prompts": {"done": 0, "total": 10}, "built": False,
                        "characters": {"done": 0, "total": 0}, "images": {"done": 0, "total": 0}},
             "characters": [], "segments": [],
+            "paths": {"dir": os.path.join(os.path.dirname(srt_path), "tst", story_id)},
         }
         return self.stories[(project_id, story_id)]
 
@@ -133,6 +134,10 @@ class FakeTst:
     def jobs(self, project_id, story_id):
         self._check()
         return [dict(j, lines=j["lines"][-3:]) for j in reversed(self.jobs_for(project_id, story_id))]
+
+    def all_jobs(self):
+        self._check()
+        return [dict(j, lines=j["lines"][-3:]) for j in reversed(list(self.job_store.values()))]
 
     def job(self, job_id, since=0):
         self._check()

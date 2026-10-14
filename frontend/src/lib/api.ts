@@ -2,7 +2,10 @@ import type {
   ApiErrorPayload,
   CreatePipelineRunPayload,
   PipelineEvent,
+  PipelineGate,
   PipelineHealth,
+  PipelineRejectAction,
+  PipelineReview,
   PipelineRun,
   PipelineRunSummary,
   PipelineScanResult,
@@ -1181,3 +1184,15 @@ export const retryPipelineItem = (runId: string, itemId: string, fromStage?: str
 
 export const cancelPipelineItem = (runId: string, itemId: string) =>
   requestJson<PipelineRun>(`/api/pipeline/runs/${runId}/items/${itemId}/cancel`, jsonPost());
+
+export const getPipelineReview = (runId: string, itemId: string, gate: PipelineGate) =>
+  requestJson<PipelineReview>(`/api/pipeline/runs/${runId}/items/${itemId}/review?gate=${gate}`);
+
+export const approvePipelineItem = (runId: string, itemId: string, gate: PipelineGate) =>
+  requestJson<PipelineRun>(`/api/pipeline/runs/${runId}/items/${itemId}/approve`, jsonPost({ gate }));
+
+export const rejectPipelineItem = (
+  runId: string,
+  itemId: string,
+  body: { gate: PipelineGate; action: PipelineRejectAction; note?: string; batchNos?: number[]; characterIds?: string[] },
+) => requestJson<PipelineRun>(`/api/pipeline/runs/${runId}/items/${itemId}/reject`, jsonPost(body));

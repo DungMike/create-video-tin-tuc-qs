@@ -314,3 +314,43 @@ def pipeline_retry_item(run_id: str, item_id: str):
 @pipeline_bp.route("/api/pipeline/runs/<run_id>/items/<item_id>/cancel", methods=["POST"])
 def pipeline_cancel_item(run_id: str, item_id: str):
     return _action(runner.cancel_item, run_id, item_id)
+
+
+# --- cong duyet (loai 1) -------------------------------------------------------------
+
+@pipeline_bp.route("/api/pipeline/runs/<run_id>/items/<item_id>/review", methods=["GET"])
+def pipeline_review(run_id: str, item_id: str):
+    from src.utils import pipeline_type1
+
+    gate = request.args.get("gate") or "prompts"
+    try:
+        return jsonify(pipeline_type1.review(run_id, item_id, gate))
+    except runner.PipelineError as exc:
+        return _pipeline_error(exc)
+    except (ServiceUnavailable, ServiceError) as exc:
+        return _error(f"Không đọc được truyện từ TST Studio: {exc}", "tst_unavailable", 503)
+
+
+@pipeline_bp.route("/api/pipeline/runs/<run_id>/items/<item_id>/approve", methods=["POST"])
+def pipeline_approve(run_id: str, item_id: str):
+    from src.utils import pipeline_type1
+
+    data = request.get_json(silent=True) or {}
+    return _action(pipeline_type1.approve, run_id, item_id, str(data.get("gate") or ""))
+
+
+@pipeline_bp.route("/api/pipeline/runs/<run_id>/items/<item_id>/reject", methods=["POST"])
+def pipeline_reject(run_id: str, item_id: str):
+    from src.utils import pipeline_type1
+
+    data = request.get_json(silent=True) or {}
+    try:
+        run = pipeline_type1.reject(
+            run_id, item_id, str(data.get("gate") or ""), str(data.get("action") or ""),
+            note=str(data.get("note") or ""),
+            batch_nos=data.get("batchNos") or [],
+            character_ids=data.get("characterIds") or [],
+        )
+    except runner.PipelineError as exc:
+        return _pipeline_error(exc)
+    return jsonify(_with_media(run))
