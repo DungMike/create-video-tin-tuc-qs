@@ -1,5 +1,13 @@
 import type {
   ApiErrorPayload,
+  CreatePipelineRunPayload,
+  PipelineEvent,
+  PipelineHealth,
+  PipelineRun,
+  PipelineRunSummary,
+  PipelineScanResult,
+  PipelineTstProject,
+  PipelineVoice,
   BakeStoryLibraryRequest,
   ClipUsageSummary,
   BakeStoryLibraryResponse,
@@ -1125,3 +1133,51 @@ export async function cancelYoutubeDownloadJob(jobId: string) {
     method: "POST",
   });
 }
+
+// === Pipeline kịch bản → video (/api/pipeline) ===
+
+const jsonPost = (body?: unknown): RequestInit => ({
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body ?? {}),
+});
+
+export const getPipelineHealth = () => requestJson<PipelineHealth>("/api/pipeline/health");
+
+export const getPipelineVoices = () => requestJson<{ voices: PipelineVoice[] }>("/api/pipeline/tts/voices");
+
+export const getPipelineTstProjects = () =>
+  requestJson<{ projects: PipelineTstProject[] }>("/api/pipeline/tst/projects");
+
+export const scanPipelineFolder = (path: string, recursive: boolean) =>
+  requestJson<PipelineScanResult>("/api/pipeline/scan", jsonPost({ path, recursive }));
+
+/** Upload file (nếu có) + payload; item nguồn upload dùng `source: "upload:<chỉ số trong files>"`. */
+export async function createPipelineRun(payload: CreatePipelineRunPayload, files: File[]) {
+  const formData = new FormData();
+  formData.append("payload", JSON.stringify(payload));
+  files.forEach((file) => formData.append("files", file));
+  return requestJson<PipelineRun>("/api/pipeline/runs", { method: "POST", body: formData });
+}
+
+export const listPipelineRuns = () => requestJson<{ runs: PipelineRunSummary[] }>("/api/pipeline/runs");
+
+export const getPipelineRun = (runId: string) => requestJson<PipelineRun>(`/api/pipeline/runs/${runId}`);
+
+export const getPipelineEvents = (runId: string, since = 0) =>
+  requestJson<{ events: PipelineEvent[]; next: number }>(`/api/pipeline/runs/${runId}/events?since=${since}`);
+
+export const pausePipelineRun = (runId: string) =>
+  requestJson<PipelineRun>(`/api/pipeline/runs/${runId}/pause`, jsonPost());
+
+export const resumePipelineRun = (runId: string) =>
+  requestJson<PipelineRun>(`/api/pipeline/runs/${runId}/resume`, jsonPost());
+
+export const cancelPipelineRun = (runId: string) =>
+  requestJson<PipelineRun>(`/api/pipeline/runs/${runId}/cancel`, jsonPost());
+
+export const retryPipelineItem = (runId: string, itemId: string, fromStage?: string) =>
+  requestJson<PipelineRun>(`/api/pipeline/runs/${runId}/items/${itemId}/retry`, jsonPost({ fromStage }));
+
+export const cancelPipelineItem = (runId: string, itemId: string) =>
+  requestJson<PipelineRun>(`/api/pipeline/runs/${runId}/items/${itemId}/cancel`, jsonPost());

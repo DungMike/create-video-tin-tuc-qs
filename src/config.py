@@ -329,3 +329,24 @@ class Config:
     # truoc khi nhan opacity (xem preprocess_tv_noise_overlay).
     STORY_TV_NOISE_LUMA_GAIN = float(os.getenv("STORY_TV_NOISE_LUMA_GAIN", "2.0"))
     STORY_TV_NOISE_DEMO_SECONDS = float(os.getenv("STORY_TV_NOISE_DEMO_SECONDS", "3"))
+
+    # --- Pipeline kich ban -> video (docs/integration/04-thiet-ke-pipeline.md) ---
+    # Run luu o PIPELINE_DIR/runs/<runId>/ (run.json, events.jsonl, uploads/, items/).
+    PIPELINE_DIR = os.getenv("PIPELINE_DIR", os.path.join(STORAGE_DIR, "pipeline"))
+    # App TTS (DGT Automation API) va TST Studio, deu chi nghe tren localhost.
+    DGT_API_URL = os.getenv("DGT_API_URL", "http://127.0.0.1:8787").rstrip("/")
+    TST_STUDIO_URL = os.getenv("TST_STUDIO_URL", "http://127.0.0.1:5180").rstrip("/")
+    PIPELINE_TICK_SECONDS = max(0.5, float(os.getenv("PIPELINE_TICK_SECONDS", "3")))
+    # So lan pipeline tu gui lai job TTS bi failed (ngoai auto-retry rieng cua DGT).
+    PIPELINE_TTS_RETRY = max(0, int(os.getenv("PIPELINE_TTS_RETRY", "1")))
+    PIPELINE_AI_CONCURRENCY = max(1, int(os.getenv("PIPELINE_AI_CONCURRENCY", "1")))
+    PIPELINE_TST_IMAGE_CONCURRENCY = max(1, int(os.getenv("PIPELINE_TST_IMAGE_CONCURRENCY", "1")))
+    PIPELINE_TYPE1_RENDER_CONCURRENCY = max(1, int(os.getenv("PIPELINE_TYPE1_RENDER_CONCURRENCY", "1")))
+    # true = render loai 1 (dung_video) cho khi hang doi batch SVS dang render, tranh
+    # vuot gioi han phien NVENC cua GPU.
+    PIPELINE_RENDER_EXCLUSIVE = os.getenv("PIPELINE_RENDER_EXCLUSIVE", "false").lower() == "true"
+    PIPELINE_SCENE_RETRY_ROUNDS = max(1, int(os.getenv("PIPELINE_SCENE_RETRY_ROUNDS", "3")))
+    # Dua video loai 1 vao thu muc xuat chung: link (hardlink, khac o thi copy) | copy | none.
+    PIPELINE_COLLECT_MODE = os.getenv("PIPELINE_COLLECT_MODE", "link").strip().lower()
+    # Gioi han file kich ban cua DGT (MaxFileBytes = 10 MiB).
+    PIPELINE_MAX_TEXT_BYTES = int(os.getenv("PIPELINE_MAX_TEXT_BYTES", str(10 * 1024 * 1024)))

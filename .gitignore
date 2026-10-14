@@ -17,6 +17,10 @@ tests/*
 !tests/test_clip_usage.py
 !tests/test_clip_usage_mode.py
 !tests/test_search_keywords.py
+!tests/test_pipeline_*.py
+!tests/pipeline_fakes.py
+!tests/fixtures/
+!tests/fixtures/**
 !tests/test-transcript/
 tests/test-transcript/*
 !tests/test-transcript/test.srt

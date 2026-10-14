@@ -1468,3 +1468,168 @@ export interface YoutubeDownloadJob {
   outputDir: string;
   items: YoutubeDownloadItem[];
 }
+
+// === Pipeline kịch bản → video (/api/pipeline, docs/integration/04-thiet-ke-pipeline.md) ===
+
+export type PipelineVideoType = 1 | 2;
+
+export type PipelineItemStatus =
+  | "pending"
+  | "running"
+  | "waiting_service"
+  | "awaiting_review"
+  | "needs_attention"
+  | "failed"
+  | "cancelled"
+  | "done";
+
+export type PipelineRunStatus = "queued" | "running" | "paused" | "completed" | "completed_with_errors" | "cancelled";
+
+export interface PipelineHealth {
+  services: {
+    dgt: { ok: boolean; version?: string; ready?: boolean; reason?: string | null; activeJobId?: string | null; error?: string };
+    tstStudio: { ok: boolean; error?: string };
+    tst: { online: boolean; loggedIn: boolean };
+    claude: { found: boolean | null; path?: string; version?: string; error?: string };
+    svQueue: { activeBatchId: string | null; queued: number };
+    mongo: { enabled: boolean };
+  };
+  warnings: string[];
+}
+
+export interface PipelineVoice {
+  voiceRef: string;
+  name: string;
+  language?: string | null;
+  state?: string;
+}
+
+export interface PipelineTstProject {
+  id: string;
+  name: string;
+  styleSkill?: string;
+  aspectRatio?: string;
+  storyCount?: number;
+}
+
+export interface PipelineScanFile {
+  path: string;
+  name: string;
+  stem: string;
+  kind: "docx" | "txt";
+  size: number;
+  valid: boolean;
+  warning?: string;
+}
+
+export interface PipelineScanResult {
+  path: string;
+  recursive: boolean;
+  files: PipelineScanFile[];
+  warnings: string[];
+}
+
+export interface PipelineItemError {
+  stage: string;
+  code: string;
+  message: string;
+  at: string;
+}
+
+export interface PipelineTstState {
+  projectId?: string;
+  storyId?: string;
+  activeJob?: { step: string; jobId: string; since?: number } | null;
+  flow?: {
+    next?: string;
+    segments?: number;
+    characters?: { done: number; total: number };
+    images?: { done: number; total: number };
+    prompts?: { done: number; total: number };
+  };
+  approvals?: { prompts?: { at: string; images: number } | null; characters?: { at: string } | null };
+  url?: string;
+}
+
+export interface PipelineItem {
+  itemId: string;
+  index: number;
+  title: string;
+  slug: string;
+  type: PipelineVideoType;
+  source: { path: string; originalName: string; kind: string; uploaded: boolean; sha256?: string };
+  stage: string;
+  status: PipelineItemStatus;
+  waitingReason: string | null;
+  progress: { percent?: number; message?: string };
+  files: { txt: string | null; audio: string | null; srt: string | null; video: string | null };
+  media?: {
+    txtUrl?: string | null;
+    audioUrl?: string | null;
+    srtUrl?: string | null;
+    videoUrl?: string | null;
+    durationSeconds?: number;
+    cues?: number;
+  };
+  text?: { chars: number; paragraphs: number };
+  tts?: { attempt?: number; jobId?: string | null; state?: string | null };
+  tst?: PipelineTstState;
+  sv?: { batchId?: string | null; storyId?: string | null; outputName?: string | null };
+  error: PipelineItemError | null;
+  warnings?: string[];
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+export interface PipelineRunConfig {
+  defaultType?: PipelineVideoType;
+  ingest?: { blankLineBetweenParagraphs?: boolean };
+  tts: { voiceRef: string; format?: "mp3" | "wav"; autoRetry?: boolean };
+  type1?: {
+    tstProjectId?: string;
+    lang?: string | null;
+    gates?: { prompts?: boolean; characters?: boolean };
+    ai?: { model?: string };
+    video?: { from?: string; to?: string | null };
+  };
+  /** sharedConfig gửi nguyên cho /api/story-video/batch/create (route nhận thêm tvEffectStyleId). */
+  type2?: { sharedConfig?: CreateStoryBatchRequest["sharedConfig"] & { tvEffectStyleId?: string } };
+  output?: { drive?: string; subdir?: string };
+}
+
+export interface PipelineRun {
+  runId: string;
+  name: string;
+  status: PipelineRunStatus;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  config: PipelineRunConfig;
+  items: PipelineItem[];
+  eventSeq?: number;
+}
+
+export interface PipelineRunSummary {
+  runId: string;
+  name: string;
+  status: PipelineRunStatus;
+  counts: Record<string, number>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PipelineEvent {
+  seq: number;
+  at: string;
+  itemId: string | null;
+  stage: string;
+  status: string;
+  message: string;
+}
+
+export interface CreatePipelineRunPayload {
+  name?: string;
+  config: PipelineRunConfig;
+  items: { source: string; type: PipelineVideoType; title?: string }[];
+}

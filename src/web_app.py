@@ -22,6 +22,8 @@ from src.routes.story_video_routes import story_video_bp  # noqa: E402
 app.register_blueprint(story_video_bp)
 from src.routes.youtube_download_routes import youtube_download_bp  # noqa: E402
 app.register_blueprint(youtube_download_bp)
+from src.routes.pipeline_routes import pipeline_bp  # noqa: E402
+app.register_blueprint(pipeline_bp)
 app.config["MAX_CONTENT_LENGTH"] = Config.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
 # Fonts the edit styles draw with (Thai OFL faces) must sit in STORY_FONTS_DIR:
@@ -102,4 +104,7 @@ if __name__ == "__main__":
     from src.utils.story_video_batch import resume_batch_queue
 
     resume_batch_queue()
+    from src.utils.pipeline_runner import resume_pipeline_runs
+
+    resume_pipeline_runs()
     app.run(host=Config.WEB_HOST, port=Config.WEB_PORT, debug=False)
