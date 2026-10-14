@@ -1,0 +1,383 @@
+# TỪ KHÓA TÌM VIDEO — Pexels / Pixabay (Harvest, Prefetch)
+#
+# Cách dùng
+#   - Copy các dòng từ khóa ở mục CHƯA DÙNG (mỗi dòng 1 từ, KHÔNG copy dòng bắt đầu
+#     bằng #) rồi dán vào ô từ khóa. Ô nhập tách theo xuống dòng hoặc dấu phẩy.
+#   - Sau mỗi đợt tìm, chạy lệnh dưới để cập nhật file (chỉ đọc MongoDB, không ghi DB):
+#         venv/Scripts/python -m src.tools.sync_keyword_files
+#     Từ khóa đã tìm trên BẤT KỲ nguồn nào bị gỡ khỏi CHƯA DÙNG; mục ĐÃ TÌM được sinh
+#     lại từ bảng "Từ khóa đã tìm" (MongoDB search_keywords), kèm nguồn + số video.
+#   - Thêm từ khóa: viết thêm dòng vào CHƯA DÙNG (có thể tạo nhóm "## Tên nhóm") rồi
+#     chạy lệnh trên; từ đã tìm hoặc lặp lại tự bị loại.
+#   - Muốn tìm lại một từ: xóa nó ở trang Settings > "Tu khoa da tim", rồi thêm lại vào
+#     CHƯA DÙNG. Một từ mới tìm trên Pexels vẫn có thể tìm trên Pixabay: xem nguồn ở ĐÃ TÌM.
+#   - Tick "Bo qua tu khoa da dung" khi harvest để hệ thống tự bỏ qua từ đã quét hết.
+#   - Để tiếng Anh: Pexels/Pixabay cho nhiều kết quả hơn hẳn tiếng Việt/Thái.
+
+== CHƯA DÙNG — copy các dòng từ khóa (bỏ dòng bắt đầu bằng #) dán vào ô tìm ==
+
+## Thiên nhiên — Rừng
+forest aerial
+misty forest
+foggy forest morning
+tropical rainforest
+dense jungle
+bamboo forest
+pine forest
+forest path
+forest trail walking
+sunlight through trees
+forest canopy
+tall trees looking up
+mangrove forest
+forest at dusk
+wind in trees
+rainforest rain
+banyan tree
+tree roots
+forest floor
+
+## Thiên nhiên — Sông
+river aerial
+river flowing
+calm river
+river at sunrise
+river at sunset
+foggy river morning
+muddy river
+river bend aerial
+riverbank
+river reflection
+bamboo raft
+rowing boat river
+river rapids
+flooded river
+river through jungle
+river village
+
+## Thiên nhiên — Suối, thác
+mountain stream
+forest stream
+creek
+stream over rocks
+clear stream water
+rocky creek
+water flowing over rocks
+small waterfall
+waterfall slow motion
+jungle waterfall
+waterfall pool
+tall waterfall
+cascade waterfall
+waterfall aerial
+spring water
+
+## Thiên nhiên — Hồ, ao, đầm
+lake reflection
+calm lake
+misty lake
+lake at dawn
+mountain lake
+lake aerial
+lotus pond
+lotus flower
+water lilies
+pond ripples
+reeds in wind
+wetland
+swamp
+reservoir aerial
+
+## Thiên nhiên — Núi, đồi
+mountain range aerial
+mountain sunrise
+sea of clouds
+clouds over mountains timelapse
+limestone cliffs
+green hills
+rolling hills
+mountain valley
+foggy valley
+hilltop view
+winding mountain road
+cliff edge
+rocky mountain peak
+
+## Thiên nhiên — Mưa, sương, bầu trời
+rain on leaves
+raindrops on water
+rain puddle
+heavy rain
+thunderstorm lightning
+dark clouds
+morning mist
+fog rolling
+sunrise timelapse
+sunset sky
+golden hour field
+starry night sky
+full moon clouds
+clouds timelapse
+rainbow
+dew drops
+
+## Thiên nhiên — Cây lá, cỏ, con vật nhỏ
+tall grass wind
+fern leaves
+moss close up
+tropical plants
+palm trees wind
+coconut trees
+banana leaves
+rice paddy aerial
+fireflies night
+birds flying sky
+flock of birds sunset
+butterfly flower
+dragonfly
+fish underwater river
+frog pond
+leaves falling
+
+## Phố Việt Nam
+hanoi old quarter
+hanoi street motorbikes
+hanoi train street
+saigon traffic
+ho chi minh city night
+saigon alley
+hoi an ancient town
+hoi an lanterns
+hue citadel
+da nang dragon bridge
+vietnamese street vendor
+vietnam sidewalk cafe
+vietnam market
+
+## Địa danh — Núi, rừng, thác (Thái / Việt)
+northern thailand mountains
+chiang mai mountains fog
+doi inthanon
+pai canyon
+chiang rai tea plantation
+khao sok national park
+thailand jungle
+erawan waterfall
+thailand waterfall
+sapa rice terraces
+ha giang mountains
+mu cang chai
+vietnam mountain fog
+ninh binh karst
+trang an boat
+ban gioc waterfall
+da lat pine forest
+moc chau tea hill
+
+## Địa danh — Sông, hồ, vịnh (Thái / Việt)
+chao phraya river
+chao phraya boat
+long tail boat
+damnoen saduak floating market
+cheow lan lake
+thailand lake sunrise
+mekong delta
+cai rang floating market
+hoan kiem lake
+west lake hanoi
+halong bay
+lan ha bay
+phang nga bay
+fisherman casting net
+vietnam river boat
+
+## Biển Việt Nam
+vietnam beach
+nha trang beach
+phu quoc island
+mui ne sand dunes
+vietnam fishing village
+basket boat vietnam
+da nang beach
+
+## Văn hóa Thái
+songkran festival
+loy krathong
+yi peng lanterns
+monks alms giving
+wat arun
+buddhist monks walking
+spirit house thailand
+lighting incense temple
+thai traditional dance
+muay thai training
+thai silk weaving
+thai cooking
+thai wedding ceremony
+
+## Văn hóa Việt
+tet holiday vietnam
+lunar new year vietnam
+ao dai
+conical hat
+ancestor altar incense
+vietnamese pagoda
+water puppet show
+vietnamese coffee
+vietnamese kitchen cooking
+rice harvest vietnam
+water buffalo
+vietnamese wedding
+
+## Gia đình (drama)
+# Không gắn quốc gia vì "thai"/"vietnamese" cho rất ít kết quả; Pexels nhiều người
+# phương Tây -> thêm "asian" vào đầu nếu cần.
+grandmother and grandchild
+elderly mother
+mother and daughter
+father and son
+lonely old man
+woman crying
+sad woman window rain
+couple arguing
+family eating together
+asian family cooking
+children playing village
+hospital corridor
+pregnant woman
+funeral ceremony
+
+## Không khí vụ án
+flashing police lights night
+police tape
+handcuffs arrest
+courtroom
+prison cell
+ambulance night
+dark alley night
+rain night street
+cctv camera
+abandoned house
+dark forest night
+rescue divers river
+flood thailand
+detective evidence
+missing person poster
+
+## Chuyển cảnh, thời tiết
+monsoon rain
+rain on tin roof
+storm clouds timelapse
+vietnam rice field sunset
+
+== ĐÃ TÌM — tự sinh từ MongoDB, đừng sửa tay (chạy lại lệnh sync để cập nhật) ==
+# 105 từ khóa
+
+## 2026-09-28
+bangkok alley                        | pexels 267 video
+bangkok canal                        | pexels 139 video
+bangkok chinatown                    | pexels 169 video
+bangkok motorbike taxi               | pexels 128 video
+bangkok night street                 | pexels 276 video
+bangkok skyline                      | pexels 198 video
+bangkok street                       | pexels 480 video
+bangkok street food vendor           | pexels 281 video
+bangkok traffic                      | pexels 107 video
+chiang mai old city                  | pexels 300 video
+pattaya night street                 | pexels 115 video
+thai fresh market                    | pexels 200 video
+thai night market                    | pexels 108 video
+tuk tuk bangkok                      | pexels 144 video
+yaowarat road night                  | pexels 182 video
+
+## 2026-09-25
+Andaman Sea Thailand                 | pexels
+Asian countryside house              | pexels
+Asian family dinner                  | pexels
+Asian family home                    | pexels
+Asian police                         | pixabay
+Bangkok police                       | pixabay
+Bangkok residential area             | pexels
+blooming flowers Thailand            | pexels
+blue sea Thailand                    | pexels
+countryside flowers Thailand         | pexels
+countryside morning Thailand         | pexels
+countryside Thailand road            | pexels
+crime scene                          | pixabay
+emotional village conversation       | pexels
+empty countryside house              | pexels
+Gulf of Thailand                     | pexels
+island beach Thailand                | pexels
+local life Thailand                  | pexels
+meadow Thailand                      | pexels
+Mekong River                         | pixabay 554 video
+misunderstanding in village          | pexels
+monk counseling villagers            | pexels
+nature close up Thailand             | pexels
+ocean Thailand                       | pexels
+old house porch                      | pexels
+old house Vietnam                    | pexels
+old wooden house                     | pexels
+peaceful beach Thailand              | pexels
+peaceful Thai countryside            | pexels
+police car Thailand                  | pixabay
+police checkpoint                    | pixabay
+police investigation                 | pixabay
+police motorcycle                    | pixabay
+police patrol                        | pixabay
+police patrol street                 | pixabay
+police station                       | pixabay
+police Thailand                      | pixabay
+quiet beach Thailand                 | pexels
+rural family home                    | pexels
+rural house Thailand                 | pexels
+rural porch                          | pexels
+rural Thailand                       | pexels
+sea horizon Thailand                 | pexels
+Southeast Asia police                | pixabay
+sunrise beach Thailand               | pexels
+sunset beach Thailand                | pexels
+Thai beach                           | pexels
+Thai farmland                        | pexels
+Thai flowers field                   | pexels
+Thai house                           | pexels
+Thai police                          | pixabay
+Thai police officer                  | pixabay
+Thai rural life                      | pexels
+Thai sea                             | pexels
+Thai temple community                | pexels
+Thai village                         | pexels
+Thai village house                   | pexels
+Thailand beach                       | pexels
+Thailand beach sunset                | pexels
+Thailand coast                       | pexels
+Thailand coastal landscape           | pexels
+Thailand coastline                   | pexels
+Thailand countryside                 | pexels
+Thailand family                      | pexels
+Thailand ocean waves                 | pexels
+Thailand police                      | pixabay
+Thailand rice field                  | pexels
+Thailand rural landscape             | pexels
+Thailand sea                         | pexels
+Thailand seascape                    | pexels
+Thailand shoreline                   | pexels
+traditional Thai village             | pexels
+traditional Vietnamese house         | pexels
+traffic police Thailand              | pixabay
+tropical beach Thailand              | pexels
+tropical flowers Thailand            | pexels
+tropical island Thailand             | pexels
+Vietnam countryside                  | pexels
+Vietnam countryside house            | pexels
+Vietnam rural house                  | pexels
+Vietnam rural village                | pexels
+Vietnam village home                 | pexels
+Vietnam village road                 | pexels
+village house rain                   | pexels
+village meeting Thailand             | pexels
+village path Thailand                | pexels
+villagers at temple                  | pexels
+waves Thailand beach                 | pexels
+wild flowers Thailand                | pexels
+wild grass field                     | pexels

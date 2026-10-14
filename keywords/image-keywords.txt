@@ -1,0 +1,184 @@
+# TỪ KHÓA TÌM ẢNH — Thư viện clip từ ảnh (1 ảnh = 1 clip Ken Burns)
+#
+# Cách dùng
+#   - Copy các dòng từ khóa ở mục CHƯA DÙNG (mỗi dòng 1 từ, KHÔNG copy dòng bắt đầu
+#     bằng #) rồi dán vào ô từ khóa ở Settings > "Thư viện clip từ ảnh".
+#   - Sau mỗi đợt tìm, chạy lệnh dưới để cập nhật file (chỉ đọc MongoDB, không ghi DB):
+#         venv/Scripts/python -m src.tools.sync_keyword_files
+#     Từ khóa đã có con trỏ tìm ảnh (MongoDB image_search_cursors) bị gỡ khỏi CHƯA DÙNG;
+#     mục ĐÃ TÌM được sinh lại, chia "Còn trang" / "Đã quét hết".
+#   - Từ ở "Còn trang" tìm lại vẫn ra ảnh MỚI: hệ thống đi tiếp từ trang kế và không tải
+#     trùng ảnh. Muốn cảnh đa dạng thì ưu tiên từ CHƯA DÙNG.
+#   - Chọn nguồn Pexels: key Pixabay chưa có full API access nên ảnh Pixabay quá nhỏ
+#     (<= 1280px) và bị loại hết.
+#   - Thêm từ khóa: viết thêm dòng vào CHƯA DÙNG (có thể tạo nhóm "## Tên nhóm") rồi
+#     chạy lệnh trên; từ đã tìm hoặc lặp lại tự bị loại.
+#   - Để tiếng Anh: Pexels cho nhiều kết quả hơn hẳn tiếng Việt/Thái.
+
+== CHƯA DÙNG — copy các dòng từ khóa (bỏ dòng bắt đầu bằng #) dán vào ô tìm ==
+
+## Thiên nhiên — Rừng
+misty forest
+bamboo forest
+tropical rainforest
+dense jungle
+forest path
+sunlight through trees
+mangrove forest
+pine forest
+forest aerial
+banyan tree
+moss covered rocks
+
+## Thiên nhiên — Sông, suối, thác
+river landscape
+river valley
+calm river
+river aerial
+mountain stream
+forest stream
+rocky creek
+waterfall
+jungle waterfall
+waterfall pool
+bamboo raft
+
+## Thiên nhiên — Hồ, ao, đầm
+lake reflection
+misty lake
+mountain lake
+lotus pond
+lotus flower
+water lilies
+reeds by the lake
+wetland
+
+## Thiên nhiên — Núi, đồi
+mountain landscape
+sea of clouds
+limestone cliffs
+green hills
+mountain valley
+foggy valley
+mountain sunrise
+rice terraces
+
+## Thiên nhiên — Bầu trời, thời tiết
+dramatic sky
+sunset sky
+starry night sky
+storm clouds
+morning mist
+rain on window
+rainy day street
+
+## Địa danh Thái Lan
+ayutthaya ruins
+sukhothai historical park
+wat arun
+grand palace bangkok
+chiang mai temple
+white temple chiang rai
+doi inthanon
+pai thailand
+phang nga bay
+railay beach
+koh phi phi
+khao sok lake
+erawan waterfall
+chiang rai tea plantation
+phuket old town
+
+## Địa danh Việt Nam
+ha long bay
+ninh binh
+trang an
+tam coc
+sapa rice terraces
+ha giang
+ban gioc waterfall
+hoi an ancient town
+hoi an lanterns
+hue citadel
+hanoi old quarter
+hanoi street
+saigon street
+ho chi minh city skyline
+da lat
+mekong delta
+phu quoc beach
+nha trang beach
+mui ne sand dunes
+
+## Làng quê, đời thường
+thai village
+vietnam village
+rice field
+water buffalo
+floating market
+fishing boat
+fisherman net
+farmer conical hat
+rural kitchen
+wooden house interior
+street food stall vietnam
+
+## Văn hóa
+buddhist monk
+thai temple
+golden buddha
+incense smoke
+lantern festival
+loy krathong
+songkran
+ao dai
+vietnamese pagoda
+tet decorations
+ancestor altar
+spirit house
+
+## Gia đình, tâm trạng
+elderly woman portrait
+grandmother hands
+old couple
+mother and child
+lonely man
+empty room
+old photographs
+family meal
+village children
+
+## Không khí vụ án
+police lights
+crime scene tape
+handcuffs
+courtroom
+prison bars
+dark alley
+abandoned house
+cctv camera
+evidence bag
+old newspaper
+flashlight in the dark
+footprints in mud
+
+== ĐÃ TÌM — tự sinh từ MongoDB, đừng sửa tay (chạy lại lệnh sync để cập nhật) ==
+# 16 từ khóa
+
+## Còn trang — tìm lại sẽ đi tiếp trang sau, vẫn ra ảnh mới
+bangkok alley                        | pexels trang kế 3, 100 ảnh, lần cuối 2026-09-28
+bangkok canal                        | pexels trang kế 3, 100 ảnh, lần cuối 2026-09-28
+bangkok chinatown                    | pexels trang kế 4, 100 ảnh, lần cuối 2026-09-28
+bangkok motorbike taxi               | pexels trang kế 4, 100 ảnh, lần cuối 2026-09-28
+bangkok night street                 | pexels trang kế 2, 100 ảnh, lần cuối 2026-09-28
+bangkok skyline                      | pexels trang kế 3, 100 ảnh, lần cuối 2026-09-28
+bangkok street                       | pexels trang kế 2, 100 ảnh, lần cuối 2026-09-28
+bangkok street food vendor           | pexels trang kế 3, 100 ảnh, lần cuối 2026-09-28
+bangkok traffic                      | pexels trang kế 3, 100 ảnh, lần cuối 2026-09-28
+chiang mai old city                  | pexels trang kế 2, 100 ảnh, lần cuối 2026-09-28
+pattaya night street                 | pexels trang kế 4, 100 ảnh, lần cuối 2026-09-28
+thai fresh market                    | pexels trang kế 4, 100 ảnh, lần cuối 2026-09-28
+thai night market                    | pexels trang kế 4, 100 ảnh, lần cuối 2026-09-28
+Thailan city                         | pexels trang kế 2, 100 ảnh, lần cuối 2026-09-25
+tuk tuk bangkok                      | pexels trang kế 3, 100 ảnh, lần cuối 2026-09-28
+yaowarat road night                  | pexels trang kế 3, 100 ảnh, lần cuối 2026-09-28

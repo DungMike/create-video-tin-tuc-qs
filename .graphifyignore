@@ -1,0 +1,7 @@
+# Bộ skill/agent dùng chung, không phải code dự án
+.agent/
+# Asset video, không có nội dung cần trích xuất
+*.mp4
+# License font và favicon, không mang thông tin dự án
+src/assets/fonts/licenses/
+frontend/public/favicon.svg
