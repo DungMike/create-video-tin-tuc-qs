@@ -28,6 +28,7 @@ import { Separator } from "@/components/ui/separator";
 import { useActiveStoryLibrary } from "@/hooks/useActiveStoryLibrary";
 import { useClipUsageMode } from "@/hooks/useClipUsageMode";
 import {
+  createPipelinePreset,
   ApiError,
   cancelStoryBatch,
   cancelStoryBatchItem,
@@ -603,6 +604,48 @@ export function StoryVideoPage() {
     setBatchId(nextBatchId);
   }, [batchId]);
 
+  /** sharedConfig của batch từ form hiện tại (dùng cho render và cho preset của Pipeline). */
+  const buildBatchSharedConfig = useCallback((withSubtitles: boolean) => {
+    const sharedConfig: CreateStoryBatchRequest["sharedConfig"] = {
+      libraryIds: selectedLibraryIds,
+      introId: introId === "none" ? "" : introId,
+      optimizeMode,
+      outputDrive: outputDrive || undefined,
+      skipTvEffect,
+      clipUsageMode,
+      clipTags: [],
+      voiceId: voiceId || undefined,
+    };
+    if (activeLayoutIds.length) {
+      sharedConfig.layoutIds = activeLayoutIds;
+    }
+    // Ảnh decor chỉ chia cho các video bốc trúng bố cục cần decor.
+    if (decorEnabled && activeDecorIds.length) {
+      sharedConfig.decorImageIds = activeDecorIds;
+    }
+    if (activeModifierIds.length) {
+      sharedConfig.modifierIds = activeModifierIds;
+    }
+    if (activeWaveformIds.length) {
+      sharedConfig.waveformOverlayIds = activeWaveformIds;
+    }
+    if (activeCtaIds.length) {
+      sharedConfig.ctaOverlayIds = activeCtaIds;
+    }
+    if (withSubtitles) {
+      sharedConfig.subtitleFont = subtitleFont || undefined;
+      sharedConfig.subtitlePreset = subtitlePreset;
+      sharedConfig.subtitleMaxCharsPerLine = clampInt(subtitleMaxCharsPerLine, 16, 60, 42);
+      sharedConfig.subtitleMaxLines = clampInt(subtitleMaxLines, 1, 3, 2);
+      sharedConfig.subtitleFontScale = Number(subtitleFontScale);
+      Object.assign(sharedConfig, subtitleColorPayload);
+      if (activeSubtitleStyleIds.length) {
+        sharedConfig.subtitleStyleIds = activeSubtitleStyleIds;
+      }
+    }
+    return sharedConfig;
+  }, [selectedLibraryIds, introId, optimizeMode, outputDrive, skipTvEffect, clipUsageMode, decorEnabled, activeDecorIds, activeLayoutIds, activeModifierIds, activeWaveformIds, activeCtaIds, voiceId, subtitleFont, subtitlePreset, subtitleMaxCharsPerLine, subtitleMaxLines, subtitleFontScale, subtitleColorPayload, activeSubtitleStyleIds]);
+
   const submitBatchItems = useCallback(async (itemsToSubmit: BatchItem[]) => {
     setErrorMessage(null);
     setQueueInfoMessage(null);
@@ -645,43 +688,7 @@ export function StoryVideoPage() {
         }
         return entry;
       });
-      const sharedConfig: CreateStoryBatchRequest["sharedConfig"] = {
-        libraryIds: selectedLibraryIds,
-        introId: introId === "none" ? "" : introId,
-        optimizeMode,
-        outputDrive: outputDrive || undefined,
-        skipTvEffect,
-        clipUsageMode,
-        clipTags: [],
-        voiceId: voiceId || undefined,
-      };
-      if (activeLayoutIds.length) {
-        sharedConfig.layoutIds = activeLayoutIds;
-      }
-      // Ảnh decor chỉ chia cho các video bốc trúng bố cục cần decor.
-      if (decorEnabled && activeDecorIds.length) {
-        sharedConfig.decorImageIds = activeDecorIds;
-      }
-      if (activeModifierIds.length) {
-        sharedConfig.modifierIds = activeModifierIds;
-      }
-      if (activeWaveformIds.length) {
-        sharedConfig.waveformOverlayIds = activeWaveformIds;
-      }
-      if (activeCtaIds.length) {
-        sharedConfig.ctaOverlayIds = activeCtaIds;
-      }
-      if (subtitleFiles.length || localSubtitleCount) {
-        sharedConfig.subtitleFont = subtitleFont || undefined;
-        sharedConfig.subtitlePreset = subtitlePreset;
-        sharedConfig.subtitleMaxCharsPerLine = clampInt(subtitleMaxCharsPerLine, 16, 60, 42);
-        sharedConfig.subtitleMaxLines = clampInt(subtitleMaxLines, 1, 3, 2);
-        sharedConfig.subtitleFontScale = Number(subtitleFontScale);
-        Object.assign(sharedConfig, subtitleColorPayload);
-        if (activeSubtitleStyleIds.length) {
-          sharedConfig.subtitleStyleIds = activeSubtitleStyleIds;
-        }
-      }
+      const sharedConfig = buildBatchSharedConfig(Boolean(subtitleFiles.length || localSubtitleCount));
       const response = await createStoryBatch(
         { items, sharedConfig },
         audioFiles.length ? audioFiles : undefined,
@@ -704,7 +711,7 @@ export function StoryVideoPage() {
       setErrorMessage(err instanceof ApiError ? err.message : "Khong the bat dau batch render.");
       setIsSubmitting(false);
     }
-  }, [selectedLibraryIds, introId, optimizeMode, outputDrive, skipTvEffect, clipUsageMode, decorEnabled, activeDecorIds, activeLayoutIds, activeModifierIds, activeWaveformIds, activeCtaIds, voiceId, subtitleFont, subtitlePreset, subtitleMaxCharsPerLine, subtitleMaxLines, subtitleFontScale, subtitleColorPayload, activeSubtitleStyleIds, batchId, batchProgress, viewBatch, refreshBatchQueue, refreshDecorImages]);
+  }, [buildBatchSharedConfig, batchId, batchProgress, viewBatch, refreshBatchQueue, refreshDecorImages]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1287,6 +1294,22 @@ export function StoryVideoPage() {
     }
 
     await submitBatchItems(batchItems);
+  };
+
+  /** Lưu cấu hình batch hiện tại (thư viện, sóng âm, CTA, khung, bố cục, phụ đề…) thành preset cho trang Pipeline. */
+  const handleSavePipelinePreset = async () => {
+    if (!selectedLibraryIds.length) {
+      setErrorMessage("Chọn ít nhất 1 thư viện clip trước khi lưu preset.");
+      return;
+    }
+    const name = window.prompt("Tên preset cho Pipeline (loại 2):", "");
+    if (!name || !name.trim()) return;
+    try {
+      const preset = await createPipelinePreset(name.trim(), buildBatchSharedConfig(true));
+      setQueueInfoMessage(`Đã lưu preset "${preset.name}". Chọn nó ở trang Tạo video tự động.`);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : "Không lưu được preset.");
+    }
   };
 
   const handleRetryFailed = async () => {
@@ -2197,6 +2220,11 @@ export function StoryVideoPage() {
               {isSubmitting ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Upload className="mr-2 size-4" />}
               Bat dau render
             </Button>
+            {mode === "batch" ? (
+              <Button type="button" variant="outline" onClick={() => void handleSavePipelinePreset()} disabled={isSubmitting}>
+                Lưu cấu hình cho Pipeline
+              </Button>
+            ) : null}
           </div>
         </div>
       </PageSection>

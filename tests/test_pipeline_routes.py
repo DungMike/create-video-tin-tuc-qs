@@ -136,3 +136,43 @@ def test_item_file_endpoint_serves_only_recorded_files(client, tmp_path):
     assert body.status_code == 200 and body.data.decode("utf-8-sig") == "xin chào"
     assert client.get(f"/api/pipeline/runs/{rid}/items/it-01/files/audio").status_code == 404
     assert client.get(f"/api/pipeline/runs/{rid}/items/it-01/files/..%2Frun.json").status_code == 404
+
+
+def test_google_docs_link_becomes_txt_item(client, monkeypatch):
+    monkeypatch.setattr("src.utils.tts_audio.download_google_doc_text", lambda url: "Nội dung từ Google Docs.")
+    response = client.post("/api/pipeline/runs", json={
+        "config": CONFIG,
+        "items": [{"source": "https://docs.google.com/document/d/abc123/edit", "type": 2, "title": "Tập GDoc"}],
+    })
+    assert response.status_code == 201, response.get_json()
+    item = response.get_json()["items"][0]
+    assert item["title"] == "Tập GDoc" and item["stage"] == "TTS"
+    assert open(item["files"]["txt"], "rb").read().decode("utf-8-sig") == "Nội dung từ Google Docs."
+
+
+def test_presets_crud_and_run_uses_preset(client):
+    bad = client.post("/api/pipeline/presets", json={"name": "x", "sharedConfig": {}})
+    assert bad.status_code == 400
+    created = client.post("/api/pipeline/presets", json={
+        "name": "Kênh Thái", "sharedConfig": {"libraryIds": ["lib-9"], "waveformOverlayIds": ["w1"], "optimizeMode": True},
+    })
+    assert created.status_code == 201
+    preset = created.get_json()
+    assert "optimizeMode" not in preset["sharedConfig"]
+    assert client.get("/api/pipeline/presets").get_json()["presets"][0]["id"] == preset["id"]
+
+    import tempfile
+    src = os.path.join(tempfile.mkdtemp(), "a.txt")
+    open(src, "w", encoding="utf-8").write("xin chào")
+    run = client.post("/api/pipeline/runs", json={
+        "config": {"tts": {"voiceRef": "v"}, "type2": {"presetId": preset["id"]}},
+        "items": [{"source": src, "type": 2}],
+    }).get_json()
+    assert run["config"]["type2"]["sharedConfig"]["waveformOverlayIds"] == ["w1"]
+    assert run["config"]["type2"]["presetName"] == "Kênh Thái"
+    assert client.delete(f"/api/pipeline/presets/{preset['id']}").status_code == 200
+    missing = client.post("/api/pipeline/runs", json={
+        "config": {"tts": {"voiceRef": "v"}, "type2": {"presetId": preset["id"]}},
+        "items": [{"source": src, "type": 2}],
+    })
+    assert missing.status_code == 404

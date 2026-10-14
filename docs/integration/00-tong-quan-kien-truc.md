@@ -1,7 +1,7 @@
 # Tích hợp 3 app: kịch bản → video hoàn chỉnh
 
 > Bộ tài liệu cho bản cập nhật lớn: gộp **app TTS**, **app tạo ảnh (TST Studio)** và **app dựng video nền (Story Video Studio)** thành một luồng tự động.
-> Trạng thái: **tài liệu + kế hoạch, chưa tích hợp code** (14/10/2026).
+> Trạng thái: **đã tích hợp code P1–P5 trên nhánh `develop`** (14/10/2026). Chưa chạy với app TTS thật, `claude -p` thật và tạo ảnh TST thật. Xem [05 · Trạng thái](05-ke-hoach-trien-khai.md#trạng-thái-cập-nhật-14102026).
 > Sơ đồ viết bằng Mermaid. Xem trong VS Code bằng Markdown Preview (cần extension hỗ trợ Mermaid) hoặc trên GitHub/GitLab.
 
 ## Mục lục (đọc theo thứ tự)

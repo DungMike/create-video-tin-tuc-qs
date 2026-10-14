@@ -5,6 +5,28 @@
 
 [← 04 Thiết kế pipeline](04-thiet-ke-pipeline.md) · [Tổng quan](00-tong-quan-kien-truc.md)
 
+## Trạng thái (cập nhật 14/10/2026)
+
+| Phase | Trạng thái | Commit |
+|---|---|---|
+| P0 | Spike 0.4 xong; các spike còn lại **chờ người dùng cho phép** (tốn lượt Claude / MiniMax / license TST) | — |
+| P1 | Xong | SVS `develop` 7b20a7c |
+| P2 | Xong (+ `outputSubdir` cho `batch/create`) | SVS 4fe6678 |
+| P3 | Xong | TST `develop` 0c957fd |
+| P4 | Xong | SVS cf4832e |
+| P5 | Xong: preset, chạy lại từ bước bất kỳ, cảnh báo dung lượng, link Google Docs, sửa `retry-failed`, số việc cần xử lý trên tab trình duyệt. Còn lại: tách route `batch/create` thành service | SVS (commit P5) |
+
+**Đã kiểm thử:**
+- Toàn bộ test cũ của SVS giữ nguyên kết quả (7 test vốn đã lỗi trước khi tích hợp, không phát sinh lỗi mới).
+- Test mới: pytest SVS `tests/test_pipeline_*.py`; unittest TST `.claude/skills/srt-flow/tests`.
+- Chạy thật trên máy với app TTS giả (`fake_dgt.py`, sinh mp3 bằng ffmpeg):
+  - **loại 2 render thật** ra mp4 1080p có clip nền, sóng âm, CTA, phụ đề;
+  - **loại 1** chạy qua TST Studio thật (cổng thử 5199) với claude giả, tới bước duyệt prompt; "Chạy lại AI" có ghi chú hoạt động.
+- **Chưa chạy với app TTS thật, `claude -p` thật và tạo ảnh TST thật** (xem các spike P0).
+
+**Biến môi trường mới** (SVS): `PIPELINE_DIR`, `DGT_API_URL`, `TST_STUDIO_URL`, `PIPELINE_*` ([04 §14](04-thiet-ke-pipeline.md#14-cấu-hình-mới)), `DGT_WORK_DIR`, `PIPELINE_DISK_WARN_GB`, `PIPELINE_MIN_FREE_GB`.
+**TST Studio:** `CLAUDE_BIN`, `AI_MODEL`, `AI_TIMEOUT`.
+
 ---
 
 ## Tổng quan các phase
@@ -192,9 +214,9 @@ P2 và P3 làm song song được.
 
 | # | Kết quả | Quyết định |
 |---|---|---|
-| 0.1 | | |
-| 0.2 | | |
-| 0.3 | | |
-| 0.4 | | |
-| 0.5 | | |
-| 0.6 | | |
+| 0.1 | Chưa chạy (cần cho phép dùng quota Claude). Đã xác nhận các cờ có trong `claude --help` 2.1.296; `ai_flow.py` đã test với claude giả | — |
+| 0.2 | Chưa chạy | Mặc định `--lo-moi 4` |
+| 0.3 | Chưa chạy (tốn lượt MiniMax) | Tạm giữ mặc định tắt |
+| 0.4 | **Khớp từng byte** với `DocxToTxt.ps1` trên 2 docx mẫu (text box, field, tab stop, entity, ngắt dòng/trang, tiếng Thái) + 1 docx thật. Lưu ý: `-replace` không phân biệt hoa thường, tập khoảng trắng của .NET `Trim` khác Python | Dùng bản Python, có golden test |
+| 0.5 | Chưa chạy (tốn license TST) | Giữ lane ảnh = 1 |
+| 0.6 | Chưa chạy | `PIPELINE_RENDER_EXCLUSIVE=false` |

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from flask import Blueprint, jsonify, request, send_file
 
 from src.config import Config
@@ -67,6 +69,51 @@ def _suspend_warning() -> str | None:
     return None
 
 
+_dir_sizes: dict[str, tuple[float, int | None]] = {}
+_dir_size_lock = threading.Lock()
+
+
+def _dir_size_cached(path: str) -> int | None:
+    """Kich thuoc thu muc (tinh o luong nen, cache 10 phut) — thu muc lon tinh mat vai giay."""
+    now = time.monotonic()
+    with _dir_size_lock:
+        at, size = _dir_sizes.get(path, (0.0, None))
+        if now - at < 600 and (size is not None or now - at < 60):
+            return size
+        _dir_sizes[path] = (now, size)
+
+    def work():
+        total = 0
+        for current, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(current, name))
+                except OSError:
+                    pass
+        with _dir_size_lock:
+            _dir_sizes[path] = (time.monotonic(), total)
+
+    threading.Thread(target=work, daemon=True, name="pipeline-dir-size").start()
+    return size
+
+
+def _disk_warnings() -> list[str]:
+    warnings = []
+    if Config.DGT_WORK_DIR and os.path.isdir(Config.DGT_WORK_DIR):
+        size = _dir_size_cached(Config.DGT_WORK_DIR)
+        if size is not None and size > Config.PIPELINE_DISK_WARN_GB * 1024 ** 3:
+            warnings.append(f"Thư mục làm việc của app TTS chiếm {size / 1024 ** 3:.1f} GB ({Config.DGT_WORK_DIR}) — app không tự dọn")
+    try:
+        from src.utils.file_manager import output_drive_options
+
+        for drive in output_drive_options().get("drives") or []:
+            if drive.get("totalBytes") and drive["freeBytes"] < Config.PIPELINE_MIN_FREE_GB * 1024 ** 3:
+                warnings.append(f"Ổ {drive['drive']}: chỉ còn {drive['freeBytes'] / 1024 ** 3:.1f} GB trống")
+    except OSError:
+        pass
+    return warnings
+
+
 @pipeline_bp.route("/api/pipeline/health", methods=["GET"])
 def pipeline_health():
     services: dict = {}
@@ -116,6 +163,7 @@ def pipeline_health():
     warning = _suspend_warning()
     if warning:
         warnings.append(warning)
+    warnings.extend(_disk_warnings())
     return jsonify({"services": services, "warnings": warnings})
 
 
@@ -179,6 +227,23 @@ def _discard_unfinished_run(run_id: str | None) -> None:
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def _download_gdoc(url: str, entry: dict, upload_dir: str, index: int) -> dict:
+    """Link Google Docs (cong khai) -> uploads/gdoc_NN.txt, coi nhu mot file upload."""
+    from src.utils.tts_audio import TTSAudioError, download_google_doc_text
+
+    try:
+        text = download_google_doc_text(url)
+    except TTSAudioError as exc:
+        raise runner.PipelineError(exc.code, f"{url}: {exc}") from exc
+    title = str(entry.get("title") or "").strip() or f"Google Doc {index}"
+    os.makedirs(upload_dir, exist_ok=True)
+    dest = os.path.join(upload_dir, f"gdoc_{index:02d}.txt")
+    with open(dest, "w", encoding="utf-8") as file_obj:
+        file_obj.write(text)
+    return {"path": dest, "originalName": f"{safe_upload_name(title)}.txt", "type": entry.get("type"),
+            "uploaded": True, "title": title}
+
+
 def _read_create_payload() -> dict:
     if request.form.get("payload"):
         try:
@@ -227,6 +292,8 @@ def pipeline_create_run():
                 except (ValueError, KeyError) as exc:
                     raise runner.PipelineError("upload_not_found", f"Không thấy file upload {ref}.") from exc
                 sources.append({**up, "type": entry.get("type"), "uploaded": True, "title": entry.get("title")})
+            elif ref.startswith(("https://docs.google.com/", "http://docs.google.com/")):
+                sources.append(_download_gdoc(ref, entry, upload_dir, len(sources) + 1))
             else:
                 if not os.path.isabs(ref) or not os.path.isfile(ref):
                     raise runner.PipelineError("source_not_found", f"Không tìm thấy file: {ref}", 404)
@@ -354,3 +421,39 @@ def pipeline_reject(run_id: str, item_id: str):
     except runner.PipelineError as exc:
         return _pipeline_error(exc)
     return jsonify(_with_media(run))
+
+
+# --- preset cau hinh loai 2 ------------------------------------------------------------
+
+# Pipeline tu dat cac key nay cho moi run, khong lay tu preset.
+_PRESET_DROP_KEYS = {"optimizeMode", "outputSubdir", "voiceId", "introId"}
+
+
+@pipeline_bp.route("/api/pipeline/presets", methods=["GET"])
+def pipeline_list_presets():
+    from src.utils.pipeline_store import list_presets
+
+    return jsonify({"presets": list_presets()})
+
+
+@pipeline_bp.route("/api/pipeline/presets", methods=["POST"])
+def pipeline_create_preset():
+    from src.utils.pipeline_store import save_preset
+
+    data = request.get_json(silent=True) or {}
+    shared = data.get("sharedConfig")
+    if not isinstance(shared, dict):
+        return _error("Thiếu sharedConfig.", "shared_config_required")
+    if not [x for x in shared.get("libraryIds") or [] if str(x).strip()]:
+        return _error("Preset phải có ít nhất 1 thư viện clip.", "library_required")
+    shared = {k: v for k, v in shared.items() if k not in _PRESET_DROP_KEYS}
+    return jsonify(save_preset(str(data.get("name") or ""), shared)), 201
+
+
+@pipeline_bp.route("/api/pipeline/presets/<preset_id>", methods=["DELETE"])
+def pipeline_delete_preset(preset_id: str):
+    from src.utils.pipeline_store import delete_preset
+
+    if not delete_preset(preset_id):
+        return _error("Không tìm thấy preset.", "preset_not_found", 404)
+    return jsonify({"deleted": preset_id})

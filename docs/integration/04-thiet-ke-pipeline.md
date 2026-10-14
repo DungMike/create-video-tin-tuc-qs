@@ -1,6 +1,14 @@
 # 04. Thiết kế Pipeline: kịch bản → video (orchestrator trong Story Video Studio)
 
-> Trạng thái: **thiết kế, chưa có code**. Lộ trình thực hiện xem [05](05-ke-hoach-trien-khai.md).
+> Trạng thái: **đã triển khai** (P1–P5, nhánh `develop`). Lộ trình và kết quả kiểm thử xem [05](05-ke-hoach-trien-khai.md).
+> Code:
+> - SVS: `src/utils/pipeline_store.py`, `pipeline_ingest.py`, `pipeline_clients.py`, `pipeline_runner.py`, `pipeline_sv.py` (loại 2), `pipeline_type1.py` (loại 1), `src/routes/pipeline_routes.py`, `frontend/src/pages/PipelinePage.tsx`, `frontend/src/components/pipeline/*`.
+> - TST: `.claude/skills/srt-flow/scripts/ai_flow.py`; bước `ai`, `GET /api/ai`, `POST …/ai/reset` trong `studio/server/index.js`.
+>
+> Khác bản thiết kế ban đầu:
+> - API có thêm `GET /api/pipeline/runs/<rid>/items/<iid>/files/<txt|audio|srt|video>` (phát file của item), và `GET/POST/DELETE /api/pipeline/presets` (preset cấu hình loại 2 lưu từ trang Story Video).
+> - `config.type2.presetId` được hỗ trợ.
+> - Nguồn item có thể là link Google Docs công khai.
 > API của các app được gọi tới: [01 TTS](01-app-tts-dgt.md) · [02 TST Studio](02-app-tst-studio.md) · [03 Story Video Studio](03-app-story-video-studio.md).
 > Sơ đồ tổng thể: [00](00-tong-quan-kien-truc.md).
 

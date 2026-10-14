@@ -204,6 +204,15 @@ def validate_config(config: dict, types: set[int]) -> dict:
         raise PipelineError("tst_project_required", "Loại 1 cần chọn chủ đề TST (tstProjectId).")
 
     type2 = config.setdefault("type2", {})
+    if type2.get("presetId"):
+        # Preset luu tu trang Story Video: dung nguyen sharedConfig cua no (o xuat lay tu config.output).
+        from src.utils.pipeline_store import get_preset
+
+        preset = get_preset(str(type2["presetId"]))
+        if preset is None:
+            raise PipelineError("preset_not_found", "Không tìm thấy preset cấu hình loại 2.", 404)
+        type2["sharedConfig"] = copy.deepcopy(preset.get("sharedConfig") or {})
+        type2["presetName"] = preset.get("name")
     shared = type2.setdefault("sharedConfig", {})
     if 2 in types:
         library_ids = shared.get("libraryIds") or []

@@ -125,6 +125,32 @@ function StageDots({ item }: { item: PipelineItem }) {
   );
 }
 
+function RetryFromSelect({ item, busy, onRetry }: { item: PipelineItem; busy: boolean; onRetry: (stage: string) => void }) {
+  const stages = item.type === 1 ? STAGES_TYPE1 : STAGES_TYPE2;
+  const current = item.status === "done" ? stages.length - 1 : stages.indexOf(item.stage);
+  const choices = stages.slice(0, Math.max(0, current + (item.status === "done" ? 0 : 1))).filter((s) => !s.startsWith("GATE_"));
+  if (!choices.length) return null;
+  return (
+    <select
+      className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+      value=""
+      disabled={busy}
+      title="Chạy lại từ một bước trước đó"
+      onChange={(event) => {
+        const stage = event.target.value;
+        if (stage && window.confirm(`Chạy lại "${item.title}" từ bước ${STAGE_LABEL[stage] ?? stage}?`)) onRetry(stage);
+      }}
+    >
+      <option value="">Chạy lại từ…</option>
+      {choices.map((stage) => (
+        <option key={stage} value={stage}>
+          {STAGE_LABEL[stage] ?? stage}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 function ItemRow({
   item,
   busy,
@@ -134,7 +160,7 @@ function ItemRow({
 }: {
   item: PipelineItem;
   busy: boolean;
-  onRetry: () => void;
+  onRetry: (stage?: string) => void;
   onCancel: () => void;
   onReview?: () => void;
 }) {
@@ -212,8 +238,11 @@ function ItemRow({
               Duyệt
             </Button>
           ) : null}
+          {RETRYABLE_ITEM.has(item.status) || item.status === "done" ? (
+            <RetryFromSelect item={item} busy={busy} onRetry={(stage) => onRetry(stage)} />
+          ) : null}
           {RETRYABLE_ITEM.has(item.status) ? (
-            <Button size="sm" variant="outline" onClick={onRetry} disabled={busy} title="Chạy lại bước này">
+            <Button size="sm" variant="outline" onClick={() => onRetry()} disabled={busy} title="Chạy lại bước này">
               <RotateCcw className="h-4 w-4" />
               Thử lại
             </Button>
@@ -268,6 +297,14 @@ export function PipelineRunDetail({
   }, [load]);
 
   const finished = run ? RUN_FINISHED.has(run.status) : false;
+  const needsHuman = run ? run.items.filter((i) => i.status === "awaiting_review" || i.status === "needs_attention").length : 0;
+  useEffect(() => {
+    const previous = document.title;
+    document.title = needsHuman ? `(${needsHuman}) Cần xử lý · Tạo video tự động` : "Tạo video tự động";
+    return () => {
+      document.title = previous;
+    };
+  }, [needsHuman]);
   useEffect(() => {
     if (finished) return;
     const timer = window.setInterval(() => void load(), RUN_POLL_MS);
@@ -364,7 +401,7 @@ export function PipelineRunDetail({
                 key={item.itemId}
                 item={item}
                 busy={busy}
-                onRetry={() => void act(() => retryPipelineItem(run.runId, item.itemId))}
+                onRetry={(stage) => void act(() => retryPipelineItem(run.runId, item.itemId, stage))}
                 onCancel={() => {
                   if (window.confirm(`Huỷ "${item.title}"?`)) void act(() => cancelPipelineItem(run.runId, item.itemId));
                 }}

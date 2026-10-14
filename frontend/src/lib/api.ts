@@ -4,6 +4,7 @@ import type {
   PipelineEvent,
   PipelineGate,
   PipelineHealth,
+  PipelinePreset,
   PipelineRejectAction,
   PipelineReview,
   PipelineRun,
@@ -1196,3 +1197,11 @@ export const rejectPipelineItem = (
   itemId: string,
   body: { gate: PipelineGate; action: PipelineRejectAction; note?: string; batchNos?: number[]; characterIds?: string[] },
 ) => requestJson<PipelineRun>(`/api/pipeline/runs/${runId}/items/${itemId}/reject`, jsonPost(body));
+
+export const listPipelinePresets = () => requestJson<{ presets: PipelinePreset[] }>("/api/pipeline/presets");
+
+export const createPipelinePreset = (name: string, sharedConfig: CreateStoryBatchRequest["sharedConfig"]) =>
+  requestJson<PipelinePreset>("/api/pipeline/presets", jsonPost({ name, sharedConfig }));
+
+export const deletePipelinePreset = (presetId: string) =>
+  requestJson<{ deleted: string }>(`/api/pipeline/presets/${presetId}`, { method: "DELETE" });

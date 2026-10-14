@@ -495,6 +495,8 @@ class StoryVideoBatchRunner:
                     [config["library_id"]] if config.get("library_id") else []
                 ),
                 "skip_tv_effect": bool(config.get("skip_tv_effect", False)),
+                # retry-failed dung lai style TV cua batch goc (truoc day bi mat).
+                "tv_effect_style_id": config.get("tv_effect_style_id", ""),
                 "clip_usage_mode": config.get("clip_usage_mode", "reuse"),
                 "decor_image_id": config.get("decor_image_id", ""),
                 "decor_image_name": self._decor_name(config.get("decor_image_id", "")),

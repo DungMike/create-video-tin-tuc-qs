@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   createPipelineRun,
   getOutputDrives,
@@ -14,11 +15,13 @@ import {
   getSubtitleFonts,
   getSubtitlePresets,
   getTVEffectStyles,
+  listPipelinePresets,
   scanPipelineFolder,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type {
   OutputDriveOption,
+  PipelinePreset,
   PipelineRun,
   PipelineRunConfig,
   PipelineTstProject,
@@ -60,6 +63,7 @@ interface StoredForm {
   outputDrive: string;
   clipUsageMode: "reuse" | "once";
   folderPath: string;
+  presetId: string;
 }
 
 const DEFAULT_FORM: StoredForm = {
@@ -76,6 +80,7 @@ const DEFAULT_FORM: StoredForm = {
   outputDrive: "",
   clipUsageMode: "reuse",
   folderPath: "",
+  presetId: "",
 };
 
 function readStoredForm(): StoredForm {
@@ -129,6 +134,7 @@ export function PipelineRunForm({ onCreated }: { onCreated: (run: PipelineRun) =
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [docLinks, setDocLinks] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
 
   const [voices, setVoices] = useState<PipelineVoice[]>([]);
@@ -140,6 +146,7 @@ export function PipelineRunForm({ onCreated }: { onCreated: (run: PipelineRun) =
   const [fonts, setFonts] = useState<SubtitleFontInfo[]>([]);
   const [tvStyles, setTvStyles] = useState<TVEffectStyle[]>([]);
   const [drives, setDrives] = useState<OutputDriveOption[]>([]);
+  const [configPresets, setConfigPresets] = useState<PipelinePreset[]>([]);
 
   const update = (patch: Partial<StoredForm>) =>
     setForm((current) => {
@@ -159,6 +166,7 @@ export function PipelineRunForm({ onCreated }: { onCreated: (run: PipelineRun) =
     getSubtitlePresets().then((res) => setPresets(res.presets.filter((p) => !p.hidden))).catch(() => undefined);
     getSubtitleFonts().then((res) => setFonts(res.fonts)).catch(() => undefined);
     getTVEffectStyles().then((res) => setTvStyles(res.styles)).catch(() => undefined);
+    listPipelinePresets().then((res) => setConfigPresets(res.presets)).catch(() => undefined);
     getOutputDrives()
       .then((res) => {
         setDrives(res.drives);
@@ -219,6 +227,23 @@ export function PipelineRunForm({ onCreated }: { onCreated: (run: PipelineRun) =
     }
   };
 
+  const addDocLinks = () => {
+    const links = docLinks
+      .split(/\s+/)
+      .map((link) => link.trim())
+      .filter((link) => /^https?:\/\/docs\.google\.com\//.test(link));
+    if (!links.length) {
+      setNotice("Không có link Google Docs hợp lệ (https://docs.google.com/...).");
+      return;
+    }
+    setEntries((current) => [
+      ...current,
+      ...links.map<Entry>((link) => ({ key: nextKey(), name: link, size: 0, kind: "gdoc", type: form.defaultType, path: link, valid: true })),
+    ]);
+    setDocLinks("");
+    setNotice(`Thêm ${links.length} link Google Docs (tài liệu phải ở chế độ ai có link đều xem được).`);
+  };
+
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragging(false);
@@ -233,9 +258,9 @@ export function PipelineRunForm({ onCreated }: { onCreated: (run: PipelineRun) =
     if (!validEntries.length) problems.push("chưa có kịch bản");
     if (!form.voiceRef) problems.push("chưa chọn giọng đọc");
     if (hasType1 && !form.tstProjectId) problems.push("loại 1 cần chủ đề TST");
-    if (hasType2 && !form.libraryIds.length) problems.push("loại 2 cần thư viện clip");
+    if (hasType2 && !form.presetId && !form.libraryIds.length) problems.push("loại 2 cần thư viện clip");
     return problems;
-  }, [validEntries.length, form.voiceRef, form.tstProjectId, form.libraryIds.length, hasType1, hasType2]);
+  }, [validEntries.length, form.voiceRef, form.tstProjectId, form.libraryIds.length, form.presetId, hasType1, hasType2]);
 
   const submit = async () => {
     if (missing.length) return;
@@ -258,7 +283,7 @@ export function PipelineRunForm({ onCreated }: { onCreated: (run: PipelineRun) =
         lang: form.lang || null,
         gates: { prompts: true, characters: form.gateCharacters },
       },
-      type2: {
+      type2: form.presetId ? { presetId: form.presetId } : {
         sharedConfig: {
           libraryIds: form.libraryIds,
           outputDrive: form.outputDrive || undefined,
@@ -348,6 +373,19 @@ export function PipelineRunForm({ onCreated }: { onCreated: (run: PipelineRun) =
           <p className="text-xs text-muted-foreground">
             File trong thư mục chỉ được đọc; docx gốc không bị xoá hay sửa.
           </p>
+          <Label htmlFor="pipeline-gdocs" className="pt-2">Hoặc link Google Docs (mỗi dòng 1 link)</Label>
+          <div className="flex gap-2">
+            <Textarea
+              id="pipeline-gdocs"
+              rows={1}
+              placeholder="https://docs.google.com/document/d/..."
+              value={docLinks}
+              onChange={(event) => setDocLinks(event.target.value)}
+            />
+            <Button variant="secondary" onClick={addDocLinks} disabled={!docLinks.trim()}>
+              Thêm
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -373,12 +411,12 @@ export function PipelineRunForm({ onCreated }: { onCreated: (run: PipelineRun) =
                     <div className="flex items-center gap-2">
                       <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
                       <span className="font-medium">{entry.name}</span>
-                      <span className="text-xs text-muted-foreground">{formatBytes(entry.size)}</span>
+                      {entry.kind !== "gdoc" ? <span className="text-xs text-muted-foreground">{formatBytes(entry.size)}</span> : null}
                     </div>
                     {entry.warning ? <div className="text-xs text-amber-700 dark:text-amber-300">⚠ {entry.warning}</div> : null}
                   </td>
                   <td className="max-w-[18rem] truncate px-3 py-2 text-xs text-muted-foreground" title={entry.path}>
-                    {entry.file ? "Upload" : entry.path}
+                    {entry.file ? "Upload" : entry.kind === "gdoc" ? "Google Docs" : entry.path}
                   </td>
                   <td className="px-3 py-2">
                     {entry.valid ? <TypeToggle value={entry.type} onChange={(type) => setEntryType(entry.key, type)} /> : "—"}
@@ -490,6 +528,22 @@ export function PipelineRunForm({ onCreated }: { onCreated: (run: PipelineRun) =
         <fieldset className="space-y-3 rounded-2xl border border-border/70 p-4">
           <legend className="px-1 text-sm font-semibold">Loại 2 · Clip nền</legend>
           <div className="space-y-2">
+            <Label htmlFor="pipeline-preset">Cấu hình</Label>
+            <select id="pipeline-preset" className={cn(selectClassName, "max-w-xl")} value={form.presetId} onChange={(event) => update({ presetId: event.target.value })}>
+              <option value="">Chọn nhanh bên dưới</option>
+              {configPresets.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  Preset: {preset.name} ({preset.sharedConfig.libraryIds?.length ?? 0} thư viện)
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              Preset lưu ở trang Story Video (nút “Lưu cấu hình cho Pipeline”) giữ đủ sóng âm, CTA, khung TV, bố cục, kiểu phụ đề.
+            </p>
+          </div>
+          {form.presetId ? null : (
+          <>
+          <div className="space-y-2">
             <Label>Thư viện clip</Label>
             <div className="flex flex-wrap gap-2">
               {libraries.map((library) => {
@@ -569,6 +623,8 @@ export function PipelineRunForm({ onCreated }: { onCreated: (run: PipelineRun) =
           <p className="text-xs text-muted-foreground">
             Sóng âm, CTA, khung TV, lớp nhiễu theo cấu hình chung ở trang Story Video. Pipeline luôn tắt chế độ tối ưu (không tạm dừng app khác).
           </p>
+          </>
+          )}
         </fieldset>
       ) : null}
 

@@ -3669,6 +3669,7 @@ def retry_batch_failed(batch_id: str):
             # Batches rendered before multi-select only carry the singular key.
             "library_ids": s.get("library_ids") or [s.get("library_id", "")],
             "skip_tv_effect": bool(s.get("skip_tv_effect", False)),
+            "tv_effect_style_id": str(s.get("tv_effect_style_id") or ""),
             # Item cu khong co key -> "reuse", dung nhu luc no chay lan dau.
             "clip_usage_mode": s.get("clip_usage_mode", "reuse"),
             "decor_image_id": s.get("decor_image_id", ""),

@@ -15,11 +15,14 @@ Toàn bộ hệ thống chỉ còn **hai trang**:
 |---|---|
 | `/story-video` | Tạo video: chọn audio/script, thư viện clip, intro, khung TV, sóng âm/CTA, phụ đề. Chạy 1 video lẻ hoặc batch. |
 | `/story-video/settings` | Cấu hình tài nguyên: thư viện clip (harvest/prefetch/normalize/bake), khung TV, hiệu ứng TV, overlay sóng âm & CTA. |
+| `/pipeline` | **Tạo video tự động** từ kịch bản `.docx`/`.txt` (upload, đường dẫn folder hoặc link Google Docs): giọng đọc + phụ đề qua app TTS (DGT), rồi loại 1 (ảnh minh hoạ qua TST Studio + AI, có bước duyệt prompt) hoặc loại 2 (clip nền, dùng hàng đợi batch của trang này). |
 
 Mọi URL khác đều redirect về `/story-video`.
 
 API: tất cả nằm dưới `/api/story-video/*` (blueprint `story_video_bp`), cộng thêm
 `GET /api/voices` (danh sách giọng đọc TTS) và `GET /media/<path>` (serve file preview).
+Pipeline: `/api/pipeline/*` (blueprint `pipeline_bp`). Kiến trúc, API của 3 app và kế hoạch nằm ở
+[`docs/integration/`](docs/integration/00-tong-quan-kien-truc.md).
 
 ---
 

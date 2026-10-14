@@ -221,3 +221,35 @@ def test_manual_retry_renders_again_instead_of_reattaching_old_batch(env):
     runner.tick()
     assert len(env["captured"]["batches"]) == 2
     assert store.load_run(rid)["items"][0]["sv"]["batchId"] != batch_id
+
+
+def test_retry_failed_keeps_tv_effect_style(env, monkeypatch):
+    """retry-failed truoc day lam mat tvEffectStyleId (style TV cua batch goc)."""
+    from src.web_app import app
+
+    audio = env["tmp"] / "a.mp3"
+    audio.write_bytes(b"x")
+    body = {"items": [{"inputType": "audio_file", "inputValue": str(audio), "outputName": "a"}],
+            "sharedConfig": {"libraryIds": [env["library"]], "tvEffectStyleId": "vhs_retro"}}
+    assert app.test_client().post("/api/story-video/batch/create", json=body).status_code == 202
+    batch = env["captured"]["batches"][-1]
+    assert batch["configs"][0]["tv_effect_style_id"] == "vhs_retro"
+    # Runner that ghi tv_effect_style_id vao progress; batch FakeRunner cua test thi ghi tay.
+    path = story_video_batch._batch_progress_path(batch["batchId"])
+    progress = json.load(open(path, encoding="utf-8"))
+    progress["stories"][0].update(status="failed", output_name="a", input_type="audio_file",
+                                  tv_effect_style_id="vhs_retro", library_ids=[env["library"]])
+    story_video_pipeline._save_json(path, progress)
+    monkeypatch.setattr(story_video_batch, "is_batch_queued_or_active", lambda _bid: False)
+    response = app.test_client().post(f"/api/story-video/batch/{batch['batchId']}/retry-failed")
+    assert response.status_code == 202, response.get_json()
+    assert env["captured"]["batches"][-1]["configs"][0]["tv_effect_style_id"] == "vhs_retro"
+
+
+def test_real_runner_records_tv_effect_style(env, monkeypatch):
+    monkeypatch.undo()  # dung StoryVideoBatchRunner that (chi khoi tao, khong enqueue)
+    monkeypatch.setattr(Config, "STORY_VIDEO_DIR", str(env["tmp"] / "story_video2"))
+    from src.utils.story_video_batch import StoryVideoBatchRunner
+
+    runner_obj = StoryVideoBatchRunner("sb-test1234", [{"story_id": "sv-1", "output_name": "a", "tv_effect_style_id": "vhs_retro"}])
+    assert runner_obj.progress["stories"][0]["tv_effect_style_id"] == "vhs_retro"

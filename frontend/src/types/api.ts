@@ -1594,7 +1594,12 @@ export interface PipelineRunConfig {
     video?: { from?: string; to?: string | null };
   };
   /** sharedConfig gửi nguyên cho /api/story-video/batch/create (route nhận thêm tvEffectStyleId). */
-  type2?: { sharedConfig?: CreateStoryBatchRequest["sharedConfig"] & { tvEffectStyleId?: string } };
+  type2?: {
+    /** Preset lưu từ trang Story Video; có thì server dùng nguyên sharedConfig của preset. */
+    presetId?: string;
+    presetName?: string;
+    sharedConfig?: CreateStoryBatchRequest["sharedConfig"] & { tvEffectStyleId?: string };
+  };
   output?: { drive?: string; subdir?: string };
 }
 
@@ -1668,3 +1673,10 @@ export interface PipelineReview {
 }
 
 export type PipelineRejectAction = "rerun_ai" | "redo_batches" | "regen_characters" | "manual";
+
+export interface PipelinePreset {
+  id: string;
+  name: string;
+  sharedConfig: CreateStoryBatchRequest["sharedConfig"];
+  createdAt: string;
+}

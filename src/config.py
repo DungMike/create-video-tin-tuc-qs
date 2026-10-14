@@ -350,3 +350,8 @@ class Config:
     PIPELINE_COLLECT_MODE = os.getenv("PIPELINE_COLLECT_MODE", "link").strip().lower()
     # Gioi han file kich ban cua DGT (MaxFileBytes = 10 MiB).
     PIPELINE_MAX_TEXT_BYTES = int(os.getenv("PIPELINE_MAX_TEXT_BYTES", str(10 * 1024 * 1024)))
+    # Canh bao dung luong tren trang Pipeline: thu muc desktop-work cua app TTS (khong tu don,
+    # vd .../DgtAutoTTSMM_v5 - clone/.automation-data/desktop-work; de trong = bo qua) va o xuat.
+    DGT_WORK_DIR = os.getenv("DGT_WORK_DIR", "")
+    PIPELINE_DISK_WARN_GB = float(os.getenv("PIPELINE_DISK_WARN_GB", "10"))
+    PIPELINE_MIN_FREE_GB = float(os.getenv("PIPELINE_MIN_FREE_GB", "20"))

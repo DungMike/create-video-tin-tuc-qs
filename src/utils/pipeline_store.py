@@ -192,3 +192,43 @@ def refresh_run_status(run: dict) -> None:
         run.setdefault("finishedAt", utc_now())
     elif items:
         run["status"] = "running"
+
+
+# --- preset cau hinh loai 2 (luu tu trang Story Video) -----------------------------------
+
+def presets_root() -> str:
+    return os.path.abspath(os.path.join(Config.PIPELINE_DIR, "presets"))
+
+
+def list_presets() -> list[dict]:
+    root = presets_root()
+    if not os.path.isdir(root):
+        return []
+    presets = [p for p in (_load_json(os.path.join(root, name)) for name in os.listdir(root) if name.endswith(".json")) if p]
+    presets.sort(key=lambda p: p.get("createdAt") or "", reverse=True)
+    return presets
+
+
+def get_preset(preset_id: str) -> dict | None:
+    if not preset_id or not preset_id.startswith("ps-") or not preset_id[3:].isalnum():
+        return None
+    return _load_json(os.path.join(presets_root(), f"{preset_id}.json"))
+
+
+def save_preset(name: str, shared_config: dict) -> dict:
+    preset = {
+        "id": f"ps-{uuid.uuid4().hex[:8]}",
+        "name": name.strip()[:120] or "Preset",
+        "sharedConfig": shared_config,
+        "createdAt": utc_now(),
+    }
+    _save_json(os.path.join(presets_root(), f"{preset['id']}.json"), preset)
+    return preset
+
+
+def delete_preset(preset_id: str) -> bool:
+    preset = get_preset(preset_id)
+    if not preset:
+        return False
+    os.remove(os.path.join(presets_root(), f"{preset_id}.json"))
+    return True
