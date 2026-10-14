@@ -10,6 +10,7 @@ Provides endpoints for:
 
 import json
 import os
+import re
 import shutil
 import threading
 import uuid
@@ -3205,11 +3206,16 @@ def create_story_batch():
 
     cleanup_expired_drive_audio_imports()
 
-    # Handle multipart/form-data
-    payload_str = request.form.get("payload", "{}")
-    try:
-        data = json.loads(payload_str)
-    except Exception:
+    # multipart/form-data (field "payload") hoac body application/json. Truoc day
+    # thieu field payload thi doc thanh "{}" va bo qua luon body JSON -> empty_items.
+    payload_str = request.form.get("payload")
+    data = None
+    if payload_str is not None:
+        try:
+            data = json.loads(payload_str)
+        except Exception:
+            data = None
+    if not isinstance(data, dict):
         data = request.get_json(silent=True) or {}
 
     items = data.get("items", [])
@@ -3468,8 +3474,15 @@ def create_story_batch():
 
     # Batch vao hang doi: moi luc chi render 1 batch, batch nay xong moi toi batch sau.
     # Video ra thu muc output rieng OUTPUT_DIR/story-video/<batch_id>/.
+    # Thu muc con duoi <o>/output/story-video/ (mac dinh = batch_id). Pipeline dung
+    # "pipeline-<runId>" de video cua ca lan chay nam chung mot cho.
+    output_subdir = str(shared_config.get("outputSubdir") or "").strip() or None
+    if output_subdir and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", output_subdir):
+        _abandon_batch_dir(batch_dir, decor_assignments)
+        return _error("outputSubdir chi duoc gom chu, so, - va _.", code="invalid_output_subdir")
     runner = StoryVideoBatchRunner(
         batch_id, story_configs, optimize_mode=optimize_mode, output_drive=output_drive,
+        output_subdir=output_subdir,
     )
     queue_position = runner.enqueue()
 

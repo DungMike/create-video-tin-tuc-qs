@@ -682,3 +682,7 @@ def retry_item(run_id: str, item_id: str, from_stage: str | None = None) -> dict
     run = update_run(run_id, mutate)
     wake()
     return run
+
+
+# Dang ky handler cua tung loai (cac module nay import cac ham o tren).
+from src.utils import pipeline_sv  # noqa: E402,F401
