@@ -2,7 +2,10 @@
   "name": "auto-video-review-studio",
   "private": true,
   "scripts": {
-    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev": "node scripts/dev.mjs",
+    "dev:status": "node scripts/dev.mjs status",
+    "dev:stop": "node scripts/dev.mjs stop",
+    "dev:svs": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:backend": ".\\venv\\Scripts\\python -m src.web_app",
     "dev:frontend": "npm --prefix frontend run dev",
     "build": "npm --prefix frontend run build",

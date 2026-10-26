@@ -1,9 +1,17 @@
 import type {
   ApiErrorPayload,
+  AutoSourceCleanupResult,
+  AutoSourceKeywordPlan,
+  AutoSourceOverview,
+  AutoSourceReport,
+  AutoSourceRun,
+  AutoSourceSettings,
   CreatePipelineRunPayload,
   PipelineEvent,
   PipelineGate,
   PipelineHealth,
+  PipelineInputMode,
+  PipelineItemDetail,
   PipelinePreset,
   PipelineRejectAction,
   PipelineReview,
@@ -1151,10 +1159,10 @@ export const getPipelineHealth = () => requestJson<PipelineHealth>("/api/pipelin
 export const getPipelineVoices = () => requestJson<{ voices: PipelineVoice[] }>("/api/pipeline/tts/voices");
 
 export const getPipelineTstProjects = () =>
-  requestJson<{ projects: PipelineTstProject[] }>("/api/pipeline/tst/projects");
+  requestJson<{ projects: PipelineTstProject[]; tstUrl?: string }>("/api/pipeline/tst/projects");
 
-export const scanPipelineFolder = (path: string, recursive: boolean) =>
-  requestJson<PipelineScanResult>("/api/pipeline/scan", jsonPost({ path, recursive }));
+export const scanPipelineFolder = (path: string, recursive: boolean, mode: PipelineInputMode = "script") =>
+  requestJson<PipelineScanResult>("/api/pipeline/scan", jsonPost({ path, recursive, mode }));
 
 /** Upload file (nếu có) + payload; item nguồn upload dùng `source: "upload:<chỉ số trong files>"`. */
 export async function createPipelineRun(payload: CreatePipelineRunPayload, files: File[]) {
@@ -1186,6 +1194,13 @@ export const retryPipelineItem = (runId: string, itemId: string, fromStage?: str
 export const cancelPipelineItem = (runId: string, itemId: string) =>
   requestJson<PipelineRun>(`/api/pipeline/runs/${runId}/items/${itemId}/cancel`, jsonPost());
 
+/** Thử lại mọi mục "cần xử lý"/"lỗi" của run tại bước đang dừng (mục đã huỷ giữ nguyên). */
+export const retryPipelineRunItems = (runId: string) =>
+  requestJson<PipelineRun>(`/api/pipeline/runs/${runId}/retry`, jsonPost());
+
+export const getPipelineItemDetail = (runId: string, itemId: string) =>
+  requestJson<PipelineItemDetail>(`/api/pipeline/runs/${runId}/items/${itemId}/detail`);
+
 export const getPipelineReview = (runId: string, itemId: string, gate: PipelineGate) =>
   requestJson<PipelineReview>(`/api/pipeline/runs/${runId}/items/${itemId}/review?gate=${gate}`);
 
@@ -1205,3 +1220,27 @@ export const createPipelinePreset = (name: string, sharedConfig: CreateStoryBatc
 
 export const deletePipelinePreset = (presetId: string) =>
   requestJson<{ deleted: string }>(`/api/pipeline/presets/${presetId}`, { method: "DELETE" });
+
+// === Tự động tìm nguồn video + kiểm tra kho clip ===
+
+export const getAutoSource = () => requestJson<AutoSourceOverview>("/api/story-video/auto-source");
+
+export const saveAutoSourceSettings = (settings: Partial<AutoSourceSettings>) =>
+  requestJson<{ settings: AutoSourceSettings; nextRunAt: string | null }>("/api/story-video/auto-source/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+
+export const getAutoSourceReport = (refresh = false) =>
+  requestJson<AutoSourceReport>(`/api/story-video/auto-source/report${refresh ? "?refresh=1" : ""}`);
+
+export const getAutoSourceKeywordPlan = (limit?: number) =>
+  requestJson<AutoSourceKeywordPlan>(`/api/story-video/auto-source/keywords${limit ? `?limit=${limit}` : ""}`);
+
+export const startAutoSourceRun = () => requestJson<AutoSourceRun>("/api/story-video/auto-source/run", jsonPost());
+
+export const cancelAutoSourceRun = () => requestJson<AutoSourceRun>("/api/story-video/auto-source/cancel", jsonPost());
+
+export const runAutoSourceCleanup = () =>
+  requestJson<AutoSourceCleanupResult>("/api/story-video/auto-source/cleanup", jsonPost({ confirm: true }));

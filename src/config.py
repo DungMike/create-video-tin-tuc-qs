@@ -214,6 +214,8 @@ class Config:
     # working set can live on a fast small disk while this stays on a big slow one --
     # keeping it on the SSD buys no render speed and just consumes the space.
     STORY_RAW_DIR = os.getenv("STORY_RAW_DIR", os.path.join(STORAGE_DIR, "story_raw_videos"))
+    # Cai dat + lich su luong tu dong tim nguon video (src/utils/story_auto_source.py).
+    STORY_AUTO_SOURCE_DIR = os.getenv("STORY_AUTO_SOURCE_DIR", os.path.join(STORY_RAW_DIR, "_auto_source"))
     # --- Prefetch branch (download-all first, review/prune, then cut) ---
     # The alternate import flow: instead of previewing provider results over the
     # provider CDN and only downloading what was picked, it pulls every page of a
@@ -348,10 +350,13 @@ class Config:
     PIPELINE_SCENE_RETRY_ROUNDS = max(1, int(os.getenv("PIPELINE_SCENE_RETRY_ROUNDS", "3")))
     # Dua video loai 1 vao thu muc xuat chung: link (hardlink, khac o thi copy) | copy | none.
     PIPELINE_COLLECT_MODE = os.getenv("PIPELINE_COLLECT_MODE", "link").strip().lower()
+    # true = gom xong (ban o thu muc xuat du kich thuoc) thi xoa thu muc <truyen>_video cua TST
+    # (mp4 + _cache, ~10 GB/truyen 75 phut tren o C). false = giu nguyen nhu cu.
+    PIPELINE_CLEANUP_TST_VIDEO = os.getenv("PIPELINE_CLEANUP_TST_VIDEO", "false").lower() == "true"
     # Gioi han file kich ban cua DGT (MaxFileBytes = 10 MiB).
     PIPELINE_MAX_TEXT_BYTES = int(os.getenv("PIPELINE_MAX_TEXT_BYTES", str(10 * 1024 * 1024)))
     # Canh bao dung luong tren trang Pipeline: thu muc desktop-work cua app TTS (khong tu don,
-    # vd .../DgtAutoTTSMM_v5 - clone/.automation-data/desktop-work; de trong = bo qua) va o xuat.
+    # vd .../app-tts-dgt/.automation-data/desktop-work; de trong = bo qua) va o xuat.
     DGT_WORK_DIR = os.getenv("DGT_WORK_DIR", "")
     PIPELINE_DISK_WARN_GB = float(os.getenv("PIPELINE_DISK_WARN_GB", "10"))
     PIPELINE_MIN_FREE_GB = float(os.getenv("PIPELINE_MIN_FREE_GB", "20"))

@@ -28,7 +28,7 @@ from src.utils.pipeline_runner import (
     set_status,
     stage_handler,
 )
-from src.utils.pipeline_store import append_event, load_run, run_dir, run_lock, save_run, touch_item
+from src.utils.pipeline_store import append_event, load_run, run_lock, save_run, touch_item
 
 SV_RESUBMIT_LIMIT = 1  # story loi thi tu gui lai 1 lan trong batch moi
 
@@ -157,15 +157,18 @@ def _recover_orphans(run: dict, ready: list[dict]) -> None:
         return os.path.normcase(os.path.abspath(audio)), output_name
 
     wanted = {key_of(item["files"]["audio"], item["slug"]): item for item in ready if item["files"].get("audio")}
-    run_prefix = os.path.normcase(os.path.abspath(run_dir(run["runId"])))
-    if not any(path.startswith(run_prefix) for path, _name in wanted):
+    if not wanted:
         return
+    # Chi batch cua chinh run nay (audio co san co the nam ngoai run va dung o nhieu run).
+    subdir = _shared_config(run)["outputSubdir"]
     entries = sorted(
         (e for e in os.scandir(root) if e.is_dir()), key=lambda e: e.stat().st_mtime, reverse=True
     )[:50]
     found: dict[tuple[str, str], str] = {}
     for entry in entries:
         progress = load_batch_progress(entry.name) or {}
+        if progress.get("outputSubdir") != subdir:
+            continue
         for story in progress.get("stories", []):
             if story.get("status") in ("failed", "cancelled", "cancelling"):
                 continue

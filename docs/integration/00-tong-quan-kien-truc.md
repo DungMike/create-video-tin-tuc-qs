@@ -32,7 +32,7 @@
 | Chủ đề | Quyết định |
 |---|---|
 | Orchestrator | Nằm **trong Story Video Studio**, vì app này đã có luồng loại 2, hàng đợi lưu file và frontend |
-| AI agent | **Claude Code CLI headless** (`claude -p`), dùng lại skill `srt-prompt-anh` + skill vẽ của chủ đề, chạy bằng script `ai_flow.py` trong TST Studio |
+| AI agent | **Claude Code CLI headless** (`claude -p`), dùng lại skill `srt-prompt-anh` + bộ skill của chủ đề (skill vẽ chính + skill thêm), chạy bằng script `ai_flow.py` trong TST Studio |
 | Cổng duyệt | Duyệt prompt **bắt buộc**; duyệt ảnh nhân vật **tuỳ chọn, mặc định tắt** |
 | App TTS | Không sửa; gọi qua Automation API có sẵn |
 | Tài liệu | Gom tại `create-video-tin-tuc-qs/docs/integration/` |
@@ -41,7 +41,7 @@
 
 | | App TTS | App tạo ảnh | App dựng video nền (host) |
 |---|---|---|---|
-| Thư mục | `C:\Users\hiv\Documents\Cua Dung\DgtAutoTTSMM_v5\DgtAutoTTSMM_v5 - clone` | `C:\Users\hiv\Downloads\TOOL IMAGE\clone` | `C:\Users\hiv\Documents\Cua Dung\create-video-tin-tuc-qs` |
+| Thư mục | `C:\Users\hiv\Documents\Cua Dung\app-tts-dgt` | `C:\Users\hiv\Documents\Cua Dung\app-tst-studio` | `C:\Users\hiv\Documents\Cua Dung\create-video-tin-tuc-qs` |
 | Công nghệ | EXE WinForms của nhà cung cấp + API .NET 10 tự viết | Express + React, Python skills, bridge C# | Flask + FFmpeg, React + Vite |
 | Cổng | API `127.0.0.1:8787` | Studio `127.0.0.1:5180`, bridge `127.0.0.1:5179` | Flask `127.0.0.1:5006`, Vite `5176` |
 | Khởi động | `scripts\Start-Api.ps1` (cùng quyền admin với EXE) | `start-studio.cmd`; app TST qua `tst-bridge\start-with-api.ps1` | `npm run dev` (gốc repo) |
@@ -70,7 +70,7 @@ flowchart TB
     exe["DgtAutoTTSMM.exe<br/>MiniMax qua Chrome"]
   end
 
-  subgraph TST["TST Studio · TOOL IMAGE/clone"]
+  subgraph TST["TST Studio · app-tst-studio"]
     studio["Express studio<br/>cổng 5180"]
     aiflow["ai_flow.py gọi claude -p<br/>bible + prompt + build"]
     taoanh["tao_anh.py"]
@@ -234,6 +234,10 @@ Các item chạy gối nhau. Ví dụ: item 2 đang TTS trong khi item 1 đang t
 Danh sách đầy đủ biến mới: [04 §14](04-thiet-ke-pipeline.md#14-cấu-hình-mới).
 
 ## 10. Checklist trước khi chạy pipeline
+
+**Cách nhanh (16/10/2026):** `npm run dev` ở gốc `create-video-tin-tuc-qs` làm bước 1–3 dưới đây: bật SVS, mở app DGT + API (hỏi UAC một lần) và app TST + TST Studio nếu chưa chạy. Bạn chỉ còn đăng nhập app DGT / license TST, rồi làm bước 4. Ctrl+C chỉ tắt SVS; API DGT và TST Studio chạy nền (log `logs/services/`), tắt bằng `npm run dev:stop`. Chi tiết: README §7 "Dev".
+
+Cách tay:
 
 1. **DGT:**
    - mở `DgtAutoTTSMM.exe` (1 cửa sổ), đăng nhập, không mở hộp thoại nào;

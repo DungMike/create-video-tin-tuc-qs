@@ -24,6 +24,8 @@ from src.routes.youtube_download_routes import youtube_download_bp  # noqa: E402
 app.register_blueprint(youtube_download_bp)
 from src.routes.pipeline_routes import pipeline_bp  # noqa: E402
 app.register_blueprint(pipeline_bp)
+from src.routes.auto_source_routes import auto_source_bp  # noqa: E402
+app.register_blueprint(auto_source_bp)
 app.config["MAX_CONTENT_LENGTH"] = Config.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
 # Fonts the edit styles draw with (Thai OFL faces) must sit in STORY_FONTS_DIR:
@@ -107,4 +109,8 @@ if __name__ == "__main__":
     from src.utils.pipeline_runner import resume_pipeline_runs
 
     resume_pipeline_runs()
+    # Lich tu dong tim nguon video: chi chay khi bat "enabled" o Settings.
+    from src.utils.story_auto_source import start_scheduler
+
+    start_scheduler()
     app.run(host=Config.WEB_HOST, port=Config.WEB_PORT, debug=False)

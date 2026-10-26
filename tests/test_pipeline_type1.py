@@ -116,6 +116,70 @@ def test_full_flow_after_approval(env):
     assert store.load_run(rid)["status"] == "completed"
 
 
+def _render_and_collect(env, video_in_tst_dir=True):
+    """Chay toi DONE; video nam trong <tst dir>/<stem>_video (kem _cache) nhu TST that."""
+    rid, sid = _to_gate(env)
+    tst = env["tst"]
+    pipeline_type1.approve(rid, "it-01", "prompts")
+    runner.tick()
+    tst.finish_job(tst.last_job("characters")["id"])
+    tst.set_flow("demo", sid, characters={"done": 2, "total": 2})
+    runner.tick()
+    tst.finish_job(tst.last_job("scenes")["id"])
+    tst.set_flow("demo", sid, images={"done": 5, "total": 5}, next="done")
+    runner.tick()
+    story_dir = _item(rid)["tst"]["dir"]
+    video_dir = os.path.join(story_dir, f"{os.path.basename(story_dir)}_video")
+    folder = video_dir if video_in_tst_dir else str(env["tmp"])
+    os.makedirs(os.path.join(video_dir, "_cache"), exist_ok=True)
+    with open(os.path.join(video_dir, "_cache", "piece_001.mp4"), "wb") as f:
+        f.write(b"piece")
+    video = os.path.join(folder, "render.mp4")
+    with open(video, "wb") as f:
+        f.write(b"mp4data")
+    tst.finish_job(tst.last_job("video")["id"], lines=["PROGRESS 10/10", f"OUTPUT {video}"])
+    for _ in range(50):
+        runner.tick()
+        if _item(rid)["status"] == "done":
+            break
+        time.sleep(0.05)
+    assert _item(rid)["status"] == "done"
+    return rid, video_dir
+
+
+def test_cleanup_tst_video_after_collect(env, monkeypatch):
+    monkeypatch.setattr(Config, "PIPELINE_CLEANUP_TST_VIDEO", True)
+    rid, video_dir = _render_and_collect(env)
+    item = _item(rid)
+    assert not os.path.exists(video_dir)
+    assert open(item["files"]["video"], "rb").read() == b"mp4data"
+    assert item["tst"]["videoCleanedAt"]
+
+
+def test_cleanup_off_keeps_tst_video(env, monkeypatch):
+    monkeypatch.setattr(Config, "PIPELINE_CLEANUP_TST_VIDEO", False)
+    rid, video_dir = _render_and_collect(env)
+    assert os.path.isfile(os.path.join(video_dir, "_cache", "piece_001.mp4"))
+    assert "videoCleanedAt" not in _item(rid)["tst"]
+
+
+def test_cleanup_skips_render_outside_tst_video_dir(env, monkeypatch):
+    monkeypatch.setattr(Config, "PIPELINE_CLEANUP_TST_VIDEO", True)
+    rid, video_dir = _render_and_collect(env, video_in_tst_dir=False)
+    assert os.path.isfile(os.path.join(video_dir, "_cache", "piece_001.mp4"))
+    assert os.path.isfile(env["tmp"] / "render.mp4")
+
+
+def test_retry_collect_after_cleanup_points_to_video_step(env, monkeypatch):
+    monkeypatch.setattr(Config, "PIPELINE_CLEANUP_TST_VIDEO", True)
+    rid, _video_dir = _render_and_collect(env)
+    runner.retry_item(rid, "it-01", "COLLECT")
+    runner.tick()
+    item = _item(rid)
+    assert item["status"] == "needs_attention"
+    assert "chạy lại từ bước VIDEO" in item["error"]["message"]
+
+
 def test_character_gate_and_regen(env):
     rid = _run(env, gates={"characters": True})
     tst = env["tst"]
@@ -237,6 +301,26 @@ def test_review_payload(env):
     assert data["characters"][0]["name"] == "An"
 
 
+def test_each_video_uses_its_own_topic(env):
+    # Video 1 chọn chủ đề riêng (bộ skill riêng), video 2 dùng chủ đề mặc định của run.
+    sources = []
+    for i, project in ((1, "an-thai"), (2, None)):
+        src = env["tmp"] / "in" / f"Chu de {i}.txt"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("An đi.", encoding="utf-8")
+        sources.append({"path": str(src), "type": 1, "tstProjectId": project})
+    run = runner.create_run("Hai chu de", {"tts": {"voiceRef": "v"}, "type1": {"tstProjectId": "demo"}}, sources,
+                            run_id=store.new_run_id())
+    rid = run["runId"]
+    assert [i["tst"]["projectId"] for i in run["items"]] == ["an-thai", "demo"]
+    runner.tick()
+    for job_id in list(env["dgt"].jobs):
+        env["dgt"].finish(job_id, "1\n00:00:00,000 --> 00:00:09,000\nAn đi\n")
+    runner.tick()
+    assert [c[1] for c in env["tst"].calls if c[0] == "create_story"] == ["an-thai", "demo"]
+    assert ["/p/an-thai/" in store.load_run(rid)["items"][0]["tst"]["url"], "/p/demo/" in store.load_run(rid)["items"][1]["tst"]["url"]] == [True, True]
+
+
 def test_ai_lane_runs_one_story_at_a_time(env):
     sources = []
     for i in (1, 2):
@@ -263,3 +347,55 @@ def test_ai_lane_runs_one_story_at_a_time(env):
     items = store.load_run(rid)["items"]
     assert items[0]["stage"] == "GATE_PROMPTS" and items[1]["status"] == "running"
     assert _steps(env).count("ai") == 2
+
+
+def test_ai_waits_for_old_tst_studio_or_missing_claude_then_resumes(env):
+    env["tst"].ai = None  # TST Studio chua restart sau khi them buoc ai
+    rid = _run(env)
+    item = _item(rid)
+    assert item["stage"] == "AI" and item["status"] == "waiting_service"
+    assert item["waitingReason"] == "tst:ai_step_missing" and "start-studio.cmd" in item["progress"]["message"]
+    assert "ai" not in _steps(env)
+
+    env["tst"].ai = {"found": False, "path": None, "version": None}
+    runner.tick()
+    assert _item(rid)["waitingReason"] == "tst:claude_missing"
+
+    env["tst"].ai = {"found": True, "path": "claude.exe", "version": "test"}
+    runner.tick()  # tu chay tiep, khong can bam Thu lai
+    assert _item(rid)["status"] == "running" and _steps(env) == ["ai"]
+
+
+def test_item_detail_reads_live_tst_state(env, monkeypatch):
+    from src.web_app import app
+
+    rid = _run(env)
+    sid = _sid(rid)
+    tst = env["tst"]
+    tst.stories[("demo", sid)].update(
+        characters=[{"id": "an", "name": "An", "role": "chính", "description": "x", "image": "/media/demo/nv_an.jpg"}],
+        segments=[
+            {"id": 1, "start": "00:00:00,000", "text": "a", "prompt": "p1", "image": "/media/demo/001.jpg"},
+            {"id": 2, "start": "00:00:09,000", "text": "b", "prompt": "p2", "image": None, "error": "TST lỗi"},
+            {"id": 3, "start": "00:00:18,000", "text": "c", "prompt": None, "image": None},
+        ],
+    )
+    tst.job_store[tst.last_job("ai")["id"]]["lines"].append("PROGRESS 3/11 (bước prompts)")
+    monkeypatch.setattr("src.routes.pipeline_routes.TstClient", lambda *a, **k: tst)
+    with app.test_client() as client:
+        body = client.get(f"/api/pipeline/runs/{rid}/items/it-01/detail").get_json()
+        detail = body["tst"]
+        assert detail["storyId"] == sid and detail["url"].endswith(f"/p/demo/s/{sid}")
+        assert detail["characters"][0]["image"] == f"{Config.TST_STUDIO_URL}/media/demo/nv_an.jpg"
+        assert {k: detail["scenes"][k] for k in ("total", "withPrompt", "withImage", "errors")} == {
+            "total": 3, "withPrompt": 2, "withImage": 1, "errors": [2]}
+        assert detail["scenes"]["recent"][0]["id"] == 1
+        assert detail["job"]["step"] == "ai" and detail["job"]["status"] == "running"
+        assert detail["job"]["lines"][-1] == "PROGRESS 3/11 (bước prompts)"
+        assert body["events"] and {e["itemId"] for e in body["events"]} == {"it-01"}
+        assert body["item"]["itemId"] == "it-01" and "media" in body["item"]
+
+        tst.down = True
+        down = client.get(f"/api/pipeline/runs/{rid}/items/it-01/detail").get_json()
+        assert down["tst"] is None and "TST Studio" in down["tstError"] and down["events"]
+        assert client.get(f"/api/pipeline/runs/{rid}/items/it-99/detail").status_code == 404

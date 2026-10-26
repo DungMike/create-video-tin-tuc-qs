@@ -51,7 +51,7 @@ export function PipelinePage() {
       <HeroCard
         eyebrow="Pipeline"
         title="Tạo video tự động"
-        description="Kịch bản .docx/.txt → giọng đọc + phụ đề (app TTS) → video. Loại 1: ảnh minh hoạ qua TST Studio, AI viết prompt và dừng chờ duyệt trước khi tạo ảnh. Loại 2: ghép clip nền + hiệu ứng TV + phụ đề."
+        description="Kịch bản .docx/.txt → giọng đọc + phụ đề (app TTS) → video, hoặc dùng luôn audio + .srt có sẵn. Loại 1: ảnh minh hoạ qua TST Studio, AI viết prompt và dừng chờ duyệt trước khi tạo ảnh. Loại 2: ghép clip nền + hiệu ứng TV + phụ đề."
       />
       <PageSection>
         <PipelineHealthPanel />

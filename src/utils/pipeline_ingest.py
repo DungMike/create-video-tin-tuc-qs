@@ -19,6 +19,9 @@ import zipfile
 from src.config import Config
 
 TEXT_EXTENSIONS = {".docx", ".txt"}
+# Dau vao "co san audio + srt": bo qua INGEST/TTS. Thu tu = uu tien khi trung ten.
+AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg")
+SRT_EXTENSIONS = {".srt"}
 DGT_CHUNK_LIMIT = 499  # DGT tu cat khoi dai hon ~500 ky tu
 
 
@@ -152,12 +155,7 @@ def sha256_file(path: str) -> str:
 
 # --- quet folder -----------------------------------------------------------------
 
-def scan_folder(path: str, recursive: bool = False) -> dict:
-    """Liet ke .docx/.txt trong folder (chi doc). Trung ten goc thi uu tien .txt."""
-    root = os.path.abspath(path)
-    if not os.path.isdir(root):
-        raise IngestError("folder_not_found", f"Không tìm thấy thư mục: {path}")
-
+def _list_files(root: str, recursive: bool, extensions) -> list[str]:
     found: list[str] = []
     if recursive:
         for current, dirs, files in os.walk(root, followlinks=False):
@@ -165,16 +163,26 @@ def scan_folder(path: str, recursive: bool = False) -> dict:
             found.extend(os.path.join(current, name) for name in files)
     else:
         found = [os.path.join(root, name) for name in os.listdir(root)]
+    return [
+        file_path for file_path in found
+        if os.path.splitext(file_path)[1].lower() in extensions
+        and os.path.isfile(file_path) and not os.path.islink(file_path)
+        and not os.path.basename(file_path).startswith("~$")
+    ]
 
-    entries: list[dict] = []
-    for file_path in found:
-        name = os.path.basename(file_path)
-        ext = os.path.splitext(name)[1].lower()
-        if ext not in TEXT_EXTENSIONS or not os.path.isfile(file_path) or os.path.islink(file_path):
-            continue
-        if name.startswith("~$"):
-            continue
-        entries.append(describe_source(file_path))
+
+def scan_folder(path: str, recursive: bool = False, mode: str = "script") -> dict:
+    """Liet ke .docx/.txt trong folder (chi doc). Trung ten goc thi uu tien .txt.
+
+    ``mode="media"``: liet ke cap audio + .srt cung ten (xem ``scan_media_pairs``).
+    """
+    root = os.path.abspath(path)
+    if not os.path.isdir(root):
+        raise IngestError("folder_not_found", f"Không tìm thấy thư mục: {path}")
+    if mode == "media":
+        return {"path": root, "recursive": recursive, "mode": "media", **scan_media_pairs(root, recursive)}
+
+    entries = [describe_source(file_path) for file_path in _list_files(root, recursive, TEXT_EXTENSIONS)]
 
     by_stem: dict[tuple[str, str], list[dict]] = {}
     for entry in entries:
@@ -192,6 +200,55 @@ def scan_folder(path: str, recursive: bool = False) -> dict:
 
     entries.sort(key=lambda e: natural_key(os.path.relpath(e["path"], root)))
     return {"path": root, "recursive": recursive, "files": entries, "warnings": warnings}
+
+
+def scan_media_pairs(root: str, recursive: bool = False) -> dict:
+    """Ghep audio voi .srt cung ten (cung thu muc, khong phan biet hoa thuong).
+
+    Audio thieu .srt van liet ke (valid=False) de nguoi dung thay; .srt thieu audio chi
+    vao ``warnings``. Trung ten nhieu audio: lay theo thu tu ``AUDIO_EXTENSIONS``.
+    """
+    groups: dict[tuple[str, str], dict[str, list[str]]] = {}
+    for file_path in _list_files(root, recursive, {*AUDIO_EXTENSIONS, *SRT_EXTENSIONS}):
+        stem, ext = os.path.splitext(os.path.basename(file_path))
+        group = groups.setdefault((os.path.dirname(file_path).lower(), stem.lower()), {"audio": [], "srt": []})
+        group["srt" if ext.lower() in SRT_EXTENSIONS else "audio"].append(file_path)
+
+    entries: list[dict] = []
+    warnings: list[str] = []
+    for group in groups.values():
+        srt = sorted(group["srt"])[0] if group["srt"] else None
+        audios = sorted(group["audio"], key=lambda p: AUDIO_EXTENSIONS.index(os.path.splitext(p)[1].lower()))
+        if not audios:
+            warnings.append(f"{os.path.basename(srt)}: không có file audio cùng tên")
+            continue
+        for position, audio in enumerate(audios):
+            entry = describe_media(audio, srt)
+            if position:
+                entry["valid"] = False
+                entry["warning"] = f"Trùng tên với {os.path.basename(audios[0])}, dùng file đó"
+            entries.append(entry)
+
+    entries.sort(key=lambda e: natural_key(os.path.relpath(e["path"], root)))
+    return {"files": entries, "warnings": warnings}
+
+
+def describe_media(audio_path: str, srt_path: str | None) -> dict:
+    name = os.path.basename(audio_path)
+    stem, ext = os.path.splitext(name)
+    entry = {
+        "path": os.path.abspath(audio_path),
+        "name": name,
+        "stem": stem,
+        "kind": ext.lower().lstrip("."),
+        "size": os.path.getsize(audio_path),
+        "srtPath": os.path.abspath(srt_path) if srt_path else None,
+        "srtName": os.path.basename(srt_path) if srt_path else None,
+        "valid": bool(srt_path),
+    }
+    if not srt_path:
+        entry["warning"] = "Thiếu file .srt cùng tên"
+    return entry
 
 
 def describe_source(file_path: str) -> dict:

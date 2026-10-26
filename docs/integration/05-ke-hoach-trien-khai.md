@@ -22,7 +22,9 @@
 - Chạy thật trên máy với app TTS giả (`fake_dgt.py`, sinh mp3 bằng ffmpeg):
   - **loại 2 render thật** ra mp4 1080p có clip nền, sóng âm, CTA, phụ đề;
   - **loại 1** chạy qua TST Studio thật (cổng thử 5199) với claude giả, tới bước duyệt prompt; "Chạy lại AI" có ghi chú hoạt động.
-- **Chưa chạy với app TTS thật, `claude -p` thật và tạo ảnh TST thật** (xem các spike P0).
+- **Chưa chạy với app TTS thật và tạo ảnh TST thật** (xem các spike P0).
+- **`claude -p` thật (spike 0.1 + 0.2, 14/10/2026):** truyện thử 3:55 cắt từ `campuchia/k96a` (23 đoạn), Claude Code 2.1.296 bản đi kèm VS Code, `--model opus`. Mọi cờ ở [04 §7.3](04-thiet-ke-pipeline.md#73-lệnh-claude) chạy được, không bị hỏi quyền, không ghi ra ngoài `bible.json`/`batches/`/`_ai/`. Bible: 8 lượt, ~$0.35; prompt 23 đoạn trong 1 lần gọi: 9 lượt, ~$0.49; build lần đầu qua (3 nhân vật, 23 ảnh, 0 cảnh báo); tổng khoảng 2,5 phút. Ước lượng truyện 75 phút (~300 đoạn, 3 lần gọi prompt × 4 lô): 20-30 phút và ~$4-5 quy đổi API mỗi truyện (trừ vào hạn mức gói Claude).
+- Lưu ý vận hành: TST Studio (`node server/index.js`) **không tự nạp lại code**; cập nhật TST mà chưa restart thì bước `ai` báo "Bước không hợp lệ: ai" — pipeline giờ chuyển item sang `waiting_service` (`tst:ai_step_missing`) và tự chạy tiếp sau khi restart.
 
 **Biến môi trường mới** (SVS): `PIPELINE_DIR`, `DGT_API_URL`, `TST_STUDIO_URL`, `PIPELINE_*` ([04 §14](04-thiet-ke-pipeline.md#14-cấu-hình-mới)), `DGT_WORK_DIR`, `PIPELINE_DISK_WARN_GB`, `PIPELINE_MIN_FREE_GB`.
 **TST Studio:** `CLAUDE_BIN`, `AI_MODEL`, `AI_TIMEOUT`.

@@ -71,6 +71,7 @@ class FakeTst:
         self.calls: list[tuple] = []
         self.cancelled: list[str] = []
         self.renders: dict[tuple[str, str], list[dict]] = {}
+        self.ai: dict | None = {"found": True, "path": "claude.exe", "version": "test"}
 
     def _check(self):
         if self.down:
@@ -82,7 +83,9 @@ class FakeTst:
 
     def ai_state(self):
         self._check()
-        return {"found": True, "path": "claude.exe", "version": "test"}
+        if self.ai is None:  # TST Studio ban cu: chua co /api/ai
+            raise ServiceError("tst", 404, "http_error", "Không có endpoint này")
+        return dict(self.ai)
 
     def projects(self):
         self._check()

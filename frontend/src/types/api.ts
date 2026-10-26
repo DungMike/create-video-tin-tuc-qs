@@ -1473,6 +1473,9 @@ export interface YoutubeDownloadJob {
 
 export type PipelineVideoType = 1 | 2;
 
+/** script: kịch bản .docx/.txt → app TTS tạo audio + srt; media: có sẵn audio + .srt, bỏ qua TTS. */
+export type PipelineInputMode = "script" | "media";
+
 export type PipelineItemStatus =
   | "pending"
   | "running"
@@ -1504,20 +1507,36 @@ export interface PipelineVoice {
   state?: string;
 }
 
+/** Một skill trong bộ skill của chủ đề TST (projects/<chủ đề>/.claude/skills/<name>/SKILL.md). */
+export interface PipelineTstSkill {
+  name: string;
+  title: string;
+  description: string;
+  /** Skill vẽ chính (style_skill), AI đọc đầu tiên */
+  main: boolean;
+}
+
 export interface PipelineTstProject {
   id: string;
   name: string;
+  description?: string;
   styleSkill?: string;
   aspectRatio?: string;
   storyCount?: number;
+  /** Bộ skill AI dùng để viết bible + prompt ảnh cho video của chủ đề này */
+  skills?: PipelineTstSkill[];
 }
 
 export interface PipelineScanFile {
+  /** Chế độ media: đường dẫn file audio. */
   path: string;
   name: string;
   stem: string;
-  kind: "docx" | "txt";
+  /** Đuôi file: docx/txt, hoặc mp3/wav/... ở chế độ media. */
+  kind: string;
   size: number;
+  srtPath?: string | null;
+  srtName?: string | null;
   valid: boolean;
   warning?: string;
 }
@@ -1525,6 +1544,7 @@ export interface PipelineScanFile {
 export interface PipelineScanResult {
   path: string;
   recursive: boolean;
+  mode?: PipelineInputMode;
   files: PipelineScanFile[];
   warnings: string[];
 }
@@ -1549,6 +1569,50 @@ export interface PipelineTstState {
   };
   approvals?: { prompts?: { at: string; images: number } | null; characters?: { at: string } | null };
   url?: string;
+  /** 25 dòng log cuối của job TST gần nhất (pipeline giữ lại). */
+  logTail?: string[];
+}
+
+export interface PipelineTstJob {
+  id: string;
+  step: string;
+  status: "running" | "done" | "error" | "cancelled";
+  exitCode?: number | null;
+  startedAt?: string;
+  endedAt?: string | null;
+  lineCount?: number;
+  lines?: string[];
+}
+
+/** Số liệu sống của truyện trong TST Studio (đọc lại mỗi lần mở chi tiết). */
+export interface PipelineTstDetail {
+  url?: string | null;
+  projectId: string;
+  storyId: string;
+  missing?: boolean;
+  flow?: NonNullable<PipelineTstState["flow"]> & {
+    bible?: { exists?: boolean; characters?: number };
+    built?: boolean;
+  };
+  setting?: string | null;
+  characters?: { id: string; name?: string; role?: string; image: string | null }[];
+  scenes?: {
+    total: number;
+    withPrompt: number;
+    withImage: number;
+    errors: number[];
+    recent: { id: number; start?: string; image: string | null }[];
+  };
+  video?: { renders: number; last?: { file?: string; created?: string } | null } | null;
+  job?: PipelineTstJob | null;
+  jobs?: PipelineTstJob[];
+}
+
+export interface PipelineItemDetail {
+  item: PipelineItem;
+  events: PipelineEvent[];
+  tst: PipelineTstDetail | null;
+  tstError?: string;
 }
 
 export interface PipelineItem {
@@ -1557,7 +1621,17 @@ export interface PipelineItem {
   title: string;
   slug: string;
   type: PipelineVideoType;
-  source: { path: string; originalName: string; kind: string; uploaded: boolean; sha256?: string };
+  /** Run tạo trước khi có chế độ media không có trường này (= script). */
+  input?: PipelineInputMode;
+  source: {
+    path: string;
+    originalName: string;
+    kind: string;
+    uploaded: boolean;
+    sha256?: string;
+    srtPath?: string;
+    srtName?: string;
+  };
   stage: string;
   status: PipelineItemStatus;
   waitingReason: string | null;
@@ -1636,7 +1710,9 @@ export interface PipelineEvent {
 export interface CreatePipelineRunPayload {
   name?: string;
   config: PipelineRunConfig;
-  items: { source: string; type: PipelineVideoType; title?: string }[];
+  /** Có `srt` thì `source` là file audio có sẵn (bỏ qua tạo giọng đọc). */
+  /** tstProjectId: chủ đề TST riêng của video loại 1 (bỏ trống = config.type1.tstProjectId) */
+  items: { source: string; srt?: string; type: PipelineVideoType; title?: string; tstProjectId?: string }[];
 }
 
 export type PipelineGate = "prompts" | "characters";
@@ -1679,4 +1755,145 @@ export interface PipelinePreset {
   name: string;
   sharedConfig: CreateStoryBatchRequest["sharedConfig"];
   createdAt: string;
+}
+
+// === Tự động tìm nguồn video + kiểm tra kho clip (/api/story-video/auto-source) ===
+
+export interface AutoSourceSettings {
+  /** Chạy tự động hằng ngày. */
+  enabled: boolean;
+  /** Giờ máy (0-23) bắt đầu lượt hằng ngày. */
+  runHour: number;
+  /** Thư viện nhận clip mới (họ v2/v3 tự chia khi đầy). "" = chỉ báo cáo. */
+  targetLibraryId: string;
+  providers: StoryVideoProvider[];
+  keywordsPerRun: number;
+  /** 0 = không giới hạn. */
+  maxVideosPerRun: number;
+  /** Chỉ tải khi kho chưa dùng của thư viện đích dưới X giờ (0 = luôn tải). */
+  minStockHours: number;
+  landscapeOnly: boolean;
+  minFreeGb: number;
+  useKeywordFile: boolean;
+  /** 0 = không giới hạn; 3 = mỗi clip tối đa 3 video (chế độ "mỗi clip 1 lần"). */
+  maxClipUses: number;
+  /** Lượt hằng ngày tự xóa clip đã dùng >= maxClipUses. */
+  autoCleanup: boolean;
+  keepJobDays: number;
+}
+
+export interface AutoSourceStepRecord {
+  step: string;
+  status: string;
+  message: string;
+  at: string;
+}
+
+export interface AutoSourceRun {
+  runId: string;
+  trigger: "manual" | "schedule";
+  status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  startedAt: string;
+  finishedAt?: string;
+  message?: string;
+  steps: AutoSourceStepRecord[];
+  keywords?: AutoSourceKeywordPlanItem[];
+  harvest?: {
+    jobId: string;
+    status?: string;
+    downloaded?: number;
+    skippedKnown?: number;
+    cursorSkipped?: number;
+    searchRequests?: number;
+    failed?: number;
+    gb?: number;
+    message?: string;
+  };
+  commit?: { added: number; libraryIds: string[]; paused: boolean };
+  cleanup?: { deleted?: number; totalClips?: number; totalHours?: number };
+  stock?: { overall: AutoSourceStockSummary; usage: AutoSourceUsageRate };
+  error?: string;
+}
+
+export interface AutoSourceOverview {
+  settings: AutoSourceSettings;
+  running: boolean;
+  currentRun: AutoSourceRun | null;
+  runs: AutoSourceRun[];
+  nextRunAt: string | null;
+}
+
+export interface AutoSourceStockSummary {
+  clips: number;
+  uniqueClips: number;
+  hours: number;
+  unused: number;
+  unusedHours: number;
+  /** Số clip theo số lần đã dùng, vd `{"0": 120, "1": 40}`. */
+  useCounts: Record<string, number>;
+  maxCount: number;
+  /** Ước tính số video còn làm được ở chế độ "mỗi clip 1 lần" (chỉ clip chưa dùng). */
+  videosLeftOnce: number | null;
+  /** Giờ phim còn dùng được trước khi chạm giới hạn lượt dùng (null = không giới hạn). */
+  remainingHoursUnderCap: number | null;
+  atCap: number | null;
+  atCapHours: number | null;
+  daysLeftOnce?: number | null;
+}
+
+export interface AutoSourceLibraryStock extends AutoSourceStockSummary {
+  id: string;
+  name: string;
+  createdAt: string;
+  styled: boolean;
+  versionOf?: string | null;
+  sources: number;
+  firstClipAt: string | null;
+  lastClipAt: string | null;
+}
+
+export interface AutoSourceUsageRate {
+  avgVideoMinutes: number;
+  videosLast7Days: number;
+  videosPerDay: number;
+  sampleVideos: number;
+}
+
+export interface AutoSourceCleanupPlan {
+  maxUses: number;
+  totalClips: number;
+  totalHours: number;
+  libraries: { id: string; name: string; createdAt: string; clips: number; hours: number; remaining: number; emptyAfter: boolean }[];
+}
+
+export interface AutoSourceReport {
+  generatedAt: string;
+  elapsedSeconds: number;
+  maxClipUses: number;
+  libraries: AutoSourceLibraryStock[];
+  overall: AutoSourceStockSummary;
+  usage: AutoSourceUsageRate;
+  target: { libraryIds: string[]; clips: number; unusedHours: number } | null;
+  disk: { rawFreeGb: number | null; libraryFreeGb: number | null };
+  cleanup: AutoSourceCleanupPlan | null;
+}
+
+export interface AutoSourceKeywordPlanItem {
+  keyword: string;
+  source: "cursor" | "file" | "bank";
+  providers: Record<string, { state: "new" | "resume" | "used" | "exhausted"; page?: number }>;
+}
+
+export interface AutoSourceKeywordPlan {
+  keywords: AutoSourceKeywordPlanItem[];
+  available: { file: number; bank: number };
+  bankSize: number;
+  fileSize: number;
+}
+
+export interface AutoSourceCleanupResult {
+  maxUses: number;
+  deleted: number;
+  failed: number;
+  hours: number;
 }

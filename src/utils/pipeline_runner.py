@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Callable
@@ -43,6 +44,8 @@ STAGES_TYPE1 = [
     "CHARACTERS", "GATE_CHARACTERS", "SCENES", "VIDEO", "COLLECT", "DONE",
 ]
 STAGES_TYPE2 = ["INGEST", "TTS", "SRT_CHECK", "SV_RENDER", "DONE"]
+# Item dau vao "media" (co san audio + srt) khong co cac buoc nay.
+SCRIPT_ONLY_STAGES = ("INGEST", "TTS")
 
 # Trang thai reconciler bo qua (cho nguoi / da ket thuc).
 IDLE_STATUSES = {"awaiting_review", "needs_attention"} | ITEM_TERMINAL
@@ -90,7 +93,10 @@ class PipelineError(Exception):
 # --- item helpers -----------------------------------------------------------------
 
 def stages_for(item: dict) -> list[str]:
-    return STAGES_TYPE1 if int(item.get("type") or 2) == 1 else STAGES_TYPE2
+    stages = STAGES_TYPE1 if int(item.get("type") or 2) == 1 else STAGES_TYPE2
+    if item.get("input") == "media":
+        return [stage for stage in stages if stage not in SCRIPT_ONLY_STAGES]
+    return stages
 
 
 def set_status(item: dict, status: str, message: str | None = None, *,
@@ -172,6 +178,9 @@ def _make_context(paused: bool, lanes_used: dict[str, int], shared: dict) -> Con
     return Context(paused=paused, dgt=shared["_dgt"], tst=shared["_tst"], lanes_used=lanes_used, run_cache=shared)
 
 
+# Id chu de cua TST Studio (safeId trong studio/server/lib.js).
+TST_PROJECT_ID = re.compile(r"^[a-z0-9][a-z0-9_-]*$", re.IGNORECASE)
+
 # Cho phep test thay client gia.
 _client_overrides: dict[str, object] = {}
 
@@ -183,10 +192,11 @@ def set_client_overrides(**clients) -> None:
 
 # --- run tao moi -------------------------------------------------------------------
 
-def validate_config(config: dict, types: set[int]) -> dict:
+def validate_config(config: dict, types: set[int], *, needs_tts: bool = True, needs_project: bool | None = None) -> dict:
+    """``needs_project``: co video loai 1 chua chon chu de rieng -> bat buoc chu de mac dinh (mac dinh: co loai 1)."""
     config = copy.deepcopy(config or {})
     tts = config.setdefault("tts", {})
-    if not str(tts.get("voiceRef") or "").strip():
+    if needs_tts and not str(tts.get("voiceRef") or "").strip():
         raise PipelineError("voice_required", "Chưa chọn giọng đọc (voiceRef).")
     tts.setdefault("format", "mp3")
     if tts["format"] not in ("mp3", "wav"):
@@ -200,8 +210,10 @@ def validate_config(config: dict, types: set[int]) -> dict:
     type1["gates"].setdefault("characters", False)
     type1.setdefault("ai", {}).setdefault("model", "opus")
     type1.setdefault("video", {}).setdefault("from", "0")
-    if 1 in types and not str(type1.get("tstProjectId") or "").strip():
+    if (1 in types if needs_project is None else needs_project) and not str(type1.get("tstProjectId") or "").strip():
         raise PipelineError("tst_project_required", "Loại 1 cần chọn chủ đề TST (tstProjectId).")
+    if type1.get("tstProjectId") and not TST_PROJECT_ID.match(str(type1["tstProjectId"])):
+        raise PipelineError("invalid_tst_project", f"Chủ đề TST không hợp lệ: {type1['tstProjectId']}")
 
     type2 = config.setdefault("type2", {})
     if type2.get("presetId"):
@@ -222,7 +234,10 @@ def validate_config(config: dict, types: set[int]) -> dict:
 
 
 def create_run(name: str, config: dict, sources: list[dict], *, run_id: str) -> dict:
-    """Tao run + INGEST dong bo. ``sources``: [{path, type, title?, originalName?, uploaded?}]."""
+    """Tao run + INGEST dong bo. ``sources``: [{path, type, title?, originalName?, uploaded?}].
+
+    Nguon co ``srtPath`` (``path`` la audio) = co san audio + srt: bat dau tu SRT_CHECK.
+    """
     if not sources:
         raise PipelineError("empty_items", "Cần ít nhất 1 kịch bản.")
     types = set()
@@ -234,7 +249,12 @@ def create_run(name: str, config: dict, sources: list[dict], *, run_id: str) -> 
         if source["type"] not in (1, 2):
             raise PipelineError("invalid_type", "Loại video phải là 1 hoặc 2.")
         types.add(source["type"])
-    config = validate_config(config, types)
+        project = source.get("tstProjectId")
+        if project and not TST_PROJECT_ID.match(str(project)):
+            raise PipelineError("invalid_tst_project", f"Chủ đề TST không hợp lệ: {project}")
+    needs_tts = any(not source.get("srtPath") for source in sources)
+    needs_project = any(source["type"] == 1 and not source.get("tstProjectId") for source in sources)
+    config = validate_config(config, types, needs_tts=needs_tts, needs_project=needs_project)
     config.setdefault("output", {})
     config["output"].setdefault("drive", "")
     config["output"]["subdir"] = f"pipeline-{run_id}"
@@ -269,6 +289,7 @@ def create_run(name: str, config: dict, sources: list[dict], *, run_id: str) -> 
             "title": title,
             "slug": slug,
             "type": source["type"],
+            "input": "script",  # "media" = co san audio + srt (_attach_media); run cu khong co -> script
             "source": {
                 "path": os.path.abspath(source["path"]),
                 "originalName": original,
@@ -287,7 +308,13 @@ def create_run(name: str, config: dict, sources: list[dict], *, run_id: str) -> 
             "rev": 0,
             "createdAt": now,
         }
-        _ingest(run, item)
+        if source["type"] == 1:
+            # Chu de TST (bo skill dung de viet prompt anh) cua video nay; TST_STORY tao truyen trong chu de do.
+            item["tst"] = {"projectId": source.get("tstProjectId") or config["type1"].get("tstProjectId")}
+        if source.get("srtPath"):
+            _attach_media(item, source)
+        else:
+            _ingest(run, item)
         run["items"].append(item)
 
     with run_lock(run_id):
@@ -317,6 +344,18 @@ def _ingest(run: dict, item: dict) -> None:
     item["text"] = {"chars": info["chars"], "paragraphs": info["paragraphs"]}
     item["warnings"] = list(info["warnings"])
     advance(item, f"Kịch bản {info['chars']} ký tự, {info['paragraphs']} đoạn")
+
+
+def _attach_media(item: dict, source: dict) -> None:
+    """Co san audio + srt: khong tao txt, khong goi TTS; SRT_CHECK kiem tra cap file."""
+    srt = os.path.abspath(source["srtPath"])
+    item["input"] = "media"
+    item["source"]["srtPath"] = srt
+    item["source"]["srtName"] = source.get("srtName") or os.path.basename(srt)
+    item["files"] = {"txt": None, "audio": item["source"]["path"], "srt": srt, "video": None}
+    item.pop("tts", None)
+    item["stage"] = "SRT_CHECK"
+    item["progress"] = {"percent": 0, "message": "Có sẵn audio + srt, bỏ qua tạo giọng đọc"}
 
 
 @stage_handler("INGEST")
@@ -685,24 +724,45 @@ def retry_item(run_id: str, item_id: str, from_stage: str | None = None) -> dict
         raise PipelineError("invalid_stage", "Không thể nhảy tới bước chưa chạy.")
 
     def mutate(run):
-        current = _require_item(run, item_id)
-        current["stage"] = stage
-        current["error"] = None
-        if stage in ("INGEST", "TTS"):
-            # Lan TTS moi phai co khoa idempotency moi, neu khong DGT tra lai job cu.
-            tts = current.setdefault("tts", {})
-            if tts.get("jobId"):
-                tts.update(attempt=int(tts.get("attempt") or 1) + 1, jobId=None, batchId=None, state=None)
-        for reset in RETRY_RESETS.values():
-            reset(current, stage)
-        current["progress"] = {"percent": 0, "message": "Chạy lại"}
-        current.pop("finishedAt", None)
-        set_status(current, "pending")
-        touch_item(current)
-        if run.get("status") in RUN_TERMINAL:
-            run["status"] = "running"
-            run.pop("finishedAt", None)
-        append_event(run, item_id, stage, "pending", f"Chạy lại từ bước {stage}")
+        _reset_for_retry(run, _require_item(run, item_id), stage)
+    run = update_run(run_id, mutate)
+    wake()
+    return run
+
+
+def _reset_for_retry(run: dict, current: dict, stage: str) -> None:
+    current["stage"] = stage
+    current["error"] = None
+    if stage in ("INGEST", "TTS"):
+        # Lan TTS moi phai co khoa idempotency moi, neu khong DGT tra lai job cu.
+        tts = current.setdefault("tts", {})
+        if tts.get("jobId"):
+            tts.update(attempt=int(tts.get("attempt") or 1) + 1, jobId=None, batchId=None, state=None)
+    for reset in RETRY_RESETS.values():
+        reset(current, stage)
+    current["progress"] = {"percent": 0, "message": "Chạy lại"}
+    current.pop("finishedAt", None)
+    set_status(current, "pending")
+    touch_item(current)
+    if run.get("status") in RUN_TERMINAL:
+        run["status"] = "running"
+        run.pop("finishedAt", None)
+    append_event(run, current["itemId"], stage, "pending", f"Chạy lại từ bước {stage}")
+
+
+RETRY_ALL_STATUSES = ("needs_attention", "failed")
+
+
+def retry_items(run_id: str) -> dict:
+    """Chay lai (tai buoc dang dung) moi item can xu ly / loi cua run. Item da huy giu nguyen."""
+    run = _require_run(run_id)
+    if not any(item.get("status") in RETRY_ALL_STATUSES for item in run.get("items", [])):
+        raise PipelineError("nothing_to_retry", "Không có mục nào lỗi hoặc cần xử lý.", 409)
+
+    def mutate(run):
+        for item in run.get("items", []):
+            if item.get("status") in RETRY_ALL_STATUSES and item.get("stage") in stages_for(item):
+                _reset_for_retry(run, item, item["stage"])
     run = update_run(run_id, mutate)
     wake()
     return run

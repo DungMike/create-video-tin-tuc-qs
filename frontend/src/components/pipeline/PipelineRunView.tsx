@@ -1,5 +1,5 @@
-import { ExternalLink, Eye, Loader2, Pause, Play, RotateCcw, Square, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronRight, ExternalLink, Eye, Loader2, Pause, Play, RotateCcw, Square, X } from "lucide-react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import {
   pausePipelineRun,
   resumePipelineRun,
   retryPipelineItem,
+  retryPipelineRunItems,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { PipelineEvent, PipelineItem, PipelineRun, PipelineRunSummary } from "@/types/api";
@@ -21,11 +22,11 @@ import {
   ITEM_STATUS_LABEL,
   RUN_FINISHED,
   RUN_STATUS_LABEL,
-  STAGES_TYPE1,
-  STAGES_TYPE2,
   STAGE_LABEL,
   formatTime,
+  stagesOf,
 } from "./pipelineLabels";
+import { PipelineItemDetail } from "./PipelineItemDetail";
 
 const RUN_POLL_MS = 3000;
 const LIST_POLL_MS = 8000;
@@ -102,7 +103,7 @@ export function PipelineRunList({
 }
 
 function StageDots({ item }: { item: PipelineItem }) {
-  const stages = item.type === 1 ? STAGES_TYPE1 : STAGES_TYPE2;
+  const stages = stagesOf(item);
   const current = stages.indexOf(item.stage);
   return (
     <div className="flex gap-0.5" title={stages.map((s) => STAGE_LABEL[s] ?? s).join(" → ")}>
@@ -126,7 +127,7 @@ function StageDots({ item }: { item: PipelineItem }) {
 }
 
 function RetryFromSelect({ item, busy, onRetry }: { item: PipelineItem; busy: boolean; onRetry: (stage: string) => void }) {
-  const stages = item.type === 1 ? STAGES_TYPE1 : STAGES_TYPE2;
+  const stages = stagesOf(item);
   const current = item.status === "done" ? stages.length - 1 : stages.indexOf(item.stage);
   const choices = stages.slice(0, Math.max(0, current + (item.status === "done" ? 0 : 1))).filter((s) => !s.startsWith("GATE_"));
   if (!choices.length) return null;
@@ -152,14 +153,20 @@ function RetryFromSelect({ item, busy, onRetry }: { item: PipelineItem; busy: bo
 }
 
 function ItemRow({
+  run,
   item,
   busy,
+  expanded,
+  onToggle,
   onRetry,
   onCancel,
   onReview,
 }: {
+  run: PipelineRun;
   item: PipelineItem;
   busy: boolean;
+  expanded: boolean;
+  onToggle: () => void;
   onRetry: (stage?: string) => void;
   onCancel: () => void;
   onReview?: () => void;
@@ -167,94 +174,122 @@ function ItemRow({
   const percent = item.progress?.percent ?? 0;
   const message = item.status === "failed" || item.status === "needs_attention" ? item.error?.message ?? item.progress?.message : item.progress?.message;
   return (
-    <tr className="border-t border-border/60 align-top">
-      <td className="px-3 py-2 text-muted-foreground">{item.index}</td>
-      <td className="px-3 py-2">
-        <div className="font-medium">{item.title}</div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-          <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
-            {item.type === 1 ? "Loại 1 · Ảnh" : "Loại 2 · Clip nền"}
-          </Badge>
-          {item.media?.durationSeconds ? <span>{(item.media.durationSeconds / 60).toFixed(1)} phút</span> : null}
-          {item.text ? <span>{item.text.chars.toLocaleString("vi-VN")} ký tự</span> : null}
-        </div>
-        {item.warnings?.length ? (
-          <div className="mt-1 text-xs text-amber-700 dark:text-amber-300">⚠ {item.warnings.join("; ")}</div>
-        ) : null}
-      </td>
-      <td className="px-3 py-2">
-        <div className="text-sm">{STAGE_LABEL[item.stage] ?? item.stage}</div>
-        <div className="mt-1">
-          <StageDots item={item} />
-        </div>
-      </td>
-      <td className="px-3 py-2">
-        <span className={cn("inline-flex rounded-md border px-2 py-0.5 text-xs font-medium", ITEM_STATUS_CLASS[item.status])}>
-          {ITEM_STATUS_LABEL[item.status] ?? item.status}
-        </span>
-        {item.waitingReason ? <div className="mt-1 text-[11px] text-muted-foreground">{item.waitingReason}</div> : null}
-      </td>
-      <td className="min-w-[14rem] px-3 py-2">
-        {item.status === "running" && percent > 0 ? (
-          <div className="mb-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-            <div className="h-full bg-sky-500 transition-all" style={{ width: `${percent}%` }} />
+    <Fragment>
+      <tr className={cn("border-t border-border/60 align-top", expanded && "bg-muted/30")}>
+        <td className="px-3 py-2 text-muted-foreground">{item.index}</td>
+        <td className="px-3 py-2">
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-expanded={expanded}
+            className="flex items-center gap-1 text-left font-medium hover:text-primary"
+            title={expanded ? "Ẩn chi tiết" : "Xem chi tiết các bước, số ảnh, job đang chạy"}
+          >
+            {expanded ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
+            {item.title}
+          </button>
+          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+            <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+              {item.type === 1 ? "Loại 1 · Ảnh" : "Loại 2 · Clip nền"}
+            </Badge>
+            {item.type === 1 && item.tst?.projectId ? (
+              <Badge variant="outline" className="px-1.5 py-0 text-[10px]" title="Chủ đề TST (bộ skill viết prompt ảnh)">
+                Chủ đề {item.tst.projectId}
+              </Badge>
+            ) : null}
+            {item.input === "media" ? (
+              <Badge variant="outline" className="px-1.5 py-0 text-[10px]" title={item.source.srtName ?? undefined}>
+                Có sẵn audio + srt
+              </Badge>
+            ) : null}
+            {item.media?.durationSeconds ? <span>{(item.media.durationSeconds / 60).toFixed(1)} phút</span> : null}
+            {item.text ? <span>{item.text.chars.toLocaleString("vi-VN")} ký tự</span> : null}
           </div>
-        ) : null}
-        <div className={cn("text-xs", item.status === "failed" ? "text-destructive" : "text-muted-foreground")}>{message}</div>
-      </td>
-      <td className="px-3 py-2 text-xs">
-        <div className="flex flex-col gap-0.5">
-          {item.media?.audioUrl ? (
-            <a className="text-primary hover:underline" href={item.media.audioUrl} target="_blank" rel="noreferrer">
-              Audio
-            </a>
+          {item.warnings?.length ? (
+            <div className="mt-1 text-xs text-amber-700 dark:text-amber-300">⚠ {item.warnings.join("; ")}</div>
           ) : null}
-          {item.media?.srtUrl ? (
-            <a className="text-primary hover:underline" href={item.media.srtUrl} target="_blank" rel="noreferrer">
-              SRT
-            </a>
+        </td>
+        <td className="px-3 py-2">
+          <div className="text-sm">{STAGE_LABEL[item.stage] ?? item.stage}</div>
+          <div className="mt-1">
+            <StageDots item={item} />
+          </div>
+        </td>
+        <td className="px-3 py-2">
+          <span className={cn("inline-flex rounded-md border px-2 py-0.5 text-xs font-medium", ITEM_STATUS_CLASS[item.status])}>
+            {ITEM_STATUS_LABEL[item.status] ?? item.status}
+          </span>
+          {item.waitingReason ? <div className="mt-1 text-[11px] text-muted-foreground">{item.waitingReason}</div> : null}
+        </td>
+        <td className="min-w-[14rem] px-3 py-2">
+          {item.status === "running" && percent > 0 ? (
+            <div className="mb-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+              <div className="h-full bg-sky-500 transition-all" style={{ width: `${percent}%` }} />
+            </div>
           ) : null}
-          {item.media?.videoUrl ? (
-            <a className="font-medium text-primary hover:underline" href={item.media.videoUrl} target="_blank" rel="noreferrer">
-              Video
-            </a>
-          ) : item.files.video ? (
-            <span className="break-all text-muted-foreground" title={item.files.video}>
-              {item.files.video}
-            </span>
-          ) : null}
-          {item.tst?.url ? (
-            <a className="inline-flex items-center gap-1 text-primary hover:underline" href={item.tst.url} target="_blank" rel="noreferrer">
-              TST <ExternalLink className="h-3 w-3" />
-            </a>
-          ) : null}
-        </div>
-      </td>
-      <td className="px-3 py-2">
-        <div className="flex justify-end gap-1">
-          {item.status === "awaiting_review" && onReview ? (
-            <Button size="sm" onClick={onReview} disabled={busy}>
-              <Eye className="h-4 w-4" />
-              Duyệt
-            </Button>
-          ) : null}
-          {RETRYABLE_ITEM.has(item.status) || item.status === "done" ? (
-            <RetryFromSelect item={item} busy={busy} onRetry={(stage) => onRetry(stage)} />
-          ) : null}
-          {RETRYABLE_ITEM.has(item.status) ? (
-            <Button size="sm" variant="outline" onClick={() => onRetry()} disabled={busy} title="Chạy lại bước này">
-              <RotateCcw className="h-4 w-4" />
-              Thử lại
-            </Button>
-          ) : null}
-          {ACTIVE_ITEM.has(item.status) || item.status === "awaiting_review" ? (
-            <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy} title="Huỷ item này">
-              <X className="h-4 w-4" />
-            </Button>
-          ) : null}
-        </div>
-      </td>
-    </tr>
+          <div className={cn("text-xs", item.status === "failed" ? "text-destructive" : "text-muted-foreground")}>{message}</div>
+        </td>
+        <td className="px-3 py-2 text-xs">
+          <div className="flex flex-col gap-0.5">
+            {item.media?.audioUrl ? (
+              <a className="text-primary hover:underline" href={item.media.audioUrl} target="_blank" rel="noreferrer">
+                Audio
+              </a>
+            ) : null}
+            {item.media?.srtUrl ? (
+              <a className="text-primary hover:underline" href={item.media.srtUrl} target="_blank" rel="noreferrer">
+                SRT
+              </a>
+            ) : null}
+            {item.media?.videoUrl ? (
+              <a className="font-medium text-primary hover:underline" href={item.media.videoUrl} target="_blank" rel="noreferrer">
+                Video
+              </a>
+            ) : item.files.video ? (
+              <span className="break-all text-muted-foreground" title={item.files.video}>
+                {item.files.video}
+              </span>
+            ) : null}
+            {item.tst?.url ? (
+              <a className="inline-flex items-center gap-1 text-primary hover:underline" href={item.tst.url} target="_blank" rel="noreferrer">
+                TST <ExternalLink className="h-3 w-3" />
+              </a>
+            ) : null}
+          </div>
+        </td>
+        <td className="px-3 py-2">
+          <div className="flex justify-end gap-1">
+            {item.status === "awaiting_review" && onReview ? (
+              <Button size="sm" onClick={onReview} disabled={busy}>
+                <Eye className="h-4 w-4" />
+                Duyệt
+              </Button>
+            ) : null}
+            {RETRYABLE_ITEM.has(item.status) || item.status === "done" ? (
+              <RetryFromSelect item={item} busy={busy} onRetry={(stage) => onRetry(stage)} />
+            ) : null}
+            {RETRYABLE_ITEM.has(item.status) ? (
+              <Button size="sm" variant="outline" onClick={() => onRetry()} disabled={busy} title="Chạy lại bước này">
+                <RotateCcw className="h-4 w-4" />
+                Thử lại
+              </Button>
+            ) : null}
+            {ACTIVE_ITEM.has(item.status) || item.status === "awaiting_review" ? (
+              <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy} title="Huỷ item này">
+                <X className="h-4 w-4" />
+              </Button>
+            ) : null}
+          </div>
+        </td>
+      </tr>
+      {expanded ? (
+        <tr className="border-t border-border/40">
+          <td colSpan={7} className="p-0">
+            <PipelineItemDetail run={run} item={item} />
+          </td>
+        </tr>
+      ) : null}
+    </Fragment>
   );
 }
 
@@ -272,6 +307,7 @@ export function PipelineRunDetail({
   const [busy, setBusy] = useState(false);
   const [events, setEvents] = useState<PipelineEvent[]>([]);
   const [showEvents, setShowEvents] = useState(false);
+  const [openItemId, setOpenItemId] = useState<string | null>(null);
   const eventSeq = useRef(0);
 
   const load = useCallback(async () => {
@@ -333,6 +369,7 @@ export function PipelineRunDetail({
     acc[item.status] = (acc[item.status] ?? 0) + 1;
     return acc;
   }, {});
+  const retryable = (counts.needs_attention ?? 0) + (counts.failed ?? 0);
 
   return (
     <div className="space-y-4">
@@ -348,37 +385,58 @@ export function PipelineRunDetail({
               {counts.done ?? 0}/{run.items.length} xong
             </span>
             {counts.awaiting_review ? <span className="text-violet-700 dark:text-violet-300">· {counts.awaiting_review} chờ duyệt</span> : null}
+            {counts.needs_attention ? <span className="text-orange-700 dark:text-orange-300">· {counts.needs_attention} cần xử lý</span> : null}
+            {counts.failed ? <span className="text-red-700 dark:text-red-300">· {counts.failed} lỗi</span> : null}
+            {counts.waiting_service ? <span className="text-amber-700 dark:text-amber-300">· {counts.waiting_service} chờ dịch vụ</span> : null}
             <span>· tạo {formatTime(run.createdAt)}</span>
           </div>
         </div>
-        {!finished ? (
-          <div className="flex gap-2">
-            {run.status === "paused" ? (
-              <Button size="sm" variant="outline" onClick={() => void act(() => resumePipelineRun(run.runId))} disabled={busy}>
-                <Play className="h-4 w-4" />
-                Tiếp tục
-              </Button>
-            ) : (
-              <Button size="sm" variant="outline" onClick={() => void act(() => pausePipelineRun(run.runId))} disabled={busy}>
-                <Pause className="h-4 w-4" />
-                Tạm dừng
-              </Button>
-            )}
+        <div className="flex flex-wrap gap-2">
+          {retryable ? (
             <Button
               size="sm"
-              variant="destructive"
+              variant="outline"
               disabled={busy}
+              title="Chạy lại mọi mục cần xử lý / lỗi từ bước đang dừng (mục đã huỷ giữ nguyên)"
               onClick={() => {
-                if (window.confirm("Huỷ cả lượt chạy? Các job đang chạy ở app TTS/TST/render sẽ được yêu cầu dừng.")) {
-                  void act(() => cancelPipelineRun(run.runId));
+                if (window.confirm(`Thử lại ${retryable} mục cần xử lý / lỗi từ bước đang dừng?`)) {
+                  void act(() => retryPipelineRunItems(run.runId));
                 }
               }}
             >
-              <Square className="h-4 w-4" />
-              Huỷ
+              <RotateCcw className="h-4 w-4" />
+              Thử lại {retryable} mục
             </Button>
-          </div>
-        ) : null}
+          ) : null}
+          {!finished ? (
+            <>
+              {run.status === "paused" ? (
+                <Button size="sm" variant="outline" onClick={() => void act(() => resumePipelineRun(run.runId))} disabled={busy}>
+                  <Play className="h-4 w-4" />
+                  Tiếp tục
+                </Button>
+              ) : (
+                <Button size="sm" variant="outline" onClick={() => void act(() => pausePipelineRun(run.runId))} disabled={busy}>
+                  <Pause className="h-4 w-4" />
+                  Tạm dừng
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={busy}
+                onClick={() => {
+                  if (window.confirm("Huỷ cả lượt chạy? Các job đang chạy ở app TTS/TST/render sẽ được yêu cầu dừng.")) {
+                    void act(() => cancelPipelineRun(run.runId));
+                  }
+                }}
+              >
+                <Square className="h-4 w-4" />
+                Huỷ
+              </Button>
+            </>
+          ) : null}
+        </div>
       </div>
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
@@ -399,8 +457,11 @@ export function PipelineRunDetail({
             {run.items.map((item) => (
               <ItemRow
                 key={item.itemId}
+                run={run}
                 item={item}
                 busy={busy}
+                expanded={openItemId === item.itemId}
+                onToggle={() => setOpenItemId((current) => (current === item.itemId ? null : item.itemId))}
                 onRetry={(stage) => void act(() => retryPipelineItem(run.runId, item.itemId, stage))}
                 onCancel={() => {
                   if (window.confirm(`Huỷ "${item.title}"?`)) void act(() => cancelPipelineItem(run.runId, item.itemId));

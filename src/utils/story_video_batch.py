@@ -182,6 +182,12 @@ def is_batch_queued_or_active(batch_id: str) -> bool:
         return batch_id == _active_batch_id or any(r.batch_id == batch_id for r in _pending)
 
 
+def has_active_or_queued_batch() -> bool:
+    """Co batch dang render hoac dang cho trong hang doi (de viec nen tranh xoa clip)."""
+    with _queue_lock:
+        return _active_batch_id is not None or bool(_pending)
+
+
 def _queued_runner(batch_id: str) -> "StoryVideoBatchRunner | None":
     with _queue_lock:
         return next((r for r in _pending if r.batch_id == batch_id), None)

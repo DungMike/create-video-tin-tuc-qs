@@ -21,6 +21,7 @@ from src.processors.audio_utils import get_audio_duration, validate_audio
 from src.utils.clip_spec_validation import filter_valid_clips
 from src.utils.clip_usage import (
     CLIP_USAGE_ONCE,
+    ClipStockExhausted,
     get_clip_usage_ledger,
     normalize_clip_usage_mode,
 )
@@ -927,6 +928,9 @@ class StoryVideoPipelineRunner:
                 return by_key.get((meta[0], meta[1] + 1)) if meta else None
 
         self._raise_if_cancel_requested()
+        from src.utils.story_auto_source import clip_max_uses
+
+        max_uses = clip_max_uses()
         try:
             selection = get_clip_usage_ledger().select(
                 self.story_id,
@@ -936,7 +940,10 @@ class StoryVideoPipelineRunner:
                 None,  # khong cat clip: tinh du do dai tung clip
                 run_length=run_length,
                 successor=successor,
+                max_uses=max_uses or None,
             )
+        except ClipStockExhausted:
+            raise
         except Exception as exc:
             from src.db import mongo
 

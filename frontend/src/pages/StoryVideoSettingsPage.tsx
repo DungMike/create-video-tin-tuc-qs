@@ -18,6 +18,7 @@ import { StoryOverlayPlacementEditor } from "@/components/StoryOverlayPlacementE
 import { StoryLibraryManager } from "@/components/StoryLibraryManager";
 import { StoryLibraryNormalizePanel } from "@/components/StoryLibraryNormalizePanel";
 import { StorySearchKeywordsPanel } from "@/components/StorySearchKeywordsPanel";
+import { StoryAutoSourcePanel } from "@/components/StoryAutoSourcePanel";
 import { SectionNav, type SectionNavItem } from "@/components/section-nav";
 import { TopNav } from "@/components/top-nav";
 import {
@@ -383,6 +384,7 @@ const SETTINGS_SECTIONS: SectionNavItem[] = [
   { id: "clip-library", label: "Thu vien clip" },
   { id: "image-clip-library", label: "Thư viện clip từ ảnh" },
   { id: "search-keywords", label: "Tu khoa da tim" },
+  { id: "auto-source", label: "Tự động tìm nguồn" },
 ];
 
 export function StoryVideoSettingsPage() {
@@ -3122,6 +3124,18 @@ export function StoryVideoSettingsPage() {
               </p>
             </div>
             <StorySearchKeywordsPanel />
+          </PageSection>
+
+          <PageSection id="auto-source">
+            <div className="mb-4 space-y-1">
+              <h2 className="text-base font-semibold text-foreground">Tự động tìm nguồn video + kiểm tra kho</h2>
+              <p className="text-sm text-muted-foreground">
+                Mỗi lượt: báo cáo kho clip (chưa dùng / đã dùng mấy lần), dọn clip đã dùng đủ lượt, rồi tìm từ khóa mới
+                (file từ khóa + bộ thiên nhiên/biển/núi/nông thôn/phố xá toàn cầu), tải tiếp từ trang đã lưu, bỏ video gốc đã
+                có ở mọi thư viện và cắt clip vào thư viện đích. Tắt mặc định; cần MongoDB.
+              </p>
+            </div>
+            <StoryAutoSourcePanel />
           </PageSection>
         </div>
       </div>

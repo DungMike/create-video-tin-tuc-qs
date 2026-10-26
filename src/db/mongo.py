@@ -21,6 +21,9 @@ SOURCE_VIDEOS = "source_videos"
 CLIPS = "clips"
 CLIP_USAGE_EVENTS = "clip_usage_events"
 SEARCH_KEYWORDS = "search_keywords"
+# Con tro phan trang tim video (src/db/video_cursor_repo.py), chi luong tu dong tim
+# nguon + harvest bat ``use_page_cursor`` moi dung.
+VIDEO_SEARCH_CURSORS = "video_search_cursors"
 # Thu vien clip tu anh (src/db/image_repo.py). Index tao luoi ben do, KHONG qua
 # ensure_indexes: loi o day khong duoc lam hong cac luong khac.
 IMAGE_SEARCH_CURSORS = "image_search_cursors"

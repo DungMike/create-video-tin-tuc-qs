@@ -218,8 +218,30 @@ docker compose up -d                                          # container story-
 npm run dev
 ```
 
-Chạy đồng thời Flask (`WEB_PORT`, mặc định 5000) và Vite (`FRONTEND_PORT`). Truy cập qua cổng
-frontend; Vite proxy sẵn `/api` và `/media` sang backend.
+Một lệnh bật cả 3 app của luồng video ([scripts/dev.mjs](scripts/dev.mjs)), log chung một terminal:
+
+| Nhóm | Gồm | Ctrl+C |
+|---|---|---|
+| `svs` | Flask (`WEB_PORT`) + Vite (`FRONTEND_PORT`) của app này. Vite proxy `/api`, `/media` sang backend | tắt |
+| `tts` | App DGT `DgtAutoTTSMM.exe` + Automation API (`DGT_API_URL`, web giọng đọc ở cùng địa chỉ) | giữ chạy |
+| `image` | App TST kèm bridge `:5179` + TST Studio (`TST_STUDIO_URL`) | giữ chạy |
+
+- Dịch vụ nào đang chạy thì dùng lại, không bật thêm. App desktop chỉ được mở khi chưa mở; launcher không bao giờ tắt hay khởi động lại app TST / DGT.
+- App DGT bắt buộc quyền Administrator nên lần đầu bật API DGT Windows hỏi UAC một lần (bấm Yes); API chạy ẩn cùng quyền với app. App TST vẫn cần bạn bấm **Đăng nhập**; terminal báo khi đã đăng nhập.
+- `tts` / `image` dùng chung với kênh khác nên Ctrl+C chỉ tắt `svs`. Chúng chạy ẩn, log ở `logs/services/` và được in lại trong terminal.
+- Trong lúc chạy gõ `s` + Enter để xem trạng thái, `o` mở trang `/pipeline`, `q` thoát.
+
+```powershell
+npm run dev -- --skip=tts,image   # bỏ nhóm (svs, tts, image); đặt DEV_SKIP=... trong .env để nhớ
+npm run dev -- --no-desktop       # không tự mở app DGT / TST, chỉ báo trạng thái
+npm run dev:status                # bảng trạng thái 6 dịch vụ
+npm run dev:stop                  # tắt API DGT + TST Studio khi rảnh (--force: tắt cả khi đang có job)
+npm run dev:svs                   # chỉ Flask + Vite như trước
+```
+
+Thư mục app khác mặc định là thư mục anh em `..\app-tts-dgt` và `..\app-tst-studio`; đổi bằng
+`DGT_APP_DIR` / `TST_APP_DIR` trong `.env`. Lần đầu trên máy mới vẫn phải setup từng app theo README
+của nó (DGT: `scripts\Setup.ps1`; TST: cài app + build bridge).
 
 ### Production
 

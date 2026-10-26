@@ -176,3 +176,80 @@ def test_presets_crud_and_run_uses_preset(client):
         "items": [{"source": src, "type": 2}],
     })
     assert missing.status_code == 404
+
+
+SRT = "1\n00:00:00,000 --> 00:00:09,000\nXin chào\n"
+TYPE2_ONLY = {"tts": {"voiceRef": ""}, "type2": {"sharedConfig": {"libraryIds": ["lib-1"]}}}
+
+
+def test_upload_audio_and_srt_skips_tts_and_needs_no_voice(client):
+    payload = {"config": TYPE2_ONLY, "items": [{"source": "upload:0", "srt": "upload:1", "type": 2}]}
+    response = client.post("/api/pipeline/runs", data={
+        "payload": json.dumps(payload),
+        "files": [(io.BytesIO(b"ID3fake"), "Tập 5.mp3"), (io.BytesIO(SRT.encode()), "Tập 5.srt")],
+    }, content_type="multipart/form-data")
+    assert response.status_code == 201, response.get_json()
+    item = response.get_json()["items"][0]
+    assert item["input"] == "media" and item["stage"] == "SRT_CHECK" and item["status"] == "pending"
+    assert item["title"] == "Tập 5" and item["slug"] == "tap-5"
+    assert item["files"]["txt"] is None and "tts" not in item
+    assert item["files"]["audio"].endswith("01_Tập 5.mp3") and item["files"]["srt"].endswith("02_Tập 5.srt")
+    assert item["source"]["srtName"] == "Tập 5.srt"
+    assert item["media"]["txtUrl"] is None and item["media"]["audioUrl"].endswith("/files/audio")
+
+
+def test_media_mode_scan_pairs_audio_with_srt(client, tmp_path):
+    folder = tmp_path / "media"
+    (folder / "con").mkdir(parents=True)
+    (folder / "Tap 2.mp3").write_bytes(b"a")
+    (folder / "tap 2.SRT").write_text(SRT, encoding="utf-8")
+    (folder / "Tap 2.wav").write_bytes(b"a")
+    (folder / "Tap 1.wav").write_bytes(b"a")
+    (folder / "Tap 1.srt").write_text(SRT, encoding="utf-8")
+    (folder / "Tap 3.m4a").write_bytes(b"a")
+    (folder / "Le.srt").write_text(SRT, encoding="utf-8")
+    (folder / "Tap 4.txt").write_text("kịch bản", encoding="utf-8")
+    (folder / "con" / "Tap 9.mp3").write_bytes(b"a")
+    (folder / "con" / "Tap 9.srt").write_text(SRT, encoding="utf-8")
+
+    scan = client.post("/api/pipeline/scan", json={"path": str(folder), "mode": "media"}).get_json()
+    files = {f["name"]: f for f in scan["files"]}
+    assert list(files) == ["Tap 1.wav", "Tap 2.mp3", "Tap 2.wav", "Tap 3.m4a"]
+    assert files["Tap 1.wav"]["valid"] and files["Tap 1.wav"]["srtName"] == "Tap 1.srt"
+    assert files["Tap 2.mp3"]["valid"] and files["Tap 2.mp3"]["srtName"] == "tap 2.SRT"
+    assert not files["Tap 2.wav"]["valid"] and "Trùng tên" in files["Tap 2.wav"]["warning"]
+    assert not files["Tap 3.m4a"]["valid"] and files["Tap 3.m4a"]["srtPath"] is None
+    assert scan["warnings"] == ["Le.srt: không có file audio cùng tên"]
+    deep = client.post("/api/pipeline/scan", json={"path": str(folder), "mode": "media", "recursive": True}).get_json()
+    assert "Tap 9.mp3" in [f["name"] for f in deep["files"]]
+    # Che do mac dinh van chi thay kich ban.
+    assert [f["name"] for f in client.post("/api/pipeline/scan", json={"path": str(folder)}).get_json()["files"]] == ["Tap 4.txt"]
+
+    response = client.post("/api/pipeline/runs", json={"config": TYPE2_ONLY, "folderPath": str(folder), "mode": "media"})
+    assert response.status_code == 201, response.get_json()
+    items = response.get_json()["items"]
+    assert [i["slug"] for i in items] == ["tap-1", "tap-2"]
+    assert items[1]["files"]["audio"] == str(folder / "Tap 2.mp3") and items[1]["source"]["uploaded"] is False
+
+
+def test_media_items_validation(client, tmp_path):
+    audio, srt, txt = tmp_path / "a.mp3", tmp_path / "a.srt", tmp_path / "b.txt"
+    audio.write_bytes(b"a")
+    srt.write_text(SRT, encoding="utf-8")
+    txt.write_text("xin chào", encoding="utf-8")
+
+    def create(items, config=TYPE2_ONLY):
+        return client.post("/api/pipeline/runs", json={"config": config, "items": items})
+
+    no_srt = create([{"source": str(audio), "type": 2}])
+    assert no_srt.status_code == 400 and no_srt.get_json()["error"]["code"] == "unsupported_file"
+    swapped = create([{"source": str(srt), "srt": str(audio), "type": 2}])
+    assert swapped.status_code == 400 and swapped.get_json()["error"]["code"] == "unsupported_file"
+    missing = create([{"source": str(audio), "srt": str(tmp_path / "x.srt"), "type": 2}])
+    assert missing.status_code == 404
+    # Run tron kich ban + audio co san van can giong doc cho phan kich ban.
+    mixed = create([{"source": str(audio), "srt": str(srt), "type": 2}, {"source": str(txt), "type": 2}])
+    assert mixed.status_code == 400 and mixed.get_json()["error"]["code"] == "voice_required"
+    ok = create([{"source": str(audio), "srt": str(srt), "type": 2}, {"source": str(txt), "type": 2}], CONFIG)
+    assert ok.status_code == 201
+    assert [(i["input"], i["stage"]) for i in ok.get_json()["items"]] == [("media", "SRT_CHECK"), ("script", "TTS")]

@@ -90,7 +90,7 @@ STORAGE_DIR/pipeline/                       (PIPELINE_DIR)
     "ingest": { "blankLineBetweenParagraphs": false },
     "tts": { "voiceRef": "app-clone:12", "format": "mp3", "autoRetry": true },
     "type1": {
-      "tstProjectId": "campuchia",
+      "tstProjectId": "campuchia",                    // chủ đề mặc định; item có chủ đề riêng thì dùng items[].tst.projectId
       "lang": null,                                   // ghi vào story.json.lang, null = tự nhận diện
       "gates": { "prompts": true, "characters": false },
       "ai": { "model": "opus", "batchesPerInvocation": 4 },
@@ -161,6 +161,8 @@ UI đọc qua `GET /runs/<rid>/events?since=<seq>`.
 | `VIDEO` | 1 | Render loại 1 (1) | Job `video` xong, có `OUTPUT <path>` | §9 |
 | `COLLECT` | 1 | — | Video đã có trong thư mục xuất chung | §9 |
 | `DONE` | 1, 2 | — | — | — |
+
+**Đầu vào có sẵn audio + .srt** (`item.input = "media"`, chọn "Có sẵn audio + .srt" trên form): item không có `INGEST`/`TTS`, tạo ra đã ở `SRT_CHECK` với `files.audio`/`files.srt` trỏ thẳng vào file người dùng (upload thì nằm trong `uploads/`, quét thư mục thì giữ nguyên chỗ, chỉ đọc). Run chỉ gồm item loại này thì không cần `tts.voiceRef`. Không cho chạy lại từ `INGEST`/`TTS`. Item cũ không có `input` = `"script"`.
 
 ### 4.2 Trạng thái item
 
@@ -287,7 +289,7 @@ lặp:
       lấy K = --lo-moi batch tiếp theo (35 đoạn/batch, bắt đầu từ st.prompts.next_batch)
       với mỗi batch: chạy `srt_prompts.py show <dir> --from lo --to hi` → _anh/_ai/segments_NNN.txt
       ghi _anh/_ai/task_prompts_NNN.md:
-        - đọc: SKILL.md, huong-dan-prompt.md, skill vẽ, bible.json, các segments_NNN.txt
+        - đọc: SKILL.md, huong-dan-prompt.md, bộ skill của chủ đề (skill vẽ chính trước), bible.json, các segments_NNN.txt
         - ghi: CHỈ _anh/batches/NNN.json tương ứng
       gọi claude
   nếu st.next == "build":
@@ -316,7 +318,7 @@ lặp:
   --setting-sources project,local
   --session-id <uuid mới mỗi lần gọi>
   -n "tst-ai <pid>/<sid>"
-cwd = gốc TST (C:\Users\hiv\Downloads\TOOL IMAGE\clone)
+cwd = gốc TST (C:\Users\hiv\Documents\Cua Dung\app-tst-studio)
 ```
 
 - **Không cấp Bash**, vì `flow.py` chạy không có `--trang-thai` sẽ **tự tạo ảnh**. Mọi script đều do `ai_flow.py` chạy; AI chỉ đọc và ghi file.
@@ -382,7 +384,7 @@ ai: { args: (p, b) => [AI_FLOW, p.dir, ...(b.note ? ["--ghi-chu", noteFile] : []
 | Stage | Handler |
 |---|---|
 | `TST_STORY` | `GET /api/projects/<pid>/stories/<sid>`. Nếu 404 thì `POST /api/projects/<pid>/stories` (multipart: `srt`, `audio`, `id=<sid>`, `title=<item.title>`; timeout 180 s vì split chạy đồng bộ). Có `config.type1.lang` thì `PATCH {lang}`. Nếu `flow.next == "split"` (split lỗi) thì `failed` (`tst_split_failed`). |
-| `AI` | Nếu story đang có job `running` thì gắn vào job đó (lấy từ `GET /api/jobs?project=&story=`). Không có thì `POST …/run {step:"ai"}`. Poll `GET /api/jobs/:id?since=` mỗi tick, đọc `PROGRESS a/b`. Job `done` thì đọc lại flow. Job `error` thì `needs_attention` (kèm 20 dòng log cuối). Lane AI = 1. |
+| `AI` | Nếu story đang có job `running` thì gắn vào job đó (lấy từ `GET /api/jobs?project=&story=`). Không có thì `POST …/run {step:"ai"}`. Poll `GET /api/jobs/:id?since=` mỗi tick, đọc `PROGRESS a/b`. Job `done` thì đọc lại flow. Job `error` thì `needs_attention` (kèm 20 dòng log cuối). Lane AI = 1. Trước khi chạy job mới, đọc `GET /api/ai` (1 lần/tick): 404 = TST Studio chạy bản cũ chưa có bước `ai` → `waiting_service` (`tst:ai_step_missing`); `found:false` → `waiting_service` (`tst:claude_missing`). Sửa xong (restart TST Studio / cài claude) thì tự chạy tiếp, không cần bấm Thử lại. |
 | `BUILD` | `flow.next == "build"` thì `POST …/run {step:"build"}` rồi poll. `built=true` thì sang stage sau. |
 | `GATE_PROMPTS` | `awaiting_review`. `progress.message` ghi số ảnh nhân vật và số ảnh cảnh sẽ tạo. Xem §10. |
 | `CHARACTERS` | Cần `GET /api/tst` → `online && loggedIn`, không thì `waiting_service` (`tst:not_logged_in`). Lane ảnh = 1; đồng thời **chờ nếu TST Studio đang chạy job `characters`/`scenes`/`regen` của truyện khác** (người chạy tay). `POST …/run {step:"characters"}`, poll. Sau đó kiểm `characters.done == total`; thiếu thì `regen` các id `nv:<id>` còn thiếu, tối đa 2 vòng, quá thì `needs_attention`. |
@@ -455,13 +457,15 @@ Lỗi có dạng `{"error":{"code","message"}}` (giống `_error` của SVS). Ch
 | Method | Path | Request | Response |
 |---|---|---|---|
 | GET | `/api/pipeline/health` | — | Xem dưới |
-| POST | `/api/pipeline/scan` | `{path, recursive}` | `{path, files:[{path, name, stem, kind:"docx"|"txt", size, valid, warning?}], warnings}` |
-| POST | `/api/pipeline/runs` | multipart `payload` + `files[]`, **hoặc** JSON `{name, folderPath, recursive, config, items?:[{path, type}]}` | 201 `{runId}`. INGEST chạy đồng bộ; item lỗi INGEST vẫn được tạo với `failed`. |
+| POST | `/api/pipeline/scan` | `{path, recursive, mode?}` | `{path, files:[{path, name, stem, kind:"docx"|"txt", size, valid, warning?}], warnings}`. `mode:"media"`: mỗi file audio (mp3/wav/m4a/aac/flac/ogg) kèm `srtPath`, `srtName`; audio thiếu .srt cùng tên có `valid:false`, .srt thiếu audio vào `warnings`. |
+| POST | `/api/pipeline/runs` | multipart `payload` + `files[]`, **hoặc** JSON `{name, folderPath, recursive, mode?, config, items?:[{source, srt?, type}]}` | 201 `{runId}`. INGEST chạy đồng bộ; item lỗi INGEST vẫn được tạo với `failed`. Item có `srt` (`upload:<i>` hoặc đường dẫn): `source` là audio có sẵn, bỏ qua INGEST/TTS. |
 | GET | `/api/pipeline/runs?limit=20` | — | `[{runId, name, status, counts{total, done, failed, awaiting_review, running}, createdAt}]` |
 | GET | `/api/pipeline/runs/<rid>` | — | `run.json` |
 | GET | `/api/pipeline/runs/<rid>/events?since=<seq>` | — | `{events:[…], next}` |
 | POST | `/api/pipeline/runs/<rid>/pause` · `/resume` · `/cancel` | — | run |
 | POST | `/api/pipeline/runs/<rid>/items/<iid>/retry` | `{fromStage?}` | item |
+| POST | `/api/pipeline/runs/<rid>/retry` | — | run. Thử lại mọi item `needs_attention`/`failed` tại bước đang dừng (item `cancelled` giữ nguyên); 409 `nothing_to_retry` nếu không có. |
+| GET | `/api/pipeline/runs/<rid>/items/<iid>/detail` | — | `{item, events (≤100 của item), tst, tstError?}`. `tst` (loại 1, đọc sống từ TST Studio): `{url, flow, characters[{id,name,role,image}], scenes{total, withPrompt, withImage, errors, recent[12]}, video, job{step,status,lines[≤40]}, jobs[≤6]}`. TST không trả lời thì `tst:null` + `tstError`. UI: bấm tên item trong bảng để mở. |
 | POST | `/api/pipeline/runs/<rid>/items/<iid>/cancel` | — | item |
 | GET | `/api/pipeline/runs/<rid>/items/<iid>/review?gate=` | — | §10 |
 | POST | `/api/pipeline/runs/<rid>/items/<iid>/approve` | `{gate}` | item |
@@ -576,3 +580,15 @@ Thêm route trong `frontend/src/router.tsx` **trước** catch-all `*` (L27-30),
 - `/scan` và `POST /runs` nhận đường dẫn folder bất kỳ, nhưng **chỉ đọc** `.docx` / `.txt` và không theo symlink ra ngoài folder đã chọn.
 - Không ghi giá trị bí mật vào `run.json`, `events.jsonl` hay log (API key, token, mật khẩu).
 - AI chỉ được dùng các tool Read / Write / Edit / Glob / Grep; ranh giới ghi được `ai_flow.py` kiểm tra (§7.2).
+
+## Chủ đề TST + bộ skill cho từng video loại 1 (22/10)
+
+- Form `/pipeline`: mỗi video loại 1 chọn chủ đề ở cột "Loại video · chủ đề"; để trống = chủ đề mặc định
+  (`config.type1.tstProjectId`). Payload: `items[].tstProjectId`. Server chỉ bắt buộc chủ đề mặc định khi còn video loại 1
+  chưa có chủ đề riêng; id chủ đề phải khớp `^[a-z0-9][a-z0-9_-]*$` (`invalid_tst_project`).
+- `create_run` ghi `item.tst.projectId` ngay khi tạo; `TST_STORY` tạo truyện trong chủ đề đó (retry giữ nguyên chủ đề).
+- `GET /api/pipeline/tst/projects` trả thêm `tstUrl` và `projects[].skills` (`name`, `title`, `description`, `main`) lấy
+  từ `GET /api/projects` của TST Studio. Form hiện bộ skill của các chủ đề đang dùng, link "Quản lý bộ skill" mở
+  `<tstUrl>/p/<chủ đề>?skills=1`, nút ↻ tải lại sau khi sửa skill.
+- AI của TST Studio (`ai_flow.py`, `review_flow.py`) đọc cả bộ skill của chủ đề, không chỉ skill vẽ chính.
+

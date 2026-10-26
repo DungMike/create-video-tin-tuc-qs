@@ -1,6 +1,6 @@
 # 01. App TTS: DgtAutoTTSMM + DGT Automation API
 
-> Thư mục: `C:\Users\hiv\Documents\Cua Dung\DgtAutoTTSMM_v5\DgtAutoTTSMM_v5 - clone` (gọi tắt `ROOT`).
+> Thư mục: `C:\Users\hiv\Documents\Cua Dung\app-tts-dgt` (gọi tắt `ROOT`).
 > Vai trò trong pipeline: kịch bản `.txt` → `.mp3` + `.srt`.
 > Mọi `file:line` dưới đây tính từ `ROOT`.
 

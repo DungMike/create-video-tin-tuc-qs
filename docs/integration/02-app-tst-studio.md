@@ -1,6 +1,6 @@
 # 02. App tạo ảnh: TST Studio + TST bridge + skills
 
-> Thư mục: `C:\Users\hiv\Downloads\TOOL IMAGE\clone` (gọi tắt `TST`).
+> Thư mục: `C:\Users\hiv\Documents\Cua Dung\app-tst-studio` (gọi tắt `TST`).
 > Vai trò trong pipeline (**loại 1**): audio + `.srt` → chia timeline → bible nhân vật + prompt (AI) → ảnh nhân vật → ảnh cảnh qua app TST → dựng video bằng ffmpeg.
 > Mọi `file:line` tính từ `TST`.
 
@@ -236,7 +236,7 @@ Không có trạng thái riêng cho `export` hay `video`.
 ```
 projects/<pid>/project.json
 projects/<pid>/video.json                              (tuỳ chọn, cấu hình video của chủ đề)
-projects/<pid>/.claude/skills/<style_skill>/SKILL.md   (skill vẽ của chủ đề)
+projects/<pid>/.claude/skills/*/SKILL.md               (bộ skill của chủ đề; skill vẽ chính = <style_skill>, đọc đầu tiên)
 projects/<pid>/stories/<sid>/
   story.json  <sid>.srt  <sid>.<audio>  video.json (override từng cảnh)
   <sid>_anh/        segments.json  transcript.txt  bible.json  batches/NNN.json

@@ -253,3 +253,45 @@ def test_real_runner_records_tv_effect_style(env, monkeypatch):
 
     runner_obj = StoryVideoBatchRunner("sb-test1234", [{"story_id": "sv-1", "output_name": "a", "tv_effect_style_id": "vhs_retro"}])
     assert runner_obj.progress["stories"][0]["tv_effect_style_id"] == "vhs_retro"
+
+
+def _media_run(env, folder_name="co-san"):
+    folder = env["tmp"] / folder_name
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "Tap 1.mp3").write_bytes(b"ID3fake")
+    (folder / "Tap 1.srt").write_text("1\n00:00:00,000 --> 00:00:09,000\nxin chao\n", encoding="utf-8")
+    config = {"type2": {"sharedConfig": {"libraryIds": [env["library"]], "subtitlePreset": "clean"}}}
+    source = {"path": str(folder / "Tap 1.mp3"), "srtPath": str(folder / "Tap 1.srt"), "type": 2}
+    return runner.create_run("Co san", config, [source], run_id=store.new_run_id())
+
+
+def test_media_item_renders_existing_audio_and_srt(env):
+    run = _media_run(env)
+    runner.tick()  # SRT_CHECK -> SV_RENDER -> run hook gui batch
+    batches = env["captured"]["batches"]
+    assert len(batches) == 1 and not env["dgt"].jobs
+    first = batches[0]["configs"][0]
+    assert first["input_value"] == str(env["tmp"] / "co-san" / "Tap 1.mp3")
+    assert first["subtitle_path"] == str(env["tmp"] / "co-san" / "Tap 1.srt")
+    assert store.load_run(run["runId"])["items"][0]["sv"]["batchId"] == batches[0]["batchId"]
+
+
+def test_orphan_reattach_for_outside_audio_only_matches_own_run(env):
+    other = _media_run(env)
+    runner.tick()
+    other_batch = env["captured"]["batches"][0]["batchId"]
+    env["captured"]["queued"].clear()
+
+    run = _media_run(env)  # cung file audio, cung slug, run khac
+    rid = run["runId"]
+    runner.tick()
+    assert len(env["captured"]["batches"]) == 2  # khong gan nham batch cua run kia
+    own_batch = store.load_run(rid)["items"][0]["sv"]["batchId"]
+    assert own_batch != other_batch
+
+    # Gia lap: server chet truoc khi ghi batchId -> khoi phuc dung batch cua run nay.
+    store.update_run(rid, lambda r: (r["items"][0].update(status="pending"), r["items"][0].update(sv={})))
+    env["captured"]["queued"].clear()
+    runner.tick()
+    assert len(env["captured"]["batches"]) == 2
+    assert store.load_run(rid)["items"][0]["sv"]["batchId"] == own_batch

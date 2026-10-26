@@ -14,8 +14,11 @@ from src.db import mongo
 
 
 @pytest.fixture(autouse=True)
-def _mongo_off_by_default(monkeypatch):
+def _mongo_off_by_default(monkeypatch, tmp_path):
     monkeypatch.setattr(Config, "MONGODB_URI", "")
+    # Cai dat tu dong tim nguon (vd gioi han luot dung clip) cua may that khong duoc
+    # lot vao test render.
+    monkeypatch.setattr(Config, "STORY_AUTO_SOURCE_DIR", str(tmp_path / "_auto_source"))
     mongo.reset()
     yield
     mongo.set_client_factory(None)

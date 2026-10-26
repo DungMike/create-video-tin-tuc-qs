@@ -67,6 +67,14 @@ def test_create_run_validation(env):
         runner.create_run("x", {"tts": {"voiceRef": "v"}}, [{"path": _src(env["tmp"]), "type": 1}],
                           run_id=store.new_run_id())
     assert info.value.code == "tst_project_required"
+    # Loại 1: video có chủ đề riêng thì không cần chủ đề mặc định; id chủ đề phải hợp lệ
+    run = runner.create_run("x", {"tts": {"voiceRef": "v"}}, [{"path": _src(env["tmp"]), "type": 1, "tstProjectId": "an-thai"}],
+                            run_id=store.new_run_id())
+    assert run["items"][0]["tst"] == {"projectId": "an-thai"}
+    with pytest.raises(runner.PipelineError) as info:
+        runner.create_run("x", {"tts": {"voiceRef": "v"}}, [{"path": _src(env["tmp"]), "type": 1, "tstProjectId": "../x"}],
+                          run_id=store.new_run_id())
+    assert info.value.code == "invalid_tst_project"
     with pytest.raises(runner.PipelineError) as info:
         runner.create_run("x", {"tts": {"voiceRef": "v"}}, [{"path": _src(env["tmp"]), "type": 2}],
                           run_id=store.new_run_id())
@@ -226,3 +234,62 @@ def test_lane_limits(env, monkeypatch):
     ctx = runner.Context(lanes_used={})
     assert ctx.acquire("ai") is True and ctx.acquire("ai") is False
     assert runner.Context(paused=True).acquire("tst_images") is False
+
+
+def _media(tmp_path, stem="Tập 7", srt_text="1\n00:00:00,000 --> 00:00:09,000\nXin chào\n"):
+    folder = tmp_path / "media"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{stem}.mp3").write_bytes(b"ID3fake")
+    (folder / f"{stem}.srt").write_text(srt_text, encoding="utf-8")
+    return {"path": str(folder / f"{stem}.mp3"), "srtPath": str(folder / f"{stem}.srt"), "type": 2}
+
+
+def test_media_item_skips_tts_and_cannot_retry_into_it(env):
+    run = runner.create_run("x", {"tts": {}, "type2": {"sharedConfig": {"libraryIds": ["lib-1"]}}},
+                            [_media(env["tmp"])], run_id=store.new_run_id())
+    rid = run["runId"]
+    assert run["config"]["tts"].get("voiceRef") is None
+    assert runner.stages_for(run["items"][0]) == ["SRT_CHECK", "SV_RENDER", "DONE"]
+    events = store.read_events(rid)
+    assert events[0]["stage"] == "SRT_CHECK" and "bỏ qua tạo giọng đọc" in events[0]["message"]
+
+    ctx = runner._make_context(False, {}, {"_dgt": env["dgt"], "_tst": env["tst"]})
+    after, _ = runner.process_item(ctx, run, run["items"][0])
+    assert after["stage"] == "SV_RENDER" and after["media"]["cues"] == 1
+    assert not env["dgt"].jobs  # khong goi app TTS
+
+    for stage in ("INGEST", "TTS"):
+        with pytest.raises(runner.PipelineError) as info:
+            runner.retry_item(rid, "it-01", stage)
+        assert info.value.code == "invalid_stage"
+
+
+def test_media_item_bad_srt_fails_at_srt_check(env, monkeypatch):
+    source = _media(env["tmp"], "Hỏng", "1\n00:00:00,000 --> 00:00:30,000\nquá dài\n")
+    run = runner.create_run("x", {"type2": {"sharedConfig": {"libraryIds": ["lib-1"]}}}, [source],
+                            run_id=store.new_run_id())
+    runner.tick()
+    item = _item(run["runId"])
+    assert item["status"] == "failed" and item["error"]["code"] == "srt_mismatch"
+    retried = runner.retry_item(run["runId"], "it-01")
+    assert retried["items"][0]["stage"] == "SRT_CHECK" and retried["items"][0]["status"] == "pending"
+
+
+def test_retry_items_restarts_attention_and_failed_but_not_cancelled(env):
+    sources = [{"path": _src(env["tmp"], f"Tập {i}.txt"), "type": 2} for i in (1, 2, 3, 4)]
+    run = _create(env, sources)
+    rid = run["runId"]
+
+    def mark(r):
+        r["items"][0].update(status="needs_attention", error={"code": "x"})
+        r["items"][1].update(status="failed", stage="SRT_CHECK", error={"code": "y"})
+        r["items"][2].update(status="cancelled")
+    store.update_run(rid, mark)
+
+    after = runner.retry_items(rid)
+    assert [(i["stage"], i["status"]) for i in after["items"]] == [
+        ("TTS", "pending"), ("SRT_CHECK", "pending"), ("TTS", "cancelled"), ("TTS", "pending")]
+    assert after["items"][0]["error"] is None
+    with pytest.raises(runner.PipelineError) as info:
+        runner.retry_items(rid)
+    assert info.value.code == "nothing_to_retry"

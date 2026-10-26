@@ -15,7 +15,14 @@ from flask import Blueprint, jsonify, request, send_file
 from src.config import Config
 from src.utils.logger import logger
 from src.utils.pipeline_clients import DgtClient, ServiceError, ServiceUnavailable, TstClient
-from src.utils.pipeline_ingest import IngestError, TEXT_EXTENSIONS, safe_upload_name, scan_folder
+from src.utils.pipeline_ingest import (
+    AUDIO_EXTENSIONS,
+    SRT_EXTENSIONS,
+    TEXT_EXTENSIONS,
+    IngestError,
+    safe_upload_name,
+    scan_folder,
+)
 from src.utils import pipeline_runner as runner
 from src.utils.pipeline_store import list_runs, load_run, new_run_id, read_events, run_dir, summarize_run
 
@@ -190,13 +197,19 @@ def pipeline_tst_projects():
         projects = TstClient().projects()
     except (ServiceUnavailable, ServiceError) as exc:
         return _error(f"Không lấy được chủ đề từ TST Studio: {exc}", "tst_unavailable", 503)
-    return jsonify({"projects": [
+    # skills: bo skill cua chu de (TST Studio dua vao khi AI viet bible + prompt anh); tstUrl de mo trang quan ly skill.
+    return jsonify({"tstUrl": Config.TST_STUDIO_URL, "projects": [
         {
             "id": p.get("id"),
             "name": p.get("name"),
+            "description": p.get("description") or "",
             "styleSkill": p.get("style_skill"),
             "aspectRatio": p.get("aspect_ratio"),
             "storyCount": p.get("storyCount"),
+            "skills": [
+                {"name": s.get("name"), "title": s.get("title"), "description": s.get("description") or "", "main": bool(s.get("main"))}
+                for s in p.get("skills") or []
+            ],
         }
         for p in projects
     ]})
@@ -210,8 +223,9 @@ def pipeline_scan():
     path = str(data.get("path") or "").strip().strip('"')
     if not path:
         return _error("Cần đường dẫn thư mục.", "path_required")
+    mode = "media" if data.get("mode") == "media" else "script"
     try:
-        return jsonify(scan_folder(path, bool(data.get("recursive"))))
+        return jsonify(scan_folder(path, bool(data.get("recursive")), mode))
     except IngestError as exc:
         return _error(str(exc), exc.code, 404 if exc.code == "folder_not_found" else 400)
 
@@ -244,6 +258,27 @@ def _download_gdoc(url: str, entry: dict, upload_dir: str, index: int) -> dict:
             "uploaded": True, "title": title}
 
 
+UPLOAD_EXTENSIONS = {*TEXT_EXTENSIONS, *AUDIO_EXTENSIONS, *SRT_EXTENSIONS}
+
+
+def _local_source(ref: str, uploaded: dict[int, dict], allowed, label: str) -> dict:
+    """``upload:<i>`` hoac duong dan tuyet doi -> {path, originalName, uploaded}; kiem tra duoi file."""
+    if ref.startswith("upload:"):
+        try:
+            up = uploaded[int(ref.split(":", 1)[1])]
+        except (ValueError, KeyError) as exc:
+            raise runner.PipelineError("upload_not_found", f"Không thấy file upload {ref}.") from exc
+        source = {"path": up["path"], "originalName": up["originalName"], "uploaded": True}
+    else:
+        if not os.path.isabs(ref) or not os.path.isfile(ref):
+            raise runner.PipelineError("source_not_found", f"Không tìm thấy file: {ref}", 404)
+        source = {"path": ref, "originalName": os.path.basename(ref), "uploaded": False}
+    if os.path.splitext(source["originalName"])[1].lower() not in allowed:
+        shown = source["originalName"] if source["uploaded"] else ref
+        raise runner.PipelineError("unsupported_file", f"{shown}: chỉ nhận {label}.")
+    return source
+
+
 def _read_create_payload() -> dict:
     if request.form.get("payload"):
         try:
@@ -257,8 +292,10 @@ def _read_create_payload() -> dict:
 def pipeline_create_run():
     """multipart: payload(JSON) + files[]; hoac JSON.
 
-    payload = {name, config, items:[{source:"upload:<i>" | "<abs path>", type}], folderPath?, recursive?}
-    Khong co items ma co folderPath: lay moi file hop le trong folder voi config.defaultType.
+    payload = {name, config, items:[{source:"upload:<i>" | "<abs path>", srt?, type}], folderPath?, recursive?, mode?}
+    Item co ``srt`` (upload:<j> | duong dan): ``source`` la audio co san -> bo qua tao giong doc.
+    Khong co items ma co folderPath: lay moi file hop le trong folder voi config.defaultType
+    (``mode="media"``: moi cap audio + .srt).
     """
     try:
         data = _read_create_payload()
@@ -270,8 +307,8 @@ def pipeline_create_run():
             if not storage or not storage.filename:
                 continue
             name = safe_upload_name(storage.filename)
-            if os.path.splitext(name)[1].lower() not in TEXT_EXTENSIONS:
-                raise runner.PipelineError("unsupported_file", f"{storage.filename}: chỉ nhận .docx hoặc .txt.")
+            if os.path.splitext(name)[1].lower() not in UPLOAD_EXTENSIONS:
+                raise runner.PipelineError("unsupported_file", f"{storage.filename}: chỉ nhận .docx, .txt, file audio hoặc .srt.")
             os.makedirs(upload_dir, exist_ok=True)
             dest = os.path.join(upload_dir, f"{index + 1:02d}_{name}")
             storage.save(dest)
@@ -280,26 +317,27 @@ def pipeline_create_run():
         items = data.get("items")
         sources: list[dict] = []
         if not items and data.get("folderPath"):
-            scan = scan_folder(str(data["folderPath"]), bool(data.get("recursive")))
-            items = [{"source": f["path"], "type": None} for f in scan["files"] if f.get("valid")]
+            mode = "media" if data.get("mode") == "media" else "script"
+            scan = scan_folder(str(data["folderPath"]), bool(data.get("recursive")), mode)
+            items = [{"source": f["path"], "srt": f.get("srtPath"), "type": None} for f in scan["files"] if f.get("valid")]
         if not items and uploaded:
             items = [{"source": f"upload:{i}", "type": None} for i in sorted(uploaded)]
         for entry in items or []:
             ref = str(entry.get("source") or "").strip()
-            if ref.startswith("upload:"):
-                try:
-                    up = uploaded[int(ref.split(":", 1)[1])]
-                except (ValueError, KeyError) as exc:
-                    raise runner.PipelineError("upload_not_found", f"Không thấy file upload {ref}.") from exc
-                sources.append({**up, "type": entry.get("type"), "uploaded": True, "title": entry.get("title")})
+            srt_ref = str(entry.get("srt") or "").strip()
+            if srt_ref:
+                audio = _local_source(ref, uploaded, AUDIO_EXTENSIONS, "file audio (" + ", ".join(AUDIO_EXTENSIONS) + ")")
+                srt = _local_source(srt_ref, uploaded, SRT_EXTENSIONS, "file .srt")
+                source = {**audio, "srtPath": srt["path"], "srtName": srt["originalName"],
+                          "type": entry.get("type"), "title": entry.get("title")}
             elif ref.startswith(("https://docs.google.com/", "http://docs.google.com/")):
-                sources.append(_download_gdoc(ref, entry, upload_dir, len(sources) + 1))
+                source = _download_gdoc(ref, entry, upload_dir, len(sources) + 1)
             else:
-                if not os.path.isabs(ref) or not os.path.isfile(ref):
-                    raise runner.PipelineError("source_not_found", f"Không tìm thấy file: {ref}", 404)
-                if os.path.splitext(ref)[1].lower() not in TEXT_EXTENSIONS:
-                    raise runner.PipelineError("unsupported_file", f"{ref}: chỉ nhận .docx hoặc .txt.")
-                sources.append({"path": ref, "type": entry.get("type"), "title": entry.get("title")})
+                text = _local_source(ref, uploaded, TEXT_EXTENSIONS, ".docx hoặc .txt (file audio phải kèm .srt)")
+                source = {**text, "type": entry.get("type"), "title": entry.get("title")}
+            # Loai 1: chu de TST rieng cua video nay (bo trong = chu de mac dinh config.type1.tstProjectId)
+            source["tstProjectId"] = str(entry.get("tstProjectId") or "").strip() or None
+            sources.append(source)
 
         config = data.get("config") or {}
         run = runner.create_run(str(data.get("name") or ""), config, sources, run_id=run_id)
@@ -381,6 +419,33 @@ def pipeline_retry_item(run_id: str, item_id: str):
 @pipeline_bp.route("/api/pipeline/runs/<run_id>/items/<item_id>/cancel", methods=["POST"])
 def pipeline_cancel_item(run_id: str, item_id: str):
     return _action(runner.cancel_item, run_id, item_id)
+
+
+@pipeline_bp.route("/api/pipeline/runs/<run_id>/retry", methods=["POST"])
+def pipeline_retry_run_items(run_id: str):
+    """Thu lai moi item 'can xu ly' / 'loi' cua run tai buoc dang dung."""
+    return _action(runner.retry_items, run_id)
+
+
+ITEM_DETAIL_EVENTS = 100
+
+
+@pipeline_bp.route("/api/pipeline/runs/<run_id>/items/<item_id>/detail", methods=["GET"])
+def pipeline_item_detail(run_id: str, item_id: str):
+    """Chi tiet 1 item: nhat ky cua item + (loai 1) so lieu song tu TST Studio."""
+    from src.utils import pipeline_type1
+
+    run = load_run(run_id)
+    item = next((i for i in (run or {}).get("items", []) if i.get("itemId") == item_id), None)
+    if item is None:
+        return _error("Không tìm thấy item.", "item_not_found", 404)
+    events = [e for e in read_events(run_id, 0, limit=0) if e.get("itemId") == item_id][-ITEM_DETAIL_EVENTS:]
+    body = {"item": _with_media({"runId": run_id, "items": [item]})["items"][0], "events": events, "tst": None}
+    try:
+        body["tst"] = pipeline_type1.tst_detail(item, TstClient(timeout=8))
+    except (ServiceUnavailable, ServiceError) as exc:
+        body["tstError"] = f"Không đọc được TST Studio: {exc}"
+    return jsonify(body)
 
 
 # --- cong duyet (loai 1) -------------------------------------------------------------

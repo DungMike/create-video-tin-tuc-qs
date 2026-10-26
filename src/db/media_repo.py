@@ -117,6 +117,23 @@ def record_ingest(library_id: str, source_ref: dict | None, assets: list[dict]) 
     mongo.bulk_upsert(db[mongo.CLIPS], clip_updates)
 
 
+def find_known_source_keys(source_keys) -> set[str]:
+    """Cac ``source_key`` (``<provider>:<id>``) da co trong ``source_videos``.
+
+    Chong trung TOAN HE THONG cho luong tu dong tim nguon: video goc da tung nhap vao
+    bat ky thu vien nao (ke ca thu vien da xoa) thi khong tai lai.
+    """
+    keys = list(dict.fromkeys(str(k) for k in source_keys if k))
+    if not keys:
+        return set()
+    collection = mongo.get_db()[mongo.SOURCE_VIDEOS]
+    found: set[str] = set()
+    for start in range(0, len(keys), _IN_CHUNK):
+        chunk = keys[start:start + _IN_CHUNK]
+        found.update(str(doc["_id"]) for doc in collection.find({"_id": {"$in": chunk}}, {"_id": 1}))
+    return found
+
+
 def get_clip_use_counts(clip_keys) -> dict[str, int]:
     """``{clip_key: use_count}`` cho nhung key da dung it nhat 1 lan (con lai = 0)."""
     keys = list(dict.fromkeys(str(k) for k in clip_keys if k))

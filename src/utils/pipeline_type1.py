@@ -142,6 +142,31 @@ def _other_image_job_running(ctx: Context, item: dict) -> dict | None:
     return None
 
 
+def _require_ai_ready(ctx: Context) -> None:
+    """TST Studio phai co buoc ``ai`` va tim thay Claude CLI; chua thi cho (sua xong tu chay tiep).
+
+    Doc ``GET /api/ai`` toi da 1 lan moi tick (TST cung cache 60 s).
+    """
+    cache = ctx.run_cache
+    if "_ai_state" not in cache:
+        try:
+            cache["_ai_state"] = ctx.tst.ai_state()
+        except ServiceError as exc:
+            cache["_ai_state"] = {"stepMissing": exc.status == 404, "error": str(exc)}
+    state = cache["_ai_state"]
+    if state.get("stepMissing"):
+        raise ServiceUnavailable(
+            "tst", "ai_step_missing",
+            "TST Studio đang chạy bản cũ, chưa có bước AI: đóng cửa sổ TST Studio rồi mở lại start-studio.cmd.",
+        )
+    if not state.get("found"):
+        detail = f" ({state['error']})" if state.get("error") else ""
+        raise ServiceUnavailable(
+            "tst", "claude_missing",
+            f"TST Studio không tìm thấy Claude CLI{detail}: chạy `claude install` hoặc đặt CLAUDE_BIN rồi mở lại TST Studio.",
+        )
+
+
 def _require_tst_online(ctx: Context) -> None:
     state = ctx.tst.tst_state()
     if not state.get("online"):
@@ -206,6 +231,7 @@ def handle_ai(ctx: Context, run: dict, item: dict) -> None:
     if status == "done":
         needs_attention(item, "ai_incomplete", f"AI chạy xong nhưng vẫn thiếu ({flow.get('next')}).\n{_tail(item)}")
         return
+    _require_ai_ready(ctx)
     if not ctx.acquire("ai"):
         set_status(item, "pending", "Chờ lượt AI (mỗi lúc 1 truyện)")
         return
@@ -351,6 +377,7 @@ def handle_video(ctx: Context, run: dict, item: dict) -> None:
             needs_attention(item, "video_missing", "Dựng video xong nhưng không thấy file mp4.")
             return
         tst["video"] = output
+        tst.pop("videoCleanedAt", None)
         advance(item, "Đã dựng xong video")
         return
     if status == "lost":
@@ -376,7 +403,8 @@ def _latest_render(ctx: Context, item: dict) -> str | None:
         return None
     name = renders[0].get("file")
     stem = os.path.basename(tst["dir"].rstrip("\\/"))
-    candidates = [os.path.join(tst["dir"], f"{stem}_video", name)]
+    # "path": duong dan tuyet doi TST Studio tra ve (truyen co the xuat video ra o khac, story.json video_dir)
+    candidates = [p for p in (renders[0].get("path"), os.path.join(tst["dir"], f"{stem}_video", name)) if p]
     return next((path for path in candidates if os.path.isfile(path)), None)
 
 
@@ -417,12 +445,63 @@ def _copy_worker(key: str, src: str, dest: str, mode: str) -> None:
             pass
 
 
+def _tree_size(path: str) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+def _cleanup_tst_video(item: dict, src: str, dest: str) -> None:
+    """Xoa thu muc <truyen>_video cua TST (mp4 + _cache) khi ban o thu muc xuat da du kich thuoc.
+
+    Chi xoa dung <tst dir>/<stem>_video chua ``src``; render nam cho khac thi bo qua. Khong bao gio
+    raise: chay trong tick, loi don dep khong duoc lam hong item da gom xong.
+    """
+    if not Config.PIPELINE_CLEANUP_TST_VIDEO:
+        return
+    tst = _tst(item)
+    story_dir = tst.get("dir")
+    if not story_dir:
+        return
+    try:
+        stem = os.path.basename(story_dir.rstrip("\\/"))
+        video_dir = os.path.normcase(os.path.abspath(os.path.join(story_dir, f"{stem}_video")))
+        if os.path.normcase(os.path.abspath(os.path.dirname(src))) != video_dir:
+            return
+        if os.path.normcase(os.path.abspath(dest)).startswith(video_dir + os.sep):
+            return
+        if os.path.getsize(dest) != os.path.getsize(src):
+            return
+        before = _tree_size(video_dir)
+        shutil.rmtree(video_dir, ignore_errors=True)
+        # Windows nuot loi rmtree khi file con bi giu: do lai thay vi tin con so truoc khi xoa.
+        left = _tree_size(video_dir) if os.path.exists(video_dir) else 0
+        if left:
+            logger.warning(
+                f"[Pipeline:type1] {item.get('itemId')}: con {left / 1e6:.1f} MB trong {video_dir} sau khi don."
+            )
+            return
+        tst["videoCleanedAt"] = utc_now()
+        logger.info(f"[Pipeline:type1] {item.get('itemId')}: da xoa {before / 1e9:.2f} GB video TST ({video_dir}).")
+    except OSError as exc:
+        logger.warning(f"[Pipeline:type1] {item.get('itemId')}: khong don duoc video TST: {exc}")
+
+
 @stage_handler("COLLECT")
 def handle_collect(ctx: Context, run: dict, item: dict) -> None:
     tst = _tst(item)
     src = tst.get("video")
     mode = Config.PIPELINE_COLLECT_MODE if Config.PIPELINE_COLLECT_MODE in ("link", "copy", "none") else "link"
     if not src or not os.path.isfile(src):
+        if tst.get("videoCleanedAt"):
+            needs_attention(item, "video_missing",
+                            "Video TST đã được dọn sau khi gom; chạy lại từ bước VIDEO để dựng lại.")
+            return
         needs_attention(item, "video_missing", "Không thấy video đã dựng để gom.")
         return
     if mode == "none":
@@ -447,10 +526,12 @@ def handle_collect(ctx: Context, run: dict, item: dict) -> None:
         if thread is not None and os.path.isfile(dest) and os.path.getsize(dest) == os.path.getsize(src):
             _copies.pop(key, None)
             item["files"]["video"] = dest
+            _cleanup_tst_video(item, src, dest)
             advance(item, "Đã gom video vào thư mục xuất")
             return
         if os.path.isfile(dest) and os.path.getsize(dest) == os.path.getsize(src):
             item["files"]["video"] = dest
+            _cleanup_tst_video(item, src, dest)
             advance(item, "Video đã có trong thư mục xuất")
             return
         thread = threading.Thread(target=_copy_worker, args=(key, src, dest, mode), daemon=True, name=f"collect-{key}")
@@ -516,6 +597,54 @@ def review(run_id: str, item_id: str, gate: str, tst_client=None) -> dict:
         "characters": characters,
         "scenes": scenes,
         "tstUrl": tst.get("url"),
+    }
+
+
+DETAIL_RECENT_IMAGES = 12
+DETAIL_LOG_LINES = 40
+
+
+def tst_detail(item: dict, client) -> dict | None:
+    """Trang thai song cua truyen TST cho trang chi tiet item (doc tu TST Studio moi lan goi)."""
+    tst = item.get("tst") or {}
+    if int(item.get("type") or 0) != 1 or not tst.get("storyId"):
+        return None
+    pid, sid = tst["projectId"], tst["storyId"]
+    base = {"url": tst.get("url"), "projectId": pid, "storyId": sid}
+    story = client.story(pid, sid)
+    if story is None:
+        return {**base, "missing": True}
+    segments = story.get("segments") or []
+    with_image = [s for s in segments if s.get("image")]
+    jobs = client.jobs(pid, sid)
+    focus = next((j for j in jobs if j.get("status") == "running"), None) or (jobs[0] if jobs else None)
+    job = None
+    if focus:
+        since = max(0, int(focus.get("lineCount") or 0) - DETAIL_LOG_LINES)
+        full = client.job(focus["id"], since) or focus
+        job = {k: full.get(k) for k in ("id", "step", "status", "exitCode", "startedAt", "endedAt", "lineCount")}
+        job["lines"] = [line for line in full.get("lines") or [] if line.strip()][-DETAIL_LOG_LINES:]
+    return {
+        **base,
+        "flow": _compact_flow(story.get("status") or {}),
+        "setting": story.get("setting"),
+        "characters": [
+            {**{k: c.get(k) for k in ("id", "name", "role")}, "image": _abs_media(c.get("image"))}
+            for c in story.get("characters") or []
+        ],
+        "scenes": {
+            "total": len(segments),
+            "withPrompt": sum(1 for s in segments if s.get("prompt")),
+            "withImage": len(with_image),
+            "errors": [s.get("id") for s in segments if s.get("error")][:50],
+            "recent": [
+                {"id": s.get("id"), "start": s.get("start"), "image": _abs_media(s.get("image"))}
+                for s in with_image[-DETAIL_RECENT_IMAGES:]
+            ],
+        },
+        "video": story.get("video"),
+        "job": job,
+        "jobs": [{k: j.get(k) for k in ("id", "step", "status", "exitCode", "startedAt", "endedAt")} for j in jobs[:6]],
     }
 
 
@@ -612,7 +741,7 @@ def _reset_tst(item: dict, stage: str) -> None:
         # Audio/srt moi -> truyen TST moi (khong chia lai timeline cua truyen cu).
         if tst.get("storyId"):
             tst["storyAttempt"] = int(tst.get("storyAttempt") or 1) + 1
-        for key in ("storyId", "flow", "approvals", "url", "dir", "langSet", "video"):
+        for key in ("storyId", "flow", "approvals", "url", "dir", "langSet", "video", "videoCleanedAt"):
             tst.pop(key, None)
     if stage in ("CHARACTERS",):
         tst["charRounds"] = 0

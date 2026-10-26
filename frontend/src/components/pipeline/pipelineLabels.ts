@@ -56,6 +56,14 @@ export const STAGES_TYPE1 = [
 ];
 export const STAGES_TYPE2 = ["INGEST", "TTS", "SRT_CHECK", "SV_RENDER", "DONE"];
 
+/** Các bước của item; item có sẵn audio + srt bỏ qua đọc kịch bản và tạo giọng đọc (khớp stages_for ở server). */
+export function stagesOf(item: PipelineItem) {
+  const stages = item.type === 1 ? STAGES_TYPE1 : STAGES_TYPE2;
+  return item.input === "media" ? stages.filter((stage) => stage !== "INGEST" && stage !== "TTS") : stages;
+}
+
+export const AUDIO_EXTENSIONS = ["mp3", "wav", "m4a", "aac", "flac", "ogg"];
+
 export const SUBTITLE_LANGS: { value: string; label: string }[] = [
   { value: "", label: "Tự nhận diện" },
   { value: "vi", label: "Tiếng Việt" },

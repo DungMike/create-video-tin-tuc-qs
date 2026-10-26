@@ -35,6 +35,10 @@ CLIP_USAGE_ONCE = "once"
 _OUTBOX_NAME = "_clip_usage_outbox.jsonl"
 
 
+class ClipStockExhausted(RuntimeError):
+    """Khong du clip duoi gioi han luot dung de dung mot video (``max_uses``)."""
+
+
 def normalize_clip_usage_mode(value) -> str:
     """Chi dung chu "once" moi bat che do moi; moi gia tri khac (ke ca thieu) = reuse."""
     return CLIP_USAGE_ONCE if str(value or "").strip().lower() == CLIP_USAGE_ONCE else CLIP_USAGE_REUSE
@@ -82,6 +86,7 @@ class ClipUsageLedger:
         *,
         run_length=None,
         successor=None,
+        max_uses: int | None = None,
     ) -> ClipSelection:
         """Chon clip cho mot video. Raise neu khong doc duoc so dem tu Mongo.
 
@@ -91,6 +96,10 @@ class ClipUsageLedger:
         ``run_length()`` + ``successor(path)`` bat che do long takes: moi lan lay mot
         clip "seed" theo thu tu tren roi noi them clip lien sau cua cung video goc,
         chi khi clip do chua bi lay va khong bi dung nhieu hon seed.
+
+        ``max_uses`` > 0: bo clip da dung (tinh ca lease) >= ``max_uses`` video; phan con
+        lai khong du do dai video thi raise ``ClipStockExhausted`` thay vi dung lai clip
+        da cham gioi han. ``None``/0 = khong gioi han (nhu cu).
         """
         from src.db import media_repo
 
@@ -109,9 +118,22 @@ class ClipUsageLedger:
                 return counts.get(key, 0) + leased.get(key, 0)
 
             order = list(pool)
+            if max_uses and max_uses > 0:
+                order = [item for item in order if effective(item[0]) < max_uses]
+                # Moi clip chi lay 1 lan / video, nen tong do dai la tran tren cua 1 luot.
+                available = sum(
+                    float(dur) if unit is None else min(float(dur), float(unit))
+                    for _path, dur in {key_of(path): (path, dur) for path, dur in order}.values()
+                )
+                if available < target_duration:
+                    raise ClipStockExhausted(
+                        f"Khong du clip duoi {max_uses} lan dung: can {target_duration / 60:.1f} phut, "
+                        f"con {available / 60:.1f} phut ({len(order)}/{len(pool)} clip). "
+                        f"Hay tai them nguon video (Settings > Tu dong tim nguon) hoac chon them thu vien."
+                    )
             random.shuffle(order)
             order.sort(key=lambda item: effective(item[0]))  # stable: random within a tier
-            durations = dict(pool)
+            durations = dict(order)
 
             selection = ClipSelection(paths=[])
             taken: set[str] = set()  # clip keys already in this video

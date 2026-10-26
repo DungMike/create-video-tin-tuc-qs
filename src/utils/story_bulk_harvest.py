@@ -326,11 +326,23 @@ def start_harvest_job(
     max_per_keyword: int = 0,
     min_free_gb: float = 10.0,
     skip_used_keywords: bool = False,
+    use_page_cursor: bool = False,
+    skip_known_sources: bool = False,
+    max_total_videos: int = 0,
+    origin: str | None = None,
 ) -> dict:
     """Tao job va chay o daemon thread. Tra ve progress dict ban dau.
 
     ``skip_used_keywords`` (mac dinh tat = luong cu y nguyen): bo qua cac cap
     (tu khoa, provider) ma DB tu khoa (src/db/keyword_repo.py) ghi la da dung.
+
+    Cac co sau deu mac dinh tat (luong tu dong tim nguon bat):
+
+    - ``use_page_cursor``: bat dau o trang ke tiep da luu (src/db/video_cursor_repo.py),
+      bo qua cap da quet het, ghi lai trang sau moi trang.
+    - ``skip_known_sources``: bo video goc da co trong ``source_videos`` (moi thu vien).
+    - ``max_total_videos`` > 0: tai du so nay thi dung ca job (trang dang do giu
+      nguyen trong con tro de lan sau tai tiep).
     """
     clean_keywords = []
     seen = set()
@@ -389,6 +401,16 @@ def start_harvest_job(
         progress["skipUsedKeywords"] = True
         progress["skippedPairs"] = skipped_pairs
         progress["keywordCheck"] = keyword_check
+    if use_page_cursor:
+        progress["usePageCursor"] = True
+        progress["cursorSkipped"] = 0
+    if skip_known_sources:
+        progress["skipKnownSources"] = True
+        progress["skippedKnown"] = 0
+    if max_total_videos and int(max_total_videos) > 0:
+        progress["maxTotalVideos"] = int(max_total_videos)
+    if origin:
+        progress["origin"] = str(origin)
     _save_progress(job_id, progress)
     _save_manifest(job_id, {"jobId": job_id, "items": []})
 
@@ -475,6 +497,14 @@ def _run_harvest(job_id: str, min_free_gb: float, start_index: int = 0):
             pending_writes = 0
         _save_progress(job_id, progress)
 
+    # Co cua luong tu dong tim nguon (mac dinh tat = luong cu y nguyen).
+    use_cursor = bool(progress.get("usePageCursor"))
+    skip_known = bool(progress.get("skipKnownSources"))
+    max_total = int(progress.get("maxTotalVideos") or 0)
+    budget_reached = False
+    if use_cursor:
+        from src.db import video_cursor_repo
+
     try:
         keywords = progress["keywords"]
         # Chay tiep thi bo qua cac tu khoa da xong: search moi trang deu ton
@@ -491,6 +521,15 @@ def _run_harvest(job_id: str, min_free_gb: float, start_index: int = 0):
                 progress["currentProvider"] = provider
                 taken = 0
                 page = 1
+                per_page_arg = None
+                if use_cursor:
+                    position = video_cursor_repo.start_position(
+                        video_cursor_repo.get_cursor(provider, keyword), provider,
+                    )
+                    if position["exhausted"]:
+                        progress["cursorSkipped"] = int(progress.get("cursorSkipped") or 0) + 1
+                        continue
+                    page, per_page_arg = position["page"], position["per_page"]
                 # Ly do vong trang ket thuc, de ghi DB tu khoa: mac dinh la do dang
                 # (het quota / cham _MAX_PAGES_PER_QUERY).
                 sweep_status = "partial"
@@ -508,7 +547,7 @@ def _run_harvest(job_id: str, min_free_gb: float, start_index: int = 0):
                             provider,
                             keyword,
                             page,
-                            per_page=None,
+                            per_page=per_page_arg,
                             orientation="landscape" if progress.get("landscapeOnly") else None,
                         )
                     except PexelsQuotaExhausted as exc:
@@ -527,10 +566,26 @@ def _run_harvest(job_id: str, min_free_gb: float, start_index: int = 0):
                     total = int(response.get("total") or 0)
                     sweep_total = total
 
+                    known: set[str] = set()
+                    if skip_known:
+                        from src.db.media_repo import find_known_source_keys
+
+                        known = find_known_source_keys(
+                            f"{provider}:{str(item.get('id') or '').strip()}" for item in results
+                        )
+                    # Chi co nghia voi con tro trang: dung giua trang thi lan sau tai lai trang nay.
+                    stopped_mid_page = False
+                    page_new = 0
+                    page_known = 0
+
                     for item in results:
                         if is_harvest_cancel_requested(job_id):
                             raise _HarvestCancelled()
                         if progress["maxPerKeyword"] and taken >= progress["maxPerKeyword"]:
+                            stopped_mid_page = True
+                            break
+                        if max_total and progress["downloaded"] >= max_total:
+                            stopped_mid_page = True
                             break
 
                         video_id = str(item.get("id") or "").strip()
@@ -548,6 +603,11 @@ def _run_harvest(job_id: str, min_free_gb: float, start_index: int = 0):
                         key = f"{provider}:{video_id}"
                         if key in seen_keys:
                             progress["skipped"] += 1
+                            continue
+                        if key in known:
+                            progress["skipped"] += 1
+                            progress["skippedKnown"] = int(progress.get("skippedKnown") or 0) + 1
+                            page_known += 1
                             continue
 
                         if _free_bytes(dest_dir) < min_free_bytes:
@@ -600,19 +660,38 @@ def _run_harvest(job_id: str, min_free_gb: float, start_index: int = 0):
                         })
                         progress["downloaded"] += 1
                         progress["bytesDownloaded"] += size_bytes
+                        page_new += 1
                         pending_writes += 1
                         flush()
+
+                    keyword_done = not results or page * per_page >= total
+                    if use_cursor:
+                        cursor_state = video_cursor_repo.record_page(
+                            provider, keyword,
+                            page=page, per_page=per_page, total=total, raw_count=len(results),
+                            new_count=page_new, known_count=page_known,
+                            page_done=not stopped_mid_page, job_id=job_id,
+                        )
+                        keyword_done = keyword_done or cursor_state["exhausted"]
 
                     if progress["maxPerKeyword"] and taken >= progress["maxPerKeyword"]:
                         sweep_status = "limited"
                         break
-                    if not results or page * per_page >= total:
+                    if keyword_done and not stopped_mid_page:
                         sweep_status = "completed"
+                        break
+                    if max_total and progress["downloaded"] >= max_total:
+                        # Tu khoa chua xong: "partial" khong chan lan sau, con tro di tiep.
+                        budget_reached = True
                         break
                     page += 1
 
                 flush(force=True)
                 _report_keyword_sweep(provider, keyword, sweep_status, sweep_total, taken)
+                if budget_reached:
+                    break
+            if budget_reached:
+                break
 
         progress["keywordIndex"] = progress["keywordTotal"]
         progress["status"] = "completed"
@@ -620,6 +699,9 @@ def _run_harvest(job_id: str, min_free_gb: float, start_index: int = 0):
             f"Hoan tat! Da tai {progress['downloaded']} video "
             f"({progress['searchRequests']} request search). Chuyen sang buoc chon loc."
         )
+        if budget_reached:
+            progress["budgetReached"] = True
+            progress["message"] += f" Dung o gioi han {max_total} video/luot."
         if quota_stopped:
             # Ket qua khong day du: phai noi ra, khong de "Hoan tat!" che mat.
             progress["quotaStopped"] = quota_stopped
